@@ -163,4 +163,122 @@ with st.sidebar:
     st.image("https://cdn-icons-png.flaticon.com/512/2966/2966327.png", width=60)
     st.caption("V23.0 Smart Row Search")
     app_mode = st.radio("Navigation", ["User Workstation", "Supervisor Config"])
-    st.write("--
+    st.write("---")
+    if st.button("Reset Extras"):
+        st.session_state.extra=[]
+        st.rerun()
+
+# ==========================================
+# 4. ADMIN PAGE
+# ==========================================
+if app_mode == "Supervisor Config":
+    st.title("🛠️ Master Config (Intelligent Scanner)")
+    pwd = st.text_input("Enter Password", type="password")
+    
+    if pwd == "admin123":
+        t1, t2 = st.tabs(["Panel 11", "Screening"])
+        with t1:
+            st.info("Upload the Bio-Rad Sheet. The system will auto-detect headers even if they are in row 2 or 3.")
+            up = st.file_uploader("Upload Excel", type=['xlsx'])
+            
+            if up:
+                try:
+                    # RUN SMART PARSER
+                    df_smart = smart_parse_excel(up)
+                    st.session_state.panel_11 = df_smart
+                    st.success("✅ File Parsed Successfully! Check below:")
+                    
+                    # Force Rerun to update table
+                    st.rerun()
+                    
+                except Exception as e:
+                    st.error(f"Parser Failed: {e}")
+            
+            st.write("### Current Data:")
+            edited = st.data_editor(st.session_state.panel_11, hide_index=True, use_container_width=True, height=450)
+            if st.button("Save Manual Edits"):
+                st.session_state.panel_11 = edited
+                st.success("Saved.")
+
+        with t2:
+            st.session_state.panel_3 = st.data_editor(st.session_state.panel_3, hide_index=True)
+            
+    elif pwd: st.error("Wrong Password")
+
+# ==========================================
+# 5. USER WORKSTATION
+# ==========================================
+else:
+    st.markdown("""<div class='hospital-header'><h1>Maternity & Children Hospital - Tabuk</h1><h4>Serology Workstation</h4></div>""", unsafe_allow_html=True)
+    c1,c2,c3,c4 = st.columns(4)
+    nm=c1.text_input("Name"); mrn=c2.text_input("MRN"); tc=c3.text_input("Tech"); dt=c4.date_input("Date")
+    st.divider()
+    
+    L,R = st.columns([1,2])
+    with L:
+        st.subheader("1. Control")
+        ac=st.radio("AC", ["Negative","Positive"])
+        if ac=="Positive": st.error("STOP: Check DAT."); st.stop()
+        for x in ["I","II","III"]:
+            k=f"s{x}"
+            st.session_state.inputs_s[k]=st.selectbox(f"Scn {x}",["Neg","w+","1+","2+"], key=f"s_{k}")
+        st.write("---")
+        if st.button("Set Neg"): bulk("Neg")
+        if st.button("Set Pos"): bulk("2+")
+    with R:
+        st.subheader("2. Panel Reactions")
+        g=st.columns(6)
+        in_map={}
+        for i in range(1,12):
+            k=f"c{i}"
+            v=g[(i-1)%6].selectbox(f"C{i}",["Neg","w+","1+","2+","3+"],key=f"u_{i}",index=["Neg","w+","1+","2+","3+"].index(st.session_state.inputs[k]))
+            st.session_state.inputs[k]=v
+            in_map[i]=0 if v=="Neg" else 1
+            
+    st.divider()
+    if st.checkbox("Run Analysis"):
+        r11=[st.session_state.panel_11.iloc[i].to_dict() for i in range(11)]
+        r3=[st.session_state.panel_3.iloc[i].to_dict() for i in range(3)]
+        ruled=set()
+        for ag in antigens_order:
+            for idx,sc in in_map.items():
+                if sc==0 and can_rule_out(ag, r11[idx-1]): ruled.add(ag); break
+        
+        sm={"I":0,"II":1,"III":2}
+        for k,v in st.session_state.inputs_s.items():
+            if v=="Neg":
+                for ag in antigens_order:
+                    if ag not in ruled and can_rule_out(ag, r3[sm[k[1:]]]): ruled.add(ag)
+        
+        matches=[]
+        for cand in [x for x in antigens_order if x not in ruled]:
+            mis=False
+            for idx,sc in in_map.items():
+                if sc>0 and r11[idx-1].get(cand,0)==0: mis=True
+            if not mis: matches.append(cand)
+            
+        if not matches: st.error("Inconclusive.")
+        else:
+            allow=True
+            for m in matches:
+                pas,p,n,met = check_r3(m, r11, st.session_state.inputs, r3, st.session_state.inputs_s, st.session_state.extra)
+                st.markdown(f"<div class='status-{'pass' if pas else 'fail'}'><b>Anti-{m}:</b> {met} ({p}/{n})</div>", unsafe_allow_html=True)
+                if not pas: allow=False
+            
+            if allow:
+                if st.button("🖨️ Report"):
+                    rpt=f"<div class='print-only'><br><center><h2>MCH Tabuk</h2></center><div class='results-box'><b>Pt:</b> {nm}<br><b>Result:</b> Anti-{', '.join(matches)} Detected.<br>Probability Valid.<br><br>Sig: ___________</div><div class='consultant-footer'><span style='color:darkred;font-weight:bold'>Dr. Haitham Ismail</span></div></div><script>window.print()</script>"
+                    st.markdown(rpt, unsafe_allow_html=True)
+            else:
+                st.warning("Add Cells to confirm:")
+                with st.expander("Add Cell"):
+                    xc1,xc2=st.columns(2)
+                    id_x=xc1.text_input("ID"); res_x=xc2.selectbox("Res",["Neg","Pos"])
+                    ph_x={}
+                    xc3=st.columns(len(matches))
+                    for i,mm in enumerate(matches):
+                        rr=xc3[i].radio(mm,["+","0"],key=f"ex_{mm}")
+                        ph_x[mm]=1 if rr=="+" else 0
+                    if st.button("Add"):
+                        st.session_state.extra.append({"src":id_x,"score":1 if res_x=="Pos" else 0,"pheno":ph_x,"s":1 if res_x=="Pos" else 0})
+                        st.rerun()
