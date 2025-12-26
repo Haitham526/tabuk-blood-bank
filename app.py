@@ -3,359 +3,228 @@ import pandas as pd
 import io
 from datetime import date
 
-# ==========================================
-# 1. إعدادات الصفحة والتصميم
-# ==========================================
+# ---------------- CONFIG & STYLE ----------------
 st.set_page_config(page_title="MCH Tabuk - Serology", layout="wide", page_icon="🩸")
+st.markdown("""<style>@media print {.stApp > header, .sidebar, footer, .no-print { display: none !important; } .block-container { padding: 0 !important; } .print-only { display: block !important; } .results-box { border: 2px solid #333; padding: 15px; margin-top: 10px; font-family: 'Times New Roman'; } .consultant-footer { position: fixed; bottom: 0; width: 100%; text-align: center; border-top: 1px solid #ccc; padding: 10px; } } .hospital-header { text-align: center; border-bottom: 5px solid #005f73; padding-bottom: 10px; font-family: 'Arial'; color: #003366; } .status-pass { background-color: #d1e7dd; padding: 8px; border-radius: 5px; color: #0f5132; } .status-fail { background-color: #f8d7da; padding: 8px; border-radius: 5px; color: #842029; } div[data-testid="stDataEditor"] table { width: 100% !important; }</style>""", unsafe_allow_html=True)
+st.markdown("<div class='print-only' style='display:none'></div>", unsafe_allow_html=True) 
 
-st.markdown("""
-<style>
-    @media print {
-        .stApp > header, .sidebar, footer, .no-print, .element-container:has(button) { display: none !important; }
-        .block-container { padding: 0 !important; }
-        .print-only { display: block !important; }
-        .results-box { border: 2px solid #333; padding: 15px; margin-top: 10px; font-family: 'Times New Roman'; }
-        .footer-print { position: fixed; bottom: 0; width: 100%; text-align: center; font-size: 10px; border-top: 1px solid #ccc; }
-    }
-    
-    .hospital-header { text-align: center; border-bottom: 5px solid #005f73; padding-bottom: 10px; font-family: 'Arial'; color: #003366; }
-    
-    div[data-testid="stDataEditor"] table { width: 100% !important; }
-    
-    .status-pass { background-color: #d1e7dd; padding: 8px; border-radius: 5px; color: #0f5132; border: 1px solid #a3cfbb; }
-    .status-fail { background-color: #f8d7da; padding: 8px; border-radius: 5px; color: #842029; border: 1px solid #f1aeb5; }
-    
-    .signature-badge {
-        position: fixed; bottom: 10px; right: 15px;
-        font-family: 'Georgia', serif; font-size: 12px; color: #8B0000;
-        background: rgba(255,255,255,0.95); padding: 5px 10px; border: 1px solid #eecaca; z-index: 99;
-    }
-</style>
-""", unsafe_allow_html=True)
+# ---------------- DEFINITIONS ----------------
+ANTIGENS = ["D", "C", "E", "c", "e", "Cw", "K", "k", "Kpa", "Kpb", "Jsa", "Jsb", "Fya", "Fyb", "Jka", "Jkb", "Lea", "Leb", "P1", "M", "N", "S", "s", "Lua", "Lub", "Xga"]
+DOSAGE_AGS = ["C", "c", "E", "e", "Fya", "Fyb", "Jka", "Jkb", "M", "N", "S", "s"]
+PAIRS = {'C':'c', 'c':'C', 'E':'e', 'e':'E', 'K':'k', 'k':'K', 'Fya':'Fyb', 'Fyb':'Fya', 'Jka':'Jkb', 'Jkb':'Jka', 'M':'N', 'N':'M', 'S':'s', 's':'S'}
 
-# الفوتر والتوقيع
-st.markdown("<div class='signature-badge no-print'><b>Dr. Haitham Ismail</b><br>Clinical Hematology/Transfusion Consultant</div>", unsafe_allow_html=True)
+# ---------------- STATE INIT ----------------
+if 'p11' not in st.session_state: st.session_state.p11 = pd.DataFrame([{"ID": f"Cell {i+1}", **{ag: 0 for ag in ANTIGENS}} for i in range(11)])
+if 'p3' not in st.session_state: st.session_state.p3 = pd.DataFrame([{"ID": f"Scn {i}", **{ag: 0 for ag in ANTIGENS}} for i in ["I", "II", "III"]])
+if 'inputs' not in st.session_state: st.session_state.inputs = {f"c{i}": "Neg" for i in range(1, 12)}
+if 'inputs_s' not in st.session_state: st.session_state.inputs_s = {f"s{i}": "Neg" for i in ["I", "II", "III"]}
+if 'extra' not in st.session_state: st.session_state.extra = []
 
-# التعريفات (تمت كتابتها بحرص لمنع الأخطاء)
-antigens_order = [
-    "D", "C", "E", "c", "e", "Cw", 
-    "K", "k", "Kpa", "Kpb", "Jsa", "Jsb", 
-    "Fya", "Fyb", "Jka", "Jkb", "Lea", "Leb", 
-    "P1", "M", "N", "S", "s", "Lua", "Lub", "Xga"
-]
+# ---------------- LOGIC FUNCTIONS ----------------
+def clean_str(val):
+    return str(val).upper().replace("(","").replace(")","").replace(" ","").strip()
 
-allele_pairs = {'C':'c', 'c':'C', 'E':'e', 'e':'E', 'K':'k', 'k':'K', 'Fya':'Fyb', 'Fyb':'Fya', 'Jka':'Jkb', 'Jkb':'Jka', 'M':'N', 'N':'M', 'S':'s', 's':'S'}
-STRICT_DOSAGE = ["C", "c", "E", "e", "Fya", "Fyb", "Jka", "Jkb", "M", "N", "S", "s"]
-
-# ==========================================
-# 2. تهيئة الذاكرة (SESSION STATE)
-# ==========================================
-if 'panel_11' not in st.session_state:
-    st.session_state.panel_11 = pd.DataFrame([{"ID": f"Cell {i+1}", **{ag: 0 for ag in antigens_order}} for i in range(11)])
-
-if 'panel_3' not in st.session_state:
-    st.session_state.panel_3 = pd.DataFrame([{"ID": f"Scn {i}", **{ag: 0 for ag in antigens_order}} for i in ["I", "II", "III"]])
-
-if 'inputs' not in st.session_state:
-    st.session_state.inputs = {f"c{i}": "Neg" for i in range(1, 12)}
-
-if 'inputs_s' not in st.session_state:
-    st.session_state.inputs_s = {f"s{i}": "Neg" for i in ["I", "II", "III"]}
-
-if 'extra_cells' not in st.session_state:
-    st.session_state.extra_cells = []
-
-# ==========================================
-# 3. وظائف النظام (PARSERS & LOGIC)
-# ==========================================
-def normalize_val(val):
+def normalize(val):
     s = str(val).lower().strip()
-    # يدعم 1, +, +w, Pos, Yes
     return 1 if any(x in s for x in ['+', '1', 'pos', 'yes', 'w']) else 0
 
-def smart_parser_all_sheets(file_bytes, row_limit):
-    """
-    يبحث في كل صفحات الإكسيل عن العناوين (D, C, E) ويسحب البيانات تحتها
-    بغض النظر عن التنسيق.
-    """
-    xls = pd.ExcelFile(file_bytes)
-    
-    for sheet in xls.sheet_names:
-        try:
+def robust_excel_parser(file_bytes, limit=11):
+    try:
+        xls = pd.ExcelFile(file_bytes)
+        # Iterate all sheets
+        for sheet in xls.sheet_names:
             df = pd.read_excel(file_bytes, sheet_name=sheet, header=None)
             
-            # 1. البحث عن سطر العناوين
-            header_idx = -1
-            col_map = {}
+            # SCAN for Header Coordinates
+            col_map = {} 
+            max_r = min(len(df), 30)
+            max_c = min(len(df.columns), 60)
             
-            # نمسح أول 20 سطر
-            for r in range(min(20, len(df))):
-                temp_map = {}
-                matches = 0
-                for c in range(len(df.columns)):
-                    val = str(df.iloc[r, c]).strip().replace("\n","").replace(" ","")
+            # Search Grid
+            for r in range(max_r):
+                for c in range(max_c):
+                    val = clean_str(df.iloc[r, c])
+                    det = None
+                    if val in ANTIGENS: det = val
+                    elif val in ["RHD","D"]: det = "D"
+                    elif val in ["RHC","C"]: det = "C"
+                    elif val in ["RHE","E"]: det = "E"
                     
-                    real_ag = None
-                    # بحث دقيق
-                    if val in antigens_order: real_ag = val
-                    elif val.upper() in ["RHD","D"]: real_ag = "D"
-                    elif val.upper() in ["RHC","C"]: real_ag = "C" # Case matters? usually headers are caps
-                    elif val.upper() in ["RHE","E"]: real_ag = "E"
-                    
-                    # Fuzzy match for C vs c check later if needed
-                    # هنا نفترض التطابق المباشر أو التحسينات
-                    
-                    if real_ag:
-                        temp_map[real_ag] = c
-                        matches += 1
-                
-                if matches >= 4: # لو لقينا 4 انتيجينات على الأقل في السطر
-                    header_idx = r
-                    col_map = temp_map
-                    # توسيع البحث في نفس السطر لباقي الانتيجينات
-                    for c2 in range(len(df.columns)):
-                        v2 = str(df.iloc[r, c2]).strip().replace(" ","")
-                        if v2 in antigens_order and v2 not in col_map:
-                            col_map[v2] = c2
-                    break
-            
-            # 2. استخراج البيانات
-            if header_idx != -1:
-                final_data = []
-                curr_row = header_idx + 1
-                extracted = 0
-                
-                while extracted < row_limit and curr_row < len(df):
-                    # التحقق هل الصف يحتوي بيانات (بفحص عمود D أو C)
-                    # نتخطى الصفوف الفارغة أو الخطوط
-                    
-                    check_cols = [col_map.get("D"), col_map.get("C")]
-                    check_cols = [x for x in check_cols if x is not None]
-                    
-                    has_data = False
-                    for cc in check_cols:
-                        v_check = str(df.iloc[curr_row, cc]).lower()
-                        if any(x in v_check for x in ['0', '1', '+', 'w']):
-                            has_data = True
-                            break
-                    
-                    if has_data:
-                        r_data = {"ID": f"Cell {extracted+1}" if row_limit > 3 else f"Scn {['I','II','III'][extracted]}"}
-                        for ag in antigens_order:
-                            val = 0
-                            if ag in col_map:
-                                val = normalize_val(df.iloc[curr_row, col_map[ag]])
-                            r_data[ag] = int(val)
-                        final_data.append(r_data)
-                        extracted += 1
+                    if det and det not in col_map:
+                        col_map[det] = c
                         
-                    curr_row += 1
+            # If valid table found
+            if len(col_map) >= 3:
+                # Assuming data starts after the row where we found 'D' or 'C'
+                start_row = 0
+                # Find max row index of headers
+                # We can approximate. Lets find where D is.
+                # Heuristic: Scan downwards from row 0
                 
-                if extracted >= row_limit:
-                    return pd.DataFrame(final_data), f"تم استيراد {extracted} خلايا بنجاح من ورقة {sheet}"
+                rows_data = []
+                extracted = 0
+                r_curr = 0
+                
+                while extracted < limit and r_curr < len(df):
+                    # Check if this row has data in D column
+                    if "D" in col_map:
+                        col_d = col_map["D"]
+                        check_val = str(df.iloc[r_curr, col_d]).lower()
+                        # If value looks like data
+                        if any(x in check_val for x in ['0','1','+','w']):
+                            row_d = {"ID": f"C-{extracted+1}"}
+                            for ag in ANTIGENS:
+                                v = 0
+                                if ag in col_map:
+                                    v = normalize(df.iloc[r_curr, col_map[ag]])
+                                row_d[ag] = int(v)
+                            rows_data.append(row_d)
+                            extracted += 1
+                    r_curr += 1
+                
+                if extracted >= limit:
+                    return pd.DataFrame(rows_data), f"Loaded from {sheet}"
                     
-        except:
-            continue
+        return None, "Structure not found in any sheet."
+    except Exception as e:
+        return None, f"Error: {str(e)}"
 
-    return None, "لم يتم العثور على جدول مطابق في الملف."
-
-def can_rule_out(ag, pheno):
-    if pheno.get(ag, 0) == 0: return False
-    if ag in STRICT_DOSAGE:
-        partner = allele_pairs.get(ag)
-        if partner and pheno.get(partner, 0) == 1: return False
+def check_dosage(ag, ph):
+    if ph.get(ag,0)==0: return False
+    if ag in DOSAGE_AGS:
+        partner = PAIRS.get(ag)
+        if partner and ph.get(partner,0)==1: return False
     return True
 
-def check_r3_stats(cand, rows_p, inputs_p, rows_s, inputs_s, extra):
-    p_cnt, n_cnt = 0, 0
-    # Panel (11)
-    for i in range(1, 12):
-        s = 1 if inputs_p[i] != "Neg" else 0
-        h = rows_p[i-1].get(cand, 0)
-        if h==1 and s==1: p_cnt += 1
-        if h==0 and s==0: n_cnt += 1
-    # Screen (3)
-    for i, l in enumerate(["I","II","III"]):
-        s = 1 if inputs_s[f"s{l}"] != "Neg" else 0
-        h = rows_s[i].get(cand, 0)
-        if h==1 and s==1: p_cnt += 1
-        if h==0 and s==0: n_cnt += 1
+def validate_rule3(cand, rp, ip, rs, Is, ex):
+    p, n = 0, 0
+    # Panel
+    for i in range(1,12):
+        s = 1 if ip[i]!="Neg" else 0
+        h = rp[i-1].get(cand,0)
+        if h==1 and s==1: p+=1
+        if h==0 and s==0: n+=1
+    # Screen
+    scrs = ["I","II","III"]
+    for i, label in enumerate(scrs):
+        s = 1 if Is[f"s{label}"]!="Neg" else 0
+        h = rs[i].get(cand,0)
+        if h==1 and s==1: p+=1
+        if h==0 and s==0: n+=1
     # Extra
-    for c in extra:
-        if c['s']==1 and c['p'].get(cand,0)==1: p_cnt += 1
-        if c['s']==0 and c['p'].get(cand,0)==0: n_cnt += 1
-    
-    passed = (p_cnt >= 3 and n_cnt >= 3) or (p_cnt >= 2 and n_cnt >= 3)
-    method = "Standard Rule" if (p_cnt >=3 and n_cnt>=3) else "Modified Rule"
-    if not passed: method = "Not Met"
-    
-    return passed, p_cnt, n_cnt, method
+    for c in ex:
+        if c['res']==1 and c['ph'].get(cand,0)==1: p+=1
+        if c['res']==0 and c['ph'].get(cand,0)==0: n+=1
+        
+    pass_rule = (p>=3 and n>=3) or (p>=2 and n>=3)
+    msg = "Standard (3/3)" if (p>=3 and n>=3) else ("Modified" if pass_rule else "Not Met")
+    return pass_rule, p, n, msg
 
-def set_bulk(v):
-    for i in range(1, 12): st.session_state.inputs[f"c{i}"] = v
-
-# ==========================================
-# 4. القائمة الجانبية
-# ==========================================
+# ---------------- SIDEBAR ----------------
 with st.sidebar:
-    st.image("https://cdn-icons-png.flaticon.com/512/2966/2966327.png", width=60)
-    nav = st.radio("القائمة:", ["User Workstation", "Supervisor Config"])
-    st.divider()
-    if st.button("🗑️ Reset All Data"):
-        st.session_state.extra_cells = []
+    st.title("Blood Bank")
+    nav = st.radio("Menu", ["Workstation", "Admin Config"])
+    if st.button("Reset All"): 
+        st.session_state.extra=[]
         st.rerun()
 
-# ==========================================
-# 5. صفحة الأدمن (SUPERVISOR)
-# ==========================================
-if nav == "Supervisor Config":
-    st.title("🛠️ Master Configuration")
-    if st.text_input("Admin Password", type="password") == "admin123":
-        
-        tab1, tab2 = st.tabs(["Panel (11 Cells)", "Screening (3 Cells)"])
-        
-        # TAB 1: Panel Upload
-        with tab1:
-            st.info("Upload PDF-Converted Excel for the Main Panel")
-            up1 = st.file_uploader("Upload Panel 11", type=["xlsx"], key="up1")
-            
-            if up1:
-                df_new, msg = smart_parser_all_sheets(io.BytesIO(up1.getvalue()), 11)
-                if df_new is not None:
-                    st.success(f"✅ {msg}")
-                    st.session_state.panel_11 = df_new
-                    st.button("تحديث العرض")
-                else:
-                    st.error(f"❌ {msg}")
-            
-            st.write("#### Live Grid Editor:")
-            edited_p11 = st.data_editor(st.session_state.panel_11.fillna(0), height=400, hide_index=True, use_container_width=True)
-            if st.button("Save Panel Changes"):
-                st.session_state.panel_11 = edited_p11
-                st.success("Saved.")
-
-        # TAB 2: Screen Upload
-        with tab2:
-            st.info("Upload Screening Cells File (If available)")
-            up2 = st.file_uploader("Upload Screen 3", type=["xlsx"], key="up2")
-            
+# ---------------- ADMIN ----------------
+if nav == "Admin Config":
+    st.title("Admin Panel")
+    pwd = st.text_input("Password", type="password")
+    if pwd == "admin123":
+        t1, t2 = st.tabs(["Panel 11", "Screen"])
+        with t1:
+            up = st.file_uploader("Upload Excel", type=["xlsx"])
+            if up:
+                df, msg = robust_excel_parser(io.BytesIO(up.getvalue()), 11)
+                if df is not None:
+                    st.success(msg)
+                    st.session_state.p11 = df
+                    st.rerun()
+                else: st.error(msg)
+            st.session_state.p11 = st.data_editor(st.session_state.p11, hide_index=True)
+        with t2:
+            up2 = st.file_uploader("Upload Screen", type=["xlsx"])
             if up2:
-                df_scr, msg_s = smart_parser_all_sheets(io.BytesIO(up2.getvalue()), 3)
-                if df_scr is not None:
-                    st.success(f"✅ {msg_s}")
-                    st.session_state.panel_3 = df_scr
-                    st.button("تحديث العرض 2")
-                else:
-                    st.error(f"❌ {msg_s}")
-            
-            st.write("#### Screening Grid:")
-            edited_p3 = st.data_editor(st.session_state.panel_3.fillna(0), height=200, hide_index=True, use_container_width=True)
-            if st.button("Save Screen Changes"):
-                st.session_state.panel_3 = edited_p3
-                st.success("Saved.")
+                df2, msg2 = robust_excel_parser(io.BytesIO(up2.getvalue()), 3)
+                if df2 is not None:
+                    st.session_state.p3 = df2
+                    st.rerun()
+            st.session_state.p3 = st.data_editor(st.session_state.p3, hide_index=True)
 
-# ==========================================
-# 6. صفحة العمل (USER)
-# ==========================================
+# ---------------- USER ----------------
 else:
-    st.markdown("""<div class='hospital-header'><h1>Maternity & Children Hospital - Tabuk</h1><h4>Serology Workstation</h4></div>""", unsafe_allow_html=True)
-    
-    # Patient
+    st.markdown("<center><h2>Maternity & Children Hospital - Tabuk</h2><h4>Serology Unit</h4></center><hr>", unsafe_allow_html=True)
     c1,c2,c3,c4 = st.columns(4)
-    p_name=c1.text_input("Patient Name"); p_mrn=c2.text_input("MRN"); p_tech=c3.text_input("Tech"); p_date=c4.date_input("Date")
-    st.divider()
+    nm=c1.text_input("Name"); mrn=c2.text_input("MRN"); tc=c3.text_input("Tech"); dt=c4.date_input("Date")
     
-    # Entry
-    colL, colR = st.columns([1, 2])
-    
-    with colL:
-        st.subheader("1. Screen / Control")
-        # Auto Control
-        ac_v = st.radio("AC", ["Negative", "Positive"], horizontal=True)
-        if ac_v == "Positive": st.error("🚨 STOP: AC Positive -> DAT Required"); st.stop()
-        
-        st.write("---")
-        # Screen
-        for l in ["I", "II", "III"]:
-            k = f"s{l}"
-            st.session_state.inputs_s[k] = st.selectbox(f"Scn {l}", ["Neg", "w+", "1+", "2+", "3+"], key=f"sel_{k}")
-        
-        st.write("---")
-        if st.button("Set Neg"): set_bulk("Neg")
-        if st.button("Set Pos"): set_bulk("2+")
-
-    with colR:
-        st.subheader("2. Panel Results")
-        # Grid inputs
-        grid_cols = st.columns(6)
-        in_p_map = {}
+    st.write("### 1. Results")
+    L, R = st.columns([1, 2.5])
+    with L:
+        st.caption("Screen & Auto")
+        ac = st.radio("Auto Control", ["Neg", "Pos"])
+        if ac == "Pos": st.error("DAT Required"); st.stop()
+        for x in ["I","II","III"]: st.session_state.inputs_s[f"s{x}"]=st.selectbox(x, ["Neg","Pos"], key=f"k{x}")
+    with R:
+        st.caption("ID Panel")
+        cols = st.columns(6)
+        in_map = {}
         for i in range(1, 12):
             k = f"c{i}"
-            v = grid_cols[(i-1)%6].selectbox(f"C{i}", ["Neg", "w+", "1+", "2+", "3+"], key=f"pan_{i}", index=["Neg", "w+", "1+", "2+", "3+"].index(st.session_state.inputs[k]))
+            v = cols[(i-1)%6].selectbox(f"{i}", ["Neg", "Pos"], key=f"p{i}")
             st.session_state.inputs[k] = v
-            in_p_map[i] = 0 if v == "Neg" else 1
-
-    # Analysis
-    st.divider()
-    if st.checkbox("🔍 Analyze"):
-        # Safe read rows
-        rp11 = [st.session_state.panel_11.iloc[i].to_dict() for i in range(11)]
-        rp3  = [st.session_state.panel_3.iloc[i].to_dict() for i in range(3)]
+            in_map[i] = 0 if v=="Neg" else 1
+            
+    if st.button("Analyze"):
+        r11 = [st.session_state.p11.iloc[i].to_dict() for i in range(11)]
+        r3  = [st.session_state.p3.iloc[i].to_dict() for i in range(3)]
+        ruled = set()
         
-        ruled_out = set()
+        # Exclusion (Panel)
+        for ag in ANTIGENS:
+            for idx, sc in in_map.items():
+                if sc==0 and check_dosage(ag, r11[idx-1]): ruled.add(ag); break
+        # Exclusion (Screen)
+        smap = {"I":0,"II":1,"III":2}
+        for k, v in st.session_state.inputs_s.items():
+            if v=="Neg":
+                sidx = smap[k[1:]]
+                for ag in ANTIGENS:
+                    if ag not in ruled and check_dosage(ag, r3[sidx]): ruled.add(ag)
         
-        # 1. Exclude from Panel
-        for ag in antigens_order:
-            for i, score in in_p_map.items():
-                if score == 0:
-                    if can_rule_out(ag, rp11[i-1]):
-                        ruled_out.add(ag); break
-        
-        # 2. Exclude from Screen
-        scr_idx = {"I":0, "II":1, "III":2}
-        for k, v in st.session_state.inputs_s.items(): # k="sI"
-            if v == "Neg":
-                s_pheno = rp3[scr_idx[k[1:]]]
-                for ag in antigens_order:
-                    if ag not in ruled_out and can_rule_out(ag, s_pheno):
-                        ruled_out.add(ag)
-                        
-        candidates = [x for x in antigens_order if x not in ruled_out]
-        
-        # 3. Include (Match)
+        cands = [x for x in ANTIGENS if x not in ruled]
         matches = []
-        for c in candidates:
-            mismatch = False
-            for i, score in in_p_map.items():
-                if score > 0 and rp11[i-1].get(c, 0) == 0:
-                    mismatch = True
-            if not mismatch: matches.append(c)
+        for c in cands:
+            mis = False
+            for idx, sc in in_map.items():
+                if sc>0 and r11[idx-1].get(c,0)==0: mis=True
+            if not mis: matches.append(c)
             
-        # Display
-        if not matches:
-            st.error("❌ Inconclusive.")
+        if not matches: st.error("Inconclusive.")
         else:
-            allow_report = True
+            allow = True
             for m in matches:
-                ok, p, n, meth = check_r3_stats(m, rp11, st.session_state.inputs, rp3, st.session_state.inputs_s, st.session_state.extra_cells)
-                st.markdown(f"<div class='status-{'pass' if ok else 'fail'}'><b>Anti-{m}:</b> {meth} ({p} Pos / {n} Neg)</div>", unsafe_allow_html=True)
-                if not ok: allow_report = False
+                ok, p, n, txt = validate_rule3(m, r11, st.session_state.inputs, r3, st.session_state.inputs_s, st.session_state.extra)
+                cls = "pass" if ok else "fail"
+                st.markdown(f"<div class='status-{cls}'><b>Anti-{m}</b>: {txt} ({p} Pos/{n} Neg)</div>", unsafe_allow_html=True)
+                if not ok: allow=False
             
-            if allow_report:
-                if st.button("🖨️ Print Final Report"):
-                    html = f"""<div class='print-only'><br><center><h2>MCH Tabuk</h2></center><div class='results-box'><b>Pt:</b> {p_name} ({p_mrn})<br><b>Tech:</b> {p_tech}<hr><b>Conclusion:</b> Anti-{', '.join(matches)} Detected.<br>Probability met (p≤0.05).<br>Screening cells included in validation.<br><br><b>Sign:</b> ______________</div><div class='footer-print'>Dr. Haitham Ismail | Consultant</div></div><script>window.print()</script>"""
-                    st.markdown(html, unsafe_allow_html=True)
+            if allow:
+                rpt = f"""<div class='print-only'><br><center><h2>MCH Tabuk</h2></center><div class='results-box'><b>Pt:</b> {nm} | <b>MRN:</b> {mrn}<hr><b>Conclusion:</b> Anti-{', '.join(matches)} Detected.<br>Probability Confirmed (p<0.05).<br>Tech: {tc}</div><div class='consultant-footer'><span style='color:darkred;font-weight:bold'>Dr. Haitham Ismail</span></div></div><script>window.print()</script>"""
+                st.markdown(rpt, unsafe_allow_html=True)
             else:
-                st.info("⚠️ Rule not met. Add Selected Cell:")
-                with st.expander("Add Cell"):
-                    colx1, colx2 = st.columns(2)
-                    nid = colx1.text_input("ID")
-                    nres = colx2.selectbox("Result", ["Neg","Pos"])
-                    pht = {}
-                    cc = st.columns(len(matches))
-                    for i,mm in enumerate(matches):
-                        rr = cc[i].radio(mm, ["+","0"], key=f"ex_{mm}")
-                        pht[mm] = 1 if rr == "+" else 0
-                    if st.button("Add"):
-                        st.session_state.extra_cells.append({"src":nid, "score":1 if nres=="Pos" else 0, "pheno":pht, "s":1 if nres=="Pos" else 0})
-                        st.rerun()
+                st.warning("Add Cells:")
+                c1,c2 = st.columns(2)
+                id=c1.text_input("Lot"); rs=c2.selectbox("Res",["Neg","Pos"])
+                ph={}
+                cx = st.columns(len(matches))
+                for i,m in enumerate(matches):
+                    r = cx[i].checkbox(m, key=f"ex{m}")
+                    ph[m] = 1 if r else 0
+                if st.button("Add"):
+                    st.session_state.extra.append({"src":id, "res":1 if rs=="Pos" else 0, "ph":ph})
+                    st.rerun()
+
+# FOOTER
+st.markdown("<div class='consultant-footer no-print'>System V34.0 | <b>Dr. Haitham Ismail</b></div>", unsafe_allow_html=True)
