@@ -109,4 +109,167 @@ def matrix_parser(file_obj):
         row_dict = {"ID": f"Cell {count+1}"}
         
         # Check validity of row (look for 'D' value)
-        valid_row = Fa
+        valid_row = False
+        
+        # We fill values based on mapped columns
+        for ag in antigens_order:
+            val = 0
+            if ag in ag_col_map:
+                c_idx = ag_col_map[ag]
+                cell_content = str(df.iloc[curr, c_idx]).lower().strip()
+                
+                # Intelligent Value Parser
+                if cell_content in ['+', '1', 'pos', 'yes']: val = 1
+                elif '+w' in cell_content: val = 1  # YOUR FILE CASE
+                elif 'w' in cell_content: val = 1
+                
+                # Check if this row actually has data (not empty line)
+                if cell_content not in ['nan', '', 'none']: valid_row = True
+                
+            row_dict[ag] = val
+            
+        if valid_row:
+            final_data.append(row_dict)
+            count += 1
+            
+        curr += 1
+        
+    # If successful, return new DF
+    if len(final_data) > 0:
+        return pd.DataFrame(final_data), None
+    else:
+        return None, "Found headers but no data rows underneath."
+
+# Helper Logic
+def can_rule_out(ag, pheno):
+    if pheno.get(ag,0)==0: return False
+    if ag in STRICT_DOSAGE:
+        p=allele_pairs.get(ag)
+        if p and pheno.get(p,0)==1: return False
+    return True
+
+def bulk(v): 
+    for i in range(1,12): st.session_state.inputs[f"c{i}"]=v
+
+def check_r3(cand, rows, inpts, r3, in3, ex):
+    pr,nr=0,0
+    for i in range(1,12):
+        s=1 if inpts[i]!="Neg" else 0
+        h=rows[i-1].get(cand,0)
+        if h==1 and s==1: pr+=1
+        if h==0 and s==0: nr+=1
+    for i,s in enumerate(["I","II","III"]):
+        sc=1 if in3[f"s{s}"]!="Neg" else 0
+        h=r3[i].get(cand,0)
+        if h==1 and sc==1: pr+=1
+        if h==0 and sc==0: nr+=1
+    for c in ex:
+        if c['s']==1 and c['p'].get(cand,0)==1: pr+=1
+        if c['s']==0 and c['p'].get(cand,0)==0: nr+=1
+    res = (pr>=3 and nr>=3) or (pr>=2 and nr>=3)
+    mt="Standard" if (pr>=3 and nr>=3) else ("Modified" if res else "Fail")
+    return res,pr,nr,mt
+
+# ==========================================
+# 3. SIDEBAR & MENU
+# ==========================================
+with st.sidebar:
+    st.image("https://cdn-icons-png.flaticon.com/512/2966/2966327.png", width=60)
+    st.caption("V25.0 Matrix Mapper")
+    menu = st.radio("Navigation", ["User Workstation", "Supervisor Config"])
+    st.write("---")
+    if st.button("Reset All Extra Cells"):
+        st.session_state.extra = []
+        st.rerun()
+
+# ---------------- ADMIN ----------------
+if menu == "Supervisor Config":
+    st.title("🛠️ Master Configuration (Matrix Engine)")
+    pwd = st.text_input("Enter Admin Password", type="password")
+    
+    if pwd == "admin123":
+        t1, t2 = st.tabs(["Panel 11 Setup", "Screening Setup"])
+        
+        with t1:
+            st.info("ℹ️ Upload the PDF-converted Excel directly. The Matrix Mapper will find data even if columns are merged or shifted.")
+            up = st.file_uploader("Upload Excel File", type=["xlsx", "xls"])
+            
+            if up:
+                try:
+                    bytes_data = up.getvalue()
+                    
+                    # RUN MATRIX MAPPER
+                    df_new, err = matrix_parser(io.BytesIO(bytes_data))
+                    
+                    if df_new is not None:
+                        count = df_new.shape[1] - 1
+                        st.success(f"✅ Success! Extracted {count} Antigens.")
+                        st.session_state.panel_11 = df_new
+                        st.caption("Data loaded. Check grid below. If something is 0 but should be 1, edit it manually.")
+                        if st.button("🔄 Refresh Grid"): st.rerun()
+                    else:
+                        st.error(f"⚠️ Detection Error: {err}")
+                        with st.expander("Debug Raw File"):
+                            st.write("Python sees this raw data:")
+                            st.dataframe(pd.read_excel(io.BytesIO(bytes_data), header=None).head(15))
+                            
+                except Exception as e:
+                    st.error(f"Fatal Error: {e}")
+
+            st.write("#### Master Data Grid (Live Edit):")
+            safe_df = st.session_state.panel_11.fillna(0)
+            
+            edited = st.data_editor(
+                safe_df, 
+                height=450, 
+                use_container_width=True, 
+                hide_index=True
+            )
+            if st.button("Save Manual Edits"):
+                st.session_state.panel_11 = edited
+                st.success("Saved.")
+
+        with t2:
+            st.write("Configure Screening Cells:")
+            st.session_state.panel_3 = st.data_editor(st.session_state.panel_3, hide_index=True)
+            
+    elif pwd: st.error("Wrong Password")
+
+# ---------------- USER ----------------
+else:
+    st.markdown("""<div class='hospital-header'><h1>Maternity & Children Hospital - Tabuk</h1><h4>Serology Workstation</h4></div>""", unsafe_allow_html=True)
+    c1,c2,c3,c4 = st.columns(4)
+    nm=c1.text_input("Name"); mrn=c2.text_input("MRN"); tc=c3.text_input("Tech"); dt=c4.date_input("Date")
+    st.divider()
+    
+    L,R=st.columns([1,2])
+    with L:
+        st.subheader("1. Screen/Control")
+        ac=st.radio("AC", ["Negative","Positive"])
+        if ac=="Positive": st.error("DAT Required."); st.stop()
+        for x in ["I","II","III"]:
+            k=f"s{x}"
+            st.session_state.inputs_s[k]=st.selectbox(x,["Neg","w+","1+","2+"],key=f"u_{x}")
+        if st.button("Set Neg"): bulk("Neg")
+        if st.button("Set Pos"): bulk("2+")
+    
+    with R:
+        st.subheader("2. Panel")
+        mp={}
+        cols=st.columns(6)
+        for i in range(1,12):
+            k=f"c{i}"
+            v=cols[(i-1)%6].selectbox(f"C{i}",["Neg","w+","1+","2+","3+"],key=f"p_{i}",index=["Neg","w+","1+","2+","3+"].index(st.session_state.inputs[k]))
+            st.session_state.inputs[k]=v
+            mp[i]=0 if v=="Neg" else 1
+            
+    st.divider()
+    if st.checkbox("🔍 Analyze"):
+        r11=[st.session_state.panel_11.iloc[i].to_dict() for i in range(11)]
+        r3=[st.session_state.panel_3.iloc[i].to_dict() for i in range(3)]
+        ruled=set()
+        
+        # Exclusion
+        for ag in antigens_order:
+            for idx,sc in mp.items():
+                if sc==0 and
