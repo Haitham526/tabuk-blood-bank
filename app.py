@@ -3,258 +3,217 @@ import pandas as pd
 import io
 from datetime import date
 
-# ==========================================
-# 1. SETUP
-# ==========================================
-st.set_page_config(page_title="MCH Blood Bank", layout="wide", page_icon="🩸")
+# 1. BASE CONFIG
+st.set_page_config(page_title="Tabuk Blood Bank", layout="wide")
 
+# CSS لإصلاح عرض الجدول
 st.markdown("""
 <style>
-    @media print { .stApp > header, .sidebar, footer, .no-print { display: none !important; } .block-container { padding: 0 !important; } .print-only { display: block !important; } .results-box { border: 2px solid #333; padding: 20px; margin-top:20px; font-family: 'Times New Roman'; font-size:14px; } }
-    .print-only { display: none; }
-    div[data-testid="stDataEditor"] table { width: 100% !important; }
-    .status-pass { background-color: #d1e7dd; padding: 8px; border-radius: 5px; color: #0f5132; margin-bottom: 5px; }
-    .status-fail { background-color: #f8d7da; padding: 8px; border-radius: 5px; color: #842029; margin-bottom: 5px; }
-    .dr-sign { position: fixed; bottom: 5px; right: 10px; font-size: 11px; background: white; padding: 5px; border: 1px solid #ccc; z-index:99; }
+    .stApp > header {display:none;}
+    .block-container {padding-top: 1rem;}
+    div[data-testid="stDataEditor"] table {width: 100% !important;}
+    @media print {.no-print, .sidebar {display:none;}}
 </style>
 """, unsafe_allow_html=True)
 
-st.markdown("<div class='dr-sign no-print'>Dr. Haitham Ismail | Consultant</div>", unsafe_allow_html=True)
-
-# --- DEFINITIONS ---
+# definitions
 AGS = ["D","C","E","c","e","Cw","K","k","Kpa","Kpb","Jsa","Jsb","Fya","Fyb","Jka","Jkb","Lea","Leb","P1","M","N","S","s","Lua","Lub","Xga"]
 DOSAGE = ["C","c","E","e","Fya","Fyb","Jka","Jkb","M","N","S","s"]
 PAIRS = {'C':'c','c':'C','E':'e','e':'E','K':'k','k':'K','Fya':'Fyb','Fyb':'Fya','Jka':'Jkb','Jkb':'Jka','M':'N','N':'M','S':'s','s':'S'}
 
-# --- STATE ---
-if 'p11' not in st.session_state: st.session_state.p11 = pd.DataFrame([{"ID": f"Cell {i+1}", **{a:0 for a in AGS}} for i in range(11)])
-if 'p3' not in st.session_state: st.session_state.p3 = pd.DataFrame([{"ID": f"Scn {i}", **{a:0 for a in AGS}} for i in ["I","II","III"]])
-if 'res' not in st.session_state: st.session_state.res = {f"c{i}":"Neg" for i in range(1,12)}
-if 'scr' not in st.session_state: st.session_state.scr = {f"s{i}":"Neg" for i in ["I","II","III"]}
-if 'ext' not in st.session_state: st.session_state.ext = []
+# STATE initialization
+if 'p11' not in st.session_state:
+    # Initialize with clean Integers (0) not float/object
+    st.session_state.p11 = pd.DataFrame([{"ID": f"Cell {i+1}", **{a:0 for a in AGS}} for i in range(11)]).astype(object)
+    
+if 'inputs' not in st.session_state: st.session_state.inputs = {i:"Neg" for i in range(1,12)}
+if 'extra' not in st.session_state: st.session_state.extra = []
 
-# ==========================================
-# 2. LOGIC (SAME PARSER THAT WORKED + VISUAL FIX)
-# ==========================================
+# --- PARSER ENGINE (The One that Worked) ---
 def normalize(val):
     s = str(val).lower().strip()
-    return 1 if any(x in s for x in ['+','1','pos','yes','w']) else 0
+    return 1 if any(x in s for x in ['+','1','pos','w']) else 0
 
-def matrix_scan_final(file_bytes, limit_rows=11):
+def extract_excel_matrix(file):
     try:
-        xls = pd.ExcelFile(file_bytes)
+        xls = pd.ExcelFile(file)
+        # Search all sheets
         for sheet in xls.sheet_names:
-            df = pd.read_excel(file_bytes, sheet_name=sheet, header=None)
+            df = pd.read_excel(file, sheet_name=sheet, header=None)
             
-            # 1. MAP COLUMNS
-            col_coords = {}
-            header_row = -1
+            # Search Grid for Headers
+            col_map = {}
+            found_header = -1
             
             for r in range(min(30, len(df))):
-                matches = 0
-                temp = {}
+                row_matches = 0
+                temp_map = {}
                 for c in range(min(60, len(df.columns))):
+                    # Clean Cell Value
                     val = str(df.iloc[r, c]).strip().replace(" ","")
-                    
-                    # CASE SENSITIVE DETECT
                     det = None
-                    if val in ["c","C","e","E","k","K","s","S"]: det = val
-                    elif val.upper() == "D" or val.upper() == "RHD": det = "D"
-                    else:
-                        vup = val.upper()
-                        if vup in AGS: det = vup
                     
-                    if det: 
-                        temp[det] = c
-                        matches += 1
-                
-                if matches >= 3:
-                    header_row = r
-                    col_coords = temp
+                    # Logic to catch antigens (Case sensitive mostly kept, or Upper map)
+                    # Checking common ones
+                    v_up = val.upper()
+                    if v_up in AGS: 
+                        det = v_up # Map back to case if needed? For now lets grab index
+                    elif v_up == "RHD" or v_up=="D": det="D"
+                    elif val == "c": det="c"
+                    elif val == "C": det="C"
+                    
+                    if det:
+                        # Fix Case back to Standard AGS list
+                        for standard_ag in AGS:
+                            if standard_ag.upper() == det: det = standard_ag; break
+                        
+                        temp_map[det] = c
+                        row_matches += 1
+                        
+                if row_matches >= 3:
+                    found_header = r
+                    col_map = temp_map
+                    break # Header found
             
-            if len(col_coords) < 3: continue
-            
-            # 2. EXTRACT ROWS
-            start = header_row + 1
-            data = []
-            extracted = 0
-            curr = start
-            
-            while extracted < limit_rows and curr < len(df):
-                # Valid check using D or C
-                d_idx = col_coords.get("D") or col_coords.get("C")
-                is_valid = False
-                if d_idx is not None:
-                    check = str(df.iloc[curr, d_idx]).lower()
-                    if any(x in check for x in ['+','0','1','w']): is_valid=True
+            # If Header Found -> Extract Data
+            if found_header != -1:
+                final_data = []
+                extracted_count = 0
+                curr_row = found_header + 1
                 
-                if is_valid:
-                    lbl = f"Cell {extracted+1}" if limit_rows==11 else f"Scn {['I','II','III'][extracted]}"
-                    r_d = {"ID": lbl}
-                    for ag in AGS:
-                        v = 0
-                        if ag in col_coords:
-                            v = normalize(df.iloc[curr, col_coords[ag]])
-                        r_d[ag] = int(v)
-                    data.append(r_d)
-                    extracted += 1
-                curr += 1
+                while extracted_count < 11 and curr_row < len(df):
+                    # Validate Row by checking D column for data presence
+                    is_valid = False
+                    d_col = col_map.get("D") or col_map.get("C")
+                    if d_col is not None:
+                        chk = str(df.iloc[curr_row, d_col]).lower()
+                        if any(k in chk for k in ['0','1','+','w']): is_valid=True
+                        
+                    if is_valid:
+                        row_dic = {"ID": f"Cell {extracted_count+1}"}
+                        for ag in AGS:
+                            v = 0
+                            if ag in col_map:
+                                v = normalize(df.iloc[curr_row, col_map[ag]])
+                            row_dic[ag] = int(v) # FORCE INT
+                        final_data.append(row_dic)
+                        extracted_count += 1
+                    curr_row += 1
                 
-            if extracted >= 1:
-                return pd.DataFrame(data), f"Success from '{sheet}' OK"
-                
-        return None, "Structure not found"
+                if extracted_count >= 1:
+                    return pd.DataFrame(final_data), f"Read OK from {sheet}"
+                    
+        return None, "Structure Not Found"
+        
     except Exception as e: return None, str(e)
 
-# Calculation Logic
-def check_logic(c, r11, ip, r3, iscr, ex):
-    p,n = 0,0
-    # Panel
-    for i in range(1,12):
-        s = 1 if ip[f"c{i}"]!="Neg" else 0
-        h = r11.iloc[i-1].get(c,0)
-        if s==1 and h==1: p+=1
-        if s==0 and h==0: n+=1
-    # Screen
-    for i, x in enumerate(["I","II","III"]):
-        s = 1 if iscr[f"s{x}"]!="Neg" else 0
-        h = r3.iloc[i].get(c,0)
-        if s==1 and h==1: p+=1
-        if s==0 and h==0: n+=1
-    # Extra
-    for x in ex:
-        if x['ph'].get(c,0)==1 and x['s']==1: p+=1
-        if x['ph'].get(c,0)==0 and x['s']==0: n+=1
-    ok = (p>=3 and n>=3) or (p>=2 and n>=3)
-    t = "Standard" if (p>=3 and n>=3) else ("Modified" if ok else "Fail")
-    return ok, p, n, t
-
-def get_ruled(r11, ip, r3, iscr):
+# Logic helpers
+def rule_out(ph, negs):
     out = set()
     for ag in AGS:
-        # P
-        for i in range(1,12):
-            if ip[f"c{i}"]=="Neg" and r11.iloc[i-1].get(ag,0)==1:
+        # Loop Negative Cells
+        for i in negs:
+            # i is 1-based index
+            cell_p = ph[i-1]
+            if cell_p.get(ag,0)==1:
+                # Dosage check
+                safe_to_rule = True
                 if ag in DOSAGE:
                     pr = PAIRS.get(ag)
-                    if pr and r11.iloc[i-1].get(pr,0)==1: continue
-                out.add(ag)
-        # S
-        lk = {"I":0,"II":1,"III":2}
-        for k,v in iscr.items():
-            if v=="Neg":
-                ph = r3.iloc[lk[k.replace("s","")]]
-                if ph.get(ag,0)==1:
-                    if ag in DOSAGE:
-                        pr = PAIRS.get(ag)
-                        if pr and ph.get(pr,0)==1: continue
-                    out.add(ag)
+                    if pr and cell_p.get(pr,0)==1: safe_to_rule=False
+                if safe_to_rule: out.add(ag)
     return out
 
-def set_bulk(v):
-    for i in range(1,12): st.session_state.res[f"c{i}"]=v
-
-# ==========================================
-# 3. INTERFACE
-# ==========================================
+# UI
 with st.sidebar:
-    st.image("https://cdn-icons-png.flaticon.com/512/2966/2966327.png",width=60)
-    nav = st.radio("Mode", ["Workstation", "Admin Config"])
-    st.divider()
-    if st.button("Reset All"): st.session_state.ext=[]; st.rerun()
+    st.header("Control")
+    mode = st.radio("Menu", ["Workstation", "Supervisor"])
+    if st.button("Reset All"): 
+        st.session_state.p11 = pd.DataFrame([{"ID": f"Cell {i+1}", **{a:0 for a in AGS}} for i in range(11)])
+        st.session_state.extra = []
+        st.rerun()
 
-# --- ADMIN ---
-if nav == "Admin Config":
-    st.title("🛠️ Master Configuration")
-    if st.text_input("Password",type="password")=="admin123":
-        t1,t2=st.tabs(["Panel 11", "Screening"])
-        with t1:
-            up=st.file_uploader("Upload Panel", type=["xlsx"])
-            if up:
-                df, m = matrix_scan_final(io.BytesIO(up.getvalue()), 11)
-                if df is not None:
-                    st.success(m)
-                    # ---- FORCE CLEAN TYPES BEFORE SAVE ----
-                    st.session_state.p11 = df.fillna(0).astype(int, errors='ignore') 
-                    st.rerun()
-                else: st.error(m)
-            
-            # --- SAFE DISPLAY ---
-            safe_df = st.session_state.p11.copy()
-            # Ensure ID is string and rest are numbers
-            for c in safe_df.columns:
-                if c != "ID": safe_df[c] = pd.to_numeric(safe_df[c], errors='coerce').fillna(0).astype(int)
-            
-            st.caption("Live Editor (Changes Saved automatically via Save button)")
-            edit1 = st.data_editor(safe_df, height=450, hide_index=True, use_container_width=True)
-            if st.button("Save Panel"): st.session_state.p11=edit1; st.success("Saved")
-            
-        with t2:
-            st.info("Upload Screen")
-            ups=st.file_uploader("Upload Scr", type=["xlsx"])
-            if ups:
-                df2,m2=matrix_scan_final(io.BytesIO(ups.getvalue()),3)
-                if df2 is not None:
-                    st.success(m2)
-                    st.session_state.p3=df2.fillna(0).astype(int, errors='ignore')
-                    st.rerun()
-                else: st.error(m2)
-            safe_p3 = st.session_state.p3.copy()
-            for c in safe_p3.columns:
-                if c != "ID": safe_p3[c] = pd.to_numeric(safe_p3[c], errors='coerce').fillna(0).astype(int)
-            edit2=st.data_editor(safe_p3, hide_index=True)
-            if st.button("Save Screen"): st.session_state.p3=edit2; st.success("Saved")
+# ----------------- ADMIN -----------------
+if mode == "Supervisor":
+    st.title("Admin Panel Configuration")
+    if st.text_input("Password", type="password")=="admin123":
+        
+        st.info("Upload File (PDF Converted)")
+        up = st.file_uploader("Upload XLSX", type=["xlsx"])
+        
+        # LOGIC SEPARATION: UPLOAD vs DISPLAY
+        if up:
+            new_df, msg = extract_excel_matrix(io.BytesIO(up.getvalue()))
+            if new_df is not None:
+                st.session_state.p11 = new_df
+                st.success(msg)
+            else:
+                st.error(msg)
+                
+        st.write("---")
+        st.write("### Current Active Grid:")
+        # This grid reads from Session State DIRECTLY
+        # Editing here saves automatically to the "experimental_data_editor" state
+        edited_df = st.data_editor(st.session_state.p11, hide_index=True, height=450)
+        
+        if st.button("Save Grid State"):
+            st.session_state.p11 = edited_df
+            st.success("Saved!")
 
-# --- USER ---
+# ----------------- USER -----------------
 else:
-    st.markdown("<h2 style='color:#036;text-align:center;'>Maternity & Children Hospital - Tabuk</h2>",unsafe_allow_html=True)
-    c1,c2,c3,c4 = st.columns(4)
-    nm=c1.text_input("Pt"); mr=c2.text_input("MRN"); tc=c3.text_input("Tech"); dt=c4.date_input("Date")
+    st.title("MCH Tabuk Workstation")
+    
+    # Simple Layout
+    col_input, col_action = st.columns([2, 1])
+    
+    with col_input:
+        st.write("#### Panel Reactions")
+        g = st.columns(6)
+        pmap = {}
+        for i in range(1, 12):
+            k = i
+            v = g[(i-1)%6].selectbox(f"C{i}", ["Neg","w+","1+","2+","3+"], key=f"user_{i}", index=0 if st.session_state.inputs.get(i)=="Neg" else 1)
+            st.session_state.inputs[i] = v
+            pmap[i] = 0 if v=="Neg" else 1
+            
+    with col_action:
+        st.write("#### Control")
+        if st.button("All Neg"):
+            for i in range(1,12): st.session_state.inputs[i]="Neg"
+            st.rerun()
+        if st.button("Analyze Now", type="primary"):
+            st.session_state.run_analysis = True
+
     st.divider()
     
-    L,R=st.columns([1,2])
-    with L:
-        ac=st.radio("AC",["Negative","Positive"]); 
-        if ac=="Positive": st.error("DAT REQ"); st.stop()
-        st.write("---")
-        for x in ["I","II","III"]: st.session_state.scr[f"s{x}"]=st.selectbox(f"S-{x}",["Neg","w+","1+","2+"], key=f"s_{x}")
-    with R:
-        cols=st.columns(6)
-        in_map={}
-        for i in range(1,12):
-            v=cols[(i-1)%6].selectbox(f"C{i}",["Neg","w+","1+","2+"],key=f"p_{i}")
-            st.session_state.res[f"c{i}"]=v
-            in_map[i]=0 if v=="Neg" else 1
+    # Analysis Logic Triggered
+    if st.session_state.get('run_analysis'):
+        # 1. Get Rows
+        rows = [st.session_state.p11.iloc[i].to_dict() for i in range(11)]
+        neg_cells = [k for k,v in pmap.items() if v==0]
+        pos_cells = [k for k,v in pmap.items() if v==1]
+        
+        # 2. Exclude
+        excluded = rule_out(rows, neg_cells)
+        
+        # 3. Match
+        candidates = [a for a in AGS if a not in excluded]
+        matches = []
+        for c in candidates:
+            # Verify positive pattern (Inclusion)
+            valid = True
+            for pidx in pos_cells:
+                if rows[pidx-1].get(c,0)==0: valid=False
+            if valid: matches.append(c)
             
-    st.divider()
-    if st.checkbox("Analyze"):
-        ruled=get_out(st.session_state.p11, st.session_state.res, st.session_state.p3, st.session_state.scr)
-        cands=[x for x in AGS if x not in ruled]
-        match=[]
-        for c in cands:
-            miss=False
-            for i,s in in_map.items():
-                if s>0 and st.session_state.p11.iloc[i-1].get(c,0)==0: miss=True
-            if not miss: match.append(c)
-            
-        if not match: st.error("Inconclusive.")
+        if not matches:
+            st.error("No matches found / Inconclusive.")
         else:
-            allow=True
-            st.subheader("Result")
-            for m in match:
-                ok,p,n,txt=check_logic(m,st.session_state.p11,st.session_state.res,st.session_state.p3,st.session_state.scr,st.session_state.ext)
-                st.markdown(f"<div class='status-{'pass' if ok else 'fail'}'><b>Anti-{m}</b>: {txt} ({p} P/{n} N)</div>",unsafe_allow_html=True)
-                if not ok: allow=False
+            st.success(f"Possibilities: {', '.join(matches)}")
             
-            if allow:
-                if st.button("Print"):
-                    h=f"<div class='print-only'><center><h2>MCH Tabuk</h2></center><div class='results-box'>Pt: {nm}<br>Res: Anti-{', '.join(match)}<br>Valid Rule of 3.<br>Sig: ________</div></div><script>window.print()</script>"
-                    st.markdown(h,unsafe_allow_html=True)
-            else:
-                with st.expander("Add Cell"):
-                    idx=st.text_input("ID"); rs=st.selectbox("Res",["Neg","Pos"]); ph={}
-                    cols=st.columns(len(match))
-                    for i,m in enumerate(match):
-                        ph[m]=1 if cols[i].checkbox(m) else 0
-                    if st.button("Add"):
-                        st.session_state.ext.append({"src":idx,"s":1 if rs=="Pos" else 0,"ph":ph,"res":1 if rs=="Pos" else 0}); st.rerun()
+            # Simple Rule check for display
+            for m in matches:
+                p_cnt = sum([1 for p in pos_cells if rows[p-1].get(m,0)==1])
+                n_cnt = sum([1 for n in neg_cells if rows[n-1].get(m,0)==0])
+                st.write(f"**Anti-{m}:** {p_cnt} Positive Cells / {n_cnt} Negative Cells.")
