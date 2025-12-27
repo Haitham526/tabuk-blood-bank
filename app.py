@@ -1,103 +1,81 @@
-.import streamlit as st
+import streamlit as st
 import pandas as pd
-import io
+from datetime import date
 
-# 1. BASE CONFIG
-st.set_page_config(page_title="Tabuk Blood Bank", layout="wide", page_icon="🩸")
+# ==========================================
+# 1. SETUP (تصميم نظيف)
+# ==========================================
+st.set_page_config(page_title="MCH Tabuk Bank", layout="wide", page_icon="🩸")
 
 st.markdown("""
 <style>
-    @media print { 
-        .stApp > header, .sidebar, footer, .no-print { display: none !important; } 
-        .print-only { display: block !important; }
-        .result-sheet { border: 2px solid #000; padding: 20px; font-family: 'Times New Roman'; font-size:14px;}
-    }
+    @media print { .stApp > header, .sidebar, footer, .no-print { display: none !important; } .print-only { display: block !important; } .results-box { border: 2px solid #333; padding: 20px; font-family: 'Times New Roman'; font-size:14px; margin-top:20px; } }
     .print-only { display: none; }
-    
-    .status-ok { background: #d4edda; color: #155724; padding: 10px; border-left: 6px solid #198754; margin-bottom: 5px; }
-    .status-fail { background: #f8d7da; color: #842029; padding: 10px; border-left: 6px solid #dc3545; margin-bottom: 5px; }
-    div[data-testid="stDataEditor"] table { width: 100% !important; min-width: 100% !important; }
+    div[data-testid="stDataEditor"] table { width: 100% !important; }
+    .status-box { padding: 10px; margin: 5px 0; border-radius: 5px; color: #fff; text-align: center; }
+    .pass { background: #198754; } .fail { background: #dc3545; }
+    .sig-badge { position: fixed; bottom: 10px; right: 15px; background: white; padding: 5px; border: 1px solid #ccc; z-index:99; }
 </style>
 """, unsafe_allow_html=True)
 
-# 2. DEFINITIONS
+st.markdown("<div class='sig-badge no-print'>Dr. Haitham Ismail | Consultant</div>", unsafe_allow_html=True)
+
+# Definitions
 AGS = ["D","C","E","c","e","Cw","K","k","Kpa","Kpb","Jsa","Jsb","Fya","Fyb","Jka","Jkb","Lea","Leb","P1","M","N","S","s","Lua","Lub","Xga"]
 DOSAGE = ["C","c","E","e","Fya","Fyb","Jka","Jkb","M","N","S","s"]
 PAIRS = {'C':'c','c':'C','E':'e','e':'E','K':'k','k':'K','Fya':'Fyb','Fyb':'Fya','Jka':'Jkb','Jkb':'Jka','M':'N','N':'M','S':'s','s':'S'}
 
-# 3. SAFETY INIT
-if 'db_panel' not in st.session_state:
-    st.session_state.db_panel = pd.DataFrame([{"ID": f"C{i+1}", **{a:0 for a in AGS}} for i in range(11)])
-if 'db_screen' not in st.session_state:
-    st.session_state.db_screen = pd.DataFrame([{"ID": f"S{i}", **{a:0 for a in AGS}} for i in ["I","II","III"]])
-if 'db_extra' not in st.session_state:
-    st.session_state.db_extra = []
+# STATE INITIALIZATION
+if 'panel' not in st.session_state:
+    st.session_state.panel = pd.DataFrame([{"ID": f"C{i+1}", **{a:0 for a in AGS}} for i in range(11)])
+if 'screen' not in st.session_state:
+    st.session_state.screen = pd.DataFrame([{"ID": f"S{i}", **{a:0 for a in AGS}} for i in ["I","II","III"]])
+if 'extra' not in st.session_state:
+    st.session_state.extra = []
 
-# 4. FUNCTIONS
-def process_paste(text, mode='p11'):
+# ==========================================
+# 2. LOGIC: THE PASTE ENGINE
+# ==========================================
+def parse_paste(text_data, limit_rows=11):
+    # This takes the raw text from Excel copy and converts to Grid
     try:
-        # Excel copies data as Tab-separated
-        # We expect only 0, 1, +, w, etc.
-        rows = text.strip().split('\n')
-        parsed_data = []
+        lines = text_data.strip().split('\n')
+        data = []
+        count = 0
         
-        limit = 11 if mode=='p11' else 3
-        
-        for i, row_str in enumerate(rows):
-            if i >= limit: break
-            # Split by Tab
-            cols = row_str.split('\t')
-            # Only take the first 26 columns (Antigens)
-            # Users might copy ID column too, so let's handle that
+        for line in lines:
+            if count >= limit_rows: break
+            # Split by Tab (Excel default copy)
+            cells = line.split('\t')
             
-            clean_vals = []
-            for c in cols:
-                # Basic cleanup
-                v = c.lower().strip()
-                if any(x in v for x in ['+', '1', 'w', 'pos']): clean_vals.append(1)
-                else: clean_vals.append(0)
+            # Clean values
+            clean_cells = []
+            for c in cells:
+                val = str(c).strip().lower()
+                res = 1 if any(x in val for x in ['+', '1', 'pos', 'w', 'yes']) else 0
+                clean_cells.append(res)
             
-            # If user copied ID column, remove it (assuming numbers match count)
-            if len(clean_vals) > 26: 
-                clean_vals = clean_vals[-26:] # Take last 26 columns
-            
-            # Pad if missing
-            while len(clean_vals) < 26: clean_vals.append(0)
-            
-            # Create Row Dict
-            rid = f"C{i+1}" if mode=='p11' else f"S{i}"
-            r_dict = {"ID": rid}
-            for idx, ag in enumerate(AGS):
-                r_dict[ag] = clean_vals[idx]
-            
-            parsed_data.append(r_dict)
-            
-        return pd.DataFrame(parsed_data)
+            # If line is valid (has at least 5 cols)
+            if len(clean_cells) >= 5:
+                # We expect 26 antigens. Take the first 26 columns found
+                # Or try to fit them. Let's assume user copies only the DATA columns
+                row_dict = {"ID": f"Cell {count+1}" if limit_rows==11 else f"S-{count}"}
+                
+                # Safety fill
+                for idx, ag in enumerate(AGS):
+                    if idx < len(clean_cells):
+                        row_dict[ag] = clean_cells[idx]
+                    else:
+                        row_dict[ag] = 0
+                
+                data.append(row_dict)
+                count += 1
+                
+        return pd.DataFrame(data), f"Successfully loaded {count} rows"
     except Exception as e:
-        return None
+        return None, str(e)
 
-def rule_check(c, p11, r11, p3, r3, ext):
-    p, n = 0, 0
-    # Panel
-    for i in range(1, 12):
-        s = 1 if r11[i] != "Neg" else 0
-        h = p11.iloc[i-1].get(c,0)
-        if s==1 and h==1: p+=1
-        if s==0 and h==0: n+=1
-    # Screen
-    for i, x in enumerate(["I","II","III"]):
-        s = 1 if r3[f"s{x}"] != "Neg" else 0
-        h = p3.iloc[i].get(c,0)
-        if s==1 and h==1: p+=1
-        if s==0 and h==0: n+=1
-    # Extra
-    for x in ext:
-        if x['s']==1 and x['p'].get(c,0)==1: p+=1
-        if x['s']==0 and x['p'].get(c,0)==0: n+=1
-    ok = (p>=3 and n>=3) or (p>=2 and n>=3)
-    t = "Standard" if (p>=3 and n>=3) else ("Modified" if ok else "Fail")
-    return ok, p, n, t
-
+# Rule Logic
 def can_out(ag, ph):
     if ph.get(ag,0)==0: return False
     if ag in DOSAGE:
@@ -105,154 +83,148 @@ def can_out(ag, ph):
         if pr and ph.get(pr,0)==1: return False
     return True
 
-# ========================================================
-# 5. INTERFACE
-# ========================================================
-try:
-    with st.sidebar:
-        st.title("Menu")
-        mode = st.radio("Go To:", ["Workstation", "Admin Config"])
-        if st.button("HARD RESET"):
-            st.session_state.clear()
-            st.rerun()
+def calc_res(c, r11, p, r3, s, ex):
+    pos, neg = 0, 0
+    # Panel
+    for i in range(11):
+        if p[i]==1 and r11.iloc[i].get(c,0)==1: pos+=1
+        if p[i]==0 and r11.iloc[i].get(c,0)==0: neg+=1
+    # Screen
+    for i in range(3):
+        if s[i]==1 and r3.iloc[i].get(c,0)==1: pos+=1
+        if s[i]==0 and r3.iloc[i].get(c,0)==0: neg+=1
+    # Ext
+    for x in ex:
+        if x['s']==1 and x['ph'].get(c,0)==1: pos+=1
+        if x['s']==0 and x['ph'].get(c,0)==0: neg+=1
+    ok = (pos>=3 and neg>=3) or (pos>=2 and neg>=3)
+    return ok, pos, neg
 
-    # ---- ADMIN ----
-    if mode == "Admin Config":
-        st.header("Master Configuration")
-        if st.text_input("Password", type="password") == "admin123":
-            
-            t1, t2 = st.tabs(["Panel 11", "Screening"])
-            
-            with t1:
-                st.info("💡 الحل السحري: اذهب لملف الإكسيل، ظلل الأرقام فقط (الـ 26 عمود)، انسخهم (Ctrl+C)، والصقهم هنا (Ctrl+V).")
-                paste_area = st.text_area("1. Paste Excel Data Here:", height=150, help="Copy the grid of numbers from Excel and paste here.")
-                
-                if st.button("2. Process Paste (Panel)"):
-                    if paste_area:
-                        df_new = process_paste(paste_area, 'p11')
-                        if df_new is not None:
-                            st.session_state.db_panel = df_new
-                            st.success("✅ تم لصق البيانات بنجاح! راجع الجدول بالأسفل.")
-                        else: st.error("Error parsing text.")
-                
-                st.write("---")
-                st.write("**Current Data (Editable):**")
-                e1 = st.data_editor(st.session_state.db_panel, hide_index=True)
-                if st.button("Save Changes (P11)"): st.session_state.db_panel=e1; st.success("Saved")
-                
-            with t2:
-                st.write("Screening Paste Area:")
-                paste_scr = st.text_area("Paste Screen 3 rows here:")
-                if st.button("Process Screen"):
-                    if paste_scr:
-                        dfs = process_paste(paste_scr, 'p3')
-                        if dfs is not None: st.session_state.db_screen=dfs; st.success("Updated")
-                
-                e2 = st.data_editor(st.session_state.db_screen, hide_index=True)
-                if st.button("Save Screen"): st.session_state.db_screen=e2; st.success("Saved")
+# ==========================================
+# 3. INTERFACE
+# ==========================================
+with st.sidebar:
+    st.image("https://cdn-icons-png.flaticon.com/512/2966/2966327.png",width=60)
+    nav=st.radio("Menu",["Workstation","Supervisor"])
+    if st.button("RESET SYSTEM"):
+        st.session_state.extra=[]
+        st.rerun()
 
-    # ---- USER ----
-    else:
-        st.markdown("<h2 style='color:#036;text-align:center'>Maternity & Children Hospital - Tabuk</h2>", unsafe_allow_html=True)
-        c1,c2,c3,c4=st.columns(4)
-        nm=c1.text_input("Pt"); mr=c2.text_input("MRN"); tc=c3.text_input("Tech"); dt=c4.date_input("Date")
-        st.divider()
+# ------- ADMIN -------
+if nav == "Supervisor":
+    st.title("Admin Configuration (Copy/Paste Mode)")
+    if st.text_input("Password",type="password")=="admin123":
+        t1, t2 = st.tabs(["Panel 11", "Screening"])
         
-        # FORM (SAFE INPUT)
-        input_panel = [] 
-        input_screen = []
-        
-        with st.form("main"):
-            colL, colR = st.columns([1, 2])
-            with colL:
-                st.subheader("1. Control")
-                ac_res = st.radio("Auto Control", ["Negative", "Positive"], horizontal=True)
-                s1 = st.selectbox("Scn I", ["Neg","w+","1+","2+"])
-                s2 = st.selectbox("Scn II", ["Neg","w+","1+","2+"])
-                s3 = st.selectbox("Scn III", ["Neg","w+","1+","2+"])
-                input_screen = [s1, s2, s3]
-            with colR:
-                st.subheader("2. Panel")
-                g1, g2 = st.columns(2)
-                with g1:
-                    input_panel.append(st.selectbox("C 1", ["Neg","w+","1+","2+","3+"]))
-                    input_panel.append(st.selectbox("C 2", ["Neg","w+","1+","2+","3+"]))
-                    input_panel.append(st.selectbox("C 3", ["Neg","w+","1+","2+","3+"]))
-                    input_panel.append(st.selectbox("C 4", ["Neg","w+","1+","2+","3+"]))
-                    input_panel.append(st.selectbox("C 5", ["Neg","w+","1+","2+","3+"]))
-                    input_panel.append(st.selectbox("C 6", ["Neg","w+","1+","2+","3+"]))
-                with g2:
-                    input_panel.append(st.selectbox("C 7", ["Neg","w+","1+","2+","3+"]))
-                    input_panel.append(st.selectbox("C 8", ["Neg","w+","1+","2+","3+"]))
-                    input_panel.append(st.selectbox("C 9", ["Neg","w+","1+","2+","3+"]))
-                    input_panel.append(st.selectbox("C 10", ["Neg","w+","1+","2+","3+"]))
-                    input_panel.append(st.selectbox("C 11", ["Neg","w+","1+","2+","3+"]))
-            
-            st.write("---")
-            run = st.form_submit_button("🚀 Run Analysis")
+        with t1:
+            st.info("طريقة الاستخدام: افتح الاكسيل -> ظلل الأرقام فقط (بدون عناوين) -> انسخ -> الصق هنا")
+            txt = st.text_area("Paste Excel Data (Panel 11)", height=150)
+            if st.button("Process Data (Panel)"):
+                df, m = parse_paste(txt, 11)
+                if df is not None:
+                    st.success(m); st.session_state.panel = df
+                else: st.error(m)
+            st.write("Preview:")
+            e1=st.data_editor(st.session_state.panel, hide_index=True)
+            if st.button("Save P11"): st.session_state.panel=e1; st.success("Saved")
+
+        with t2:
+            st.info("Paste Screen Cells (3 Rows)")
+            txt2 = st.text_area("Paste Excel Data (Screen)", height=100)
+            if st.button("Process Data (Screen)"):
+                df2, m2 = parse_paste(txt2, 3)
+                if df2 is not None:
+                    st.success(m2); st.session_state.screen = df2
+            e2=st.data_editor(st.session_state.screen, hide_index=True)
+            if st.button("Save Scr"): st.session_state.screen=e2; st.success("Saved")
+
+# ------- USER -------
+else:
+    st.markdown("<center><h2 style='color:#036'>MCH Tabuk - Serology Workstation</h2></center><hr>", unsafe_allow_html=True)
+    c1,c2,c3,c4 = st.columns(4)
+    nm=c1.text_input("Pt Name"); mr=c2.text_input("MRN"); tc=c3.text_input("Tech"); dt=c4.date_input("Date")
+    st.divider()
     
-        if run:
-            if ac_res == "Positive":
-                st.error("🚨 STOP: Auto Control Positive.")
+    # INPUT FORM
+    with st.form("entry"):
+        st.write("### 1. Reactions")
+        L, R = st.columns([1, 2])
+        
+        with L:
+            st.write("Controls")
+            ac=st.radio("Auto Control",["Neg","Pos"])
+            s1=st.selectbox("Scn I",["Neg","w+","1+","2+"])
+            s2=st.selectbox("Scn II",["Neg","w+","1+","2+"])
+            s3=st.selectbox("Scn III",["Neg","w+","1+","2+"])
+        
+        with R:
+            st.write("Panel")
+            rc1, rc2 = st.columns(2)
+            c1_v = rc1.selectbox("Cell 1", ["Neg","w+","1+","2+"])
+            c2_v = rc1.selectbox("Cell 2", ["Neg","w+","1+","2+"])
+            c3_v = rc1.selectbox("Cell 3", ["Neg","w+","1+","2+"])
+            c4_v = rc1.selectbox("Cell 4", ["Neg","w+","1+","2+"])
+            c5_v = rc1.selectbox("Cell 5", ["Neg","w+","1+","2+"])
+            c6_v = rc1.selectbox("Cell 6", ["Neg","w+","1+","2+"])
+            
+            c7_v = rc2.selectbox("Cell 7", ["Neg","w+","1+","2+"])
+            c8_v = rc2.selectbox("Cell 8", ["Neg","w+","1+","2+"])
+            c9_v = rc2.selectbox("Cell 9", ["Neg","w+","1+","2+"])
+            c10_v = rc2.selectbox("Cell 10", ["Neg","w+","1+","2+"])
+            c11_v = rc2.selectbox("Cell 11", ["Neg","w+","1+","2+"])
+
+        sub = st.form_submit_button("🚀 Run Analysis")
+    
+    # ANALYZE
+    if sub:
+        if ac=="Pos": st.error("DAT REQ"); st.stop()
+        
+        # Maps
+        in_p = [1 if x!="Neg" else 0 for x in [c1_v,c2_v,c3_v,c4_v,c5_v,c6_v,c7_v,c8_v,c9_v,c10_v,c11_v]]
+        in_s = [1 if x!="Neg" else 0 for x in [s1,s2,s3]]
+        
+        ruled = set()
+        for ag in AGS:
+            # Panel
+            for i, res in enumerate(in_p):
+                if res==0 and can_out(ag, st.session_state.panel.iloc[i]): ruled.add(ag); break
+            # Screen
+            for i, res in enumerate(in_s):
+                if res==0 and ag not in ruled and can_out(ag, st.session_state.screen.iloc[i]): ruled.add(ag)
+        
+        cands = [x for x in AGS if x not in ruled]
+        match = []
+        for c in cands:
+            mis = False
+            for i, res in enumerate(in_p):
+                if res==1 and st.session_state.panel.iloc[i].get(c,0)==0: mis=True
+            if not mis: match.append(c)
+            
+        st.subheader("Result")
+        if not match: st.error("Inconclusive.")
+        else:
+            allow = True
+            for m in match:
+                ok, p, n = calc_res(m, st.session_state.panel, in_p, st.session_state.screen, in_s, st.session_state.extra)
+                cls="pass" if ok else "fail"
+                msg="Rule Met" if ok else "Need Cells"
+                st.markdown(f"<div class='status-box {cls}'><b>Anti-{m}:</b> {msg} ({p} Pos/{n} Neg)</div>",unsafe_allow_html=True)
+                if not ok: allow=False
+            
+            if allow:
+                rpt=f"<div class='print-only'><br><center><h2>MCH Tabuk</h2></center><div class='results-box'>Pt: {nm}<br>Anti-{', '.join(match)} Confirmed.<br>Sign: ________</div></div><script>window.print()</script>"
+                st.markdown(rpt,unsafe_allow_html=True)
+                st.balloons()
             else:
-                ruled = set()
-                r11 = [st.session_state.db_panel.iloc[i].to_dict() for i in range(11)]
-                r3 = [st.session_state.db_screen.iloc[i].to_dict() for i in range(3)]
-                
-                # Exclude Panel
-                for i, v in enumerate(input_panel):
-                    if v == "Neg":
-                        for ag in AGS: 
-                            if can_out(ag, r11[i]): ruled.add(ag)
-                # Exclude Screen
-                for i, v in enumerate(input_screen):
-                    if v == "Neg":
-                        for ag in AGS:
-                            if ag not in ruled and can_out(ag, r3[i]): ruled.add(ag)
-                
-                # Include
-                cands = [x for x in AGS if x not in ruled]
-                matches = []
-                for c in cands:
-                    miss = False
-                    for i, v in enumerate(input_panel):
-                        if v!="Neg" and r11[i].get(c,0)==0: miss=True
-                    if not miss: matches.append(c)
-                
-                # Display
-                if not matches: st.error("No matches.")
-                else:
-                    st.success(f"Identified: Anti-{', '.join(matches)}")
-                    final_ok = True
-                    # Check Logic
-                    p_in_map = {i+1:v for i,v in enumerate(input_panel)}
-                    s_in_map = {"sI":input_screen[0], "sII":input_screen[1], "sIII":input_screen[2]}
-                    
-                    for m in matches:
-                        ok, p, n, txt = rule_check(m, st.session_state.db_panel, input_panel, st.session_state.db_screen, s_in_map, st.session_state.db_extra)
-                        css = "status-ok" if ok else "status-fail"
-                        st.markdown(f"<div class='{css}'><b>Anti-{m}:</b> {txt} ({p}P/{n}N)</div>",unsafe_allow_html=True)
-                        if not ok: final_ok = False
-                    
-                    if final_ok:
-                        html = f"""<div class='print-only'><center><h2>Maternity & Children Hospital - Tabuk</h2><h3>Serology Report</h3></center><div class='result-sheet'><b>Patient:</b> {nm} ({mr})<br><b>Tech:</b> {tc} | <b>Date:</b> {dt}<hr><b>Conclusion:</b> Anti-{', '.join(matches)} Detected.<br>Probability p<=0.05 Met.<br><br><b>Signature:</b> ___________________</div><div style='text-align:center;position:fixed;bottom:0;width:100%'>Dr. Haitham Ismail</div></div><script>window.print()</script>"""
-                        st.markdown(html, unsafe_allow_html=True)
-                        st.balloons()
-                    else:
-                        st.warning("Rule Not Met. Add Extra Cells below.")
+                with st.expander("Add Extra Cell"):
+                    with st.form("ex_f"):
+                        id_x=st.text_input("ID"); rs_x=st.selectbox("R",["Neg","Pos"]); ph={}
+                        st.write("Antigens (Separated by space):")
+                        txt=st.text_input("Ag List")
+                        if st.form_submit_button("Add"):
+                            for t in txt.split(): ph[t.strip().upper()]=1
+                            st.session_state.extra.append({"s":1 if rs_x=="Pos" else 0,"ph":ph})
+                            st.success("Added! Re-Run.")
 
-        with st.expander("➕ Add External Cell"):
-            with st.form("add_ex"):
-                eid=st.text_input("ID"); ers=st.selectbox("R",["Neg","Pos"])
-                st.write("Antigens present (space separated e.g. D C):")
-                ags_txt = st.text_input("Antigens")
-                if st.form_submit_button("Add"):
-                    ph = {a:0 for a in AGS}
-                    if ags_txt:
-                        for t in ags_txt.split():
-                            t = t.upper().strip()
-                            if t in AGS: ph[t]=1
-                    st.session_state.db_extra.append({"res":1 if ers=="Pos" else 0,"s":1 if ers=="Pos" else 0,"ph":ph,"p":ph})
-                    st.success("Added! Run Analysis Again.")
-
-except Exception as e: st.error(f"Error: {e}")
+    if st.session_state.extra:
+        st.write(f"Extra cells: {len(st.session_state.extra)}")
