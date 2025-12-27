@@ -1,250 +1,286 @@
 import streamlit as st
 import pandas as pd
+import io
 from datetime import date
 
-# 1. إعدادات الصفحة (CLEAN SETUP)
-st.set_page_config(page_title="MCH Tabuk Bank", layout="wide")
+# --------------------------------------------------------
+# 1. SETUP
+# --------------------------------------------------------
+st.set_page_config(page_title="MCH Tabuk Bank", layout="wide", page_icon="🏥")
 
-# CSS لإصلاح الجدول والتصميم
 st.markdown("""
 <style>
-    /* إخفاء القوائم غير الضرورية */
-    .stApp > header, .sidebar, footer, .no-print { display: none !important; }
-    
-    /* تنسيق التقرير */
-    .report-paper { 
-        border: 2px solid #000; 
-        padding: 30px; 
-        margin-top: 10px; 
-        font-family: 'Times New Roman'; 
-    }
-    
-    /* جعل الجدول يقبل اللصق ويظهر كاملاً */
+    @media print { .stApp > header, .sidebar, footer, .no-print { display: none !important; } .print-only { display: block !important; } .results-box { border: 2px solid #333; padding: 20px; font-family: 'Times New Roman'; } .consultant-footer { position: fixed; bottom: 0; width: 100%; text-align: center; border-top: 1px solid #ccc; padding: 10px; } }
+    .print-only { display: none; }
+    .header-box { text-align: center; border-bottom: 5px solid #005f73; padding-bottom: 10px; font-family: 'Arial'; color: #003366; }
     div[data-testid="stDataEditor"] table { width: 100% !important; }
-    
-    /* الألوان */
-    .success-box { background: #d4edda; color: #155724; padding: 10px; margin: 5px 0; border-radius: 5px;}
-    .fail-box { background: #f8d7da; color: #721c24; padding: 10px; margin: 5px 0; border-radius: 5px;}
-    
-    /* التوقيع */
-    .sig-float { position: fixed; bottom: 10px; right: 15px; background: white; border: 1px solid #ccc; padding: 5px; z-index: 99; }
+    .status-ok { background:#d4edda; color:#155724; padding:8px; margin:2px; border-radius:4px;}
+    .status-no { background:#f8d7da; color:#721c24; padding:8px; margin:2px; border-radius:4px;}
+    .sig-badge { position: fixed; bottom: 10px; right: 15px; background: white; border: 1px solid #ccc; padding: 5px; z-index: 99; }
 </style>
 """, unsafe_allow_html=True)
 
-st.markdown('<div class="sig-float no-print">Dr. Haitham Ismail | Consultant</div>', unsafe_allow_html=True)
+st.markdown("<div class='sig-badge no-print'>Dr. Haitham Ismail</div>", unsafe_allow_html=True)
 
-# 2. البيانات والثوابت
+# CONSTANTS
 AGS = ["D","C","E","c","e","Cw","K","k","Kpa","Kpb","Jsa","Jsb","Fya","Fyb","Jka","Jkb","Lea","Leb","P1","M","N","S","s","Lua","Lub","Xga"]
 DOSAGE = ["C","c","E","e","Fya","Fyb","Jka","Jkb","M","N","S","s"]
 PAIRS = {'C':'c','c':'C','E':'e','e':'E','K':'k','k':'K','Fya':'Fyb','Fyb':'Fya','Jka':'Jkb','Jkb':'Jka','M':'N','N':'M','S':'s','s':'S'}
 
-# تهيئة الذاكرة (بدون تعقيد)
-if 'panel_11' not in st.session_state:
-    # جدول صفري
-    st.session_state.panel_11 = pd.DataFrame(0, index=[f"Cell {i+1}" for i in range(11)], columns=AGS)
-if 'panel_3' not in st.session_state:
-    st.session_state.panel_3 = pd.DataFrame(0, index=["Scn I","Scn II","Scn III"], columns=AGS)
+# STATE
+if 'p11' not in st.session_state: st.session_state.p11 = pd.DataFrame([{"ID": f"C{i+1}", **{a:0 for a in AGS}} for i in range(11)])
+if 'p3' not in st.session_state: st.session_state.p3 = pd.DataFrame([{"ID": f"S{i}", **{a:0 for a in AGS}} for i in ["I","II","III"]])
 if 'ext' not in st.session_state: st.session_state.ext = []
 
-# تهيئة المدخلات يدوياً لمنع الـ TypeError
-input_keys = ["s_I","s_II","s_III"] + [f"c_{i}" for i in range(1,12)]
-for k in input_keys:
-    if k not in st.session_state: st.session_state[k] = "Neg"
+# --------------------------------------------------------
+# 2. LOGIC
+# --------------------------------------------------------
+def normalize(val):
+    s = str(val).lower().strip()
+    return 1 if any(x in s for x in ['+', '1', 'pos', 'yes', 'w']) else 0
 
-# 3. المنطق (LOGIC)
-def can_exclude(ag, row_data):
-    if row_data[ag] == 0: return False
+def smart_parse(file):
+    try:
+        xls = pd.ExcelFile(file)
+        for sheet in xls.sheet_names:
+            df = pd.read_excel(file, sheet_name=sheet, header=None)
+            
+            # Map Cols
+            col_map = {}
+            head_row = -1
+            
+            for r in range(min(30, len(df))):
+                temp = {}
+                matches = 0
+                for c in range(min(60, len(df.columns))):
+                    val = str(df.iloc[r, c]).strip().replace(" ","")
+                    
+                    det = None
+                    if val in ["c","C","e","E","k","K","s","S"]: det = val
+                    elif val.upper() in ["D","RHD"]: det = "D"
+                    else:
+                        vup = val.upper()
+                        if vup in AGS: det = vup
+                    
+                    if det:
+                        temp[det] = c
+                        matches += 1
+                
+                if matches >= 4:
+                    head_row = r
+                    col_map = temp
+                    break
+            
+            # Extract
+            if head_row != -1:
+                data = []
+                found = 0
+                curr = head_row + 1
+                while found < 11 and curr < len(df):
+                    is_val = False
+                    # Check near D column for data
+                    chk_cols = []
+                    if "D" in col_map: chk_cols.extend([col_map["D"], col_map["D"]-1, col_map["D"]+1])
+                    
+                    for cx in chk_cols:
+                        if cx >=0 and cx < len(df.columns):
+                            raw = str(df.iloc[curr, cx]).lower()
+                            if any(x in raw for x in ['+','0','1','w']): is_val = True; break
+                    
+                    if is_val:
+                        row = {"ID": f"C{found+1}"}
+                        for ag in AGS:
+                            v = 0
+                            if ag in col_map:
+                                center = col_map[ag]
+                                # Scan neighbors too (Magnetic)
+                                neighbors = [center, center-1, center+1]
+                                for nc in neighbors:
+                                    if nc >=0 and nc < len(df.columns):
+                                        if normalize(df.iloc[curr, nc]) == 1:
+                                            v = 1; break
+                            row[ag] = int(v)
+                        data.append(row)
+                        found += 1
+                    curr += 1
+                
+                if found >= 1: return pd.DataFrame(data), f"Read from {sheet} OK"
+                
+        return None, "No data found."
+    except Exception as e: return None, str(e)
+
+def can_out(ag, ph):
+    if ph.get(ag,0)==0: return False
     if ag in DOSAGE:
-        pair = PAIRS.get(ag)
-        if pair and row_data.get(pair) == 1: return False # Heterozygous -> Keep
+        pr=PAIRS.get(ag)
+        if pr and ph.get(pr,0)==1: return False
     return True
 
-def analyze_logic():
-    # جمع البيانات
-    p11 = st.session_state.panel_11
-    p3 = st.session_state.panel_3
-    
-    # 1. Exclusion
-    ruled_out = set()
-    
-    # Panel Exclusion
-    for i in range(1, 12):
-        res = st.session_state[f"c_{i}"]
-        if res == "Neg":
-            row = p11.iloc[i-1]
-            for ag in AGS:
-                if can_exclude(ag, row): ruled_out.add(ag)
-    
-    # Screen Exclusion
+def rule_check(c, p11, in_p, p3, in_s, ex):
+    p, n = 0, 0
+    # Panel
+    for i in range(1,12):
+        s = 1 if in_p[i]!="Neg" else 0
+        h = p11.iloc[i-1].get(c,0)
+        if s==1 and h==1: p+=1
+        if s==0 and h==0: n+=1
+    # Screen
     for i, s in enumerate(["I","II","III"]):
-        res = st.session_state[f"s_{s}"]
-        if res == "Neg":
-            row = p3.iloc[i]
-            for ag in AGS:
-                if ag not in ruled_out and can_exclude(ag, row): ruled_out.add(ag)
-                
-    candidates = [x for x in AGS if x not in ruled_out]
-    
-    # 2. Matching
-    matches = []
-    for c in candidates:
-        mis = False
-        # Check Panel Positives
-        for i in range(1, 12):
-            if st.session_state[f"c_{i}"] != "Neg" and p11.iloc[i-1][c] == 0: mis = True
-        if not mis: matches.append(c)
-        
-    return matches
-
-def check_rule_3(cand):
-    pos = 0; neg = 0
-    # P11
-    for i in range(1, 12):
-        s = 1 if st.session_state[f"c_{i}"]!="Neg" else 0
-        h = st.session_state.panel_11.iloc[i-1][cand]
-        if s==1 and h==1: pos+=1
-        if s==0 and h==0: neg+=1
-    # P3
-    for i, s in enumerate(["I","II","III"]):
-        sc = 1 if st.session_state[f"s_{s}"]!="Neg" else 0
-        h = st.session_state.panel_3.iloc[i][cand]
-        if sc==1 and h==1: pos+=1
-        if sc==0 and h==0: neg+=1
+        sc = 1 if in_s[s]!="Neg" else 0
+        h = p3.iloc[i].get(c,0)
+        if sc==1 and h==1: p+=1
+        if sc==0 and h==0: n+=1
     # Ext
-    for x in st.session_state.ext:
-        if x['s']==1 and x['ph'][cand]==1: pos+=1
-        if x['s']==0 and x['ph'][cand]==0: neg+=1
+    for x in ex:
+        if x['s']==1 and x['ph'].get(c,0)==1: p+=1
+        if x['s']==0 and x['ph'].get(c,0)==0: n+=1
     
-    return pos, neg, (pos>=3 and neg>=3) or (pos>=2 and neg>=3)
+    ok = (p>=3 and n>=3) or (p>=2 and n>=3)
+    t = "Std Rule" if (p>=3 and n>=3) else ("Modified" if ok else "Fail")
+    return ok, p, n, t
 
-# 4. الواجهة (INTERFACE)
+# =========================================================
+# 3. INTERFACE (FORM BASED - ERROR PROOF)
+# =========================================================
 with st.sidebar:
-    st.image("https://cdn-icons-png.flaticon.com/512/2966/2966327.png", width=50)
-    menu = st.radio("القائمة:", ["Workstation", "Admin Config"])
+    st.image("https://cdn-icons-png.flaticon.com/512/2966/2966327.png",width=50)
+    nav = st.radio("Menu", ["Workstation", "Admin Config"])
     st.divider()
-    if st.button("تصفير الكل (Reset)"):
+    if st.button("New Patient"):
         st.session_state.ext = []
         st.rerun()
 
 # ----------------- ADMIN -----------------
-if menu == "Admin Config":
-    st.title("🛠️ إعداد الجدول (Copy/Paste Mode)")
-    pwd = st.text_input("Admin Password", type="password")
-    
-    if pwd == "admin123":
-        t1, t2 = st.tabs(["Panel 11", "Screening 3"])
+if nav == "Admin Config":
+    st.title("System Configuration")
+    if st.text_input("Password",type="password")=="admin123":
         
-        with t1:
-            st.info("💡 **طريقة العمل:** افتح الإكسيل الخاص بك، انسخ الأرقام (0 و 1) فقط، تعال هنا قف في أول خلية، واضغط Ctrl+V.")
-            st.caption("Panel Data:")
-            # Data Editor يقبل اللصق المباشر من الإكسيل
-            edited_p11 = st.data_editor(st.session_state.panel_11, height=450, use_container_width=True)
-            if st.button("حفظ التعديلات (Panel)"):
-                st.session_state.panel_11 = edited_p11
-                st.success("تم الحفظ!")
-                
-        with t2:
-            st.caption("Screening Data:")
-            edited_p3 = st.data_editor(st.session_state.panel_3)
-            if st.button("حفظ التعديلات (Screen)"):
-                st.session_state.panel_3 = edited_p3
-                st.success("تم الحفظ!")
-    
-# ----------------- WORKSTATION -----------------
+        st.info("💡 Tip: Upload PDF-Excel or Copy/Paste 0 and 1 here manually.")
+        
+        tab1, tab2 = st.tabs(["Panel 11", "Screen 3"])
+        with tab1:
+            u1=st.file_uploader("Upload Panel", type=["xlsx"])
+            if u1:
+                d1,m1 = smart_parse(io.BytesIO(u1.getvalue()))
+                if d1 is not None:
+                    st.success(m1)
+                    st.session_state.p11=d1
+                else: st.error(m1)
+            
+            st.caption("Live Editor:")
+            e1 = st.data_editor(st.session_state.p11, hide_index=True)
+            if st.button("Save P11"): st.session_state.p11=e1; st.success("OK")
+            
+        with tab2:
+            st.caption("Edit Screen:")
+            e2 = st.data_editor(st.session_state.p3, hide_index=True)
+            if st.button("Save Screen"): st.session_state.p3=e2; st.success("OK")
+
+# ----------------- USER WORKSTATION -----------------
 else:
-    st.markdown("<h2 style='text-align:center; color:#003366'>MCH Tabuk - Blood Bank</h2>", unsafe_allow_html=True)
-    
+    st.markdown("<div class='header-box'><h2>Maternity & Children Hospital - Tabuk</h2></div>", unsafe_allow_html=True)
     c1,c2,c3,c4 = st.columns(4)
     nm=c1.text_input("Name"); mr=c2.text_input("MRN"); tc=c3.text_input("Tech"); dt=c4.date_input("Date")
-    
     st.divider()
     
-    # واجهة إدخال صلبة (بدون Loops) لتجنب الأخطاء
-    colL, colR = st.columns([1, 2])
-    
-    with colL:
-        st.subheader("1. Screen/AC")
-        ac = st.radio("AC", ["Negative","Positive"], horizontal=True)
-        if ac == "Positive": st.error("STOP: DAT Required"); st.stop()
+    # 🔴 START OF FORM (THIS STOPS THE CRASHES)
+    with st.form("analysis_form"):
+        colL, colR = st.columns([1, 2])
+        
+        with colL:
+            st.subheader("1. Controls")
+            ac_res = st.radio("Auto Control", ["Negative","Positive"])
+            st.write("---")
+            si = st.selectbox("Scn I", ["Neg","w+","1+","2+"])
+            sii = st.selectbox("Scn II", ["Neg","w+","1+","2+"])
+            siii = st.selectbox("Scn III", ["Neg","w+","1+","2+"])
+            
+        with colR:
+            st.subheader("2. Panel Reactions")
+            # HARDCODED INPUTS INSIDE FORM
+            ca, cb = st.columns(2)
+            with ca:
+                c1 = st.selectbox("Cell 1", ["Neg","w+","1+","2+"])
+                c2 = st.selectbox("Cell 2", ["Neg","w+","1+","2+"])
+                c3 = st.selectbox("Cell 3", ["Neg","w+","1+","2+"])
+                c4 = st.selectbox("Cell 4", ["Neg","w+","1+","2+"])
+                c5 = st.selectbox("Cell 5", ["Neg","w+","1+","2+"])
+                c6 = st.selectbox("Cell 6", ["Neg","w+","1+","2+"])
+            with cb:
+                c7 = st.selectbox("Cell 7", ["Neg","w+","1+","2+"])
+                c8 = st.selectbox("Cell 8", ["Neg","w+","1+","2+"])
+                c9 = st.selectbox("Cell 9", ["Neg","w+","1+","2+"])
+                c10 = st.selectbox("Cell 10", ["Neg","w+","1+","2+"])
+                c11 = st.selectbox("Cell 11", ["Neg","w+","1+","2+"])
         
         st.write("---")
-        st.session_state.s_I = st.selectbox("Scn I", ["Neg","w+","1+","2+"], key="bx_s1")
-        st.session_state.s_II = st.selectbox("Scn II", ["Neg","w+","1+","2+"], key="bx_s2")
-        st.session_state.s_III = st.selectbox("Scn III", ["Neg","w+","1+","2+"], key="bx_s3")
-        
-        if st.button("Set Screen Neg"):
-            st.session_state.s_I="Neg"; st.session_state.s_II="Neg"; st.session_state.s_III="Neg"; st.rerun()
-
-    with colR:
-        st.subheader("2. Panel Results")
-        rc1, rc2 = st.columns(2)
-        # كتابة الأزرار سطر سطر لمنع الانهيار
-        st.session_state.c_1 = rc1.selectbox("C1", ["Neg","w+","1+","2+","3+"], key="p_1")
-        st.session_state.c_2 = rc1.selectbox("C2", ["Neg","w+","1+","2+","3+"], key="p_2")
-        st.session_state.c_3 = rc1.selectbox("C3", ["Neg","w+","1+","2+","3+"], key="p_3")
-        st.session_state.c_4 = rc1.selectbox("C4", ["Neg","w+","1+","2+","3+"], key="p_4")
-        st.session_state.c_5 = rc1.selectbox("C5", ["Neg","w+","1+","2+","3+"], key="p_5")
-        st.session_state.c_6 = rc1.selectbox("C6", ["Neg","w+","1+","2+","3+"], key="p_6")
-        
-        st.session_state.c_7 = rc2.selectbox("C7", ["Neg","w+","1+","2+","3+"], key="p_7")
-        st.session_state.c_8 = rc2.selectbox("C8", ["Neg","w+","1+","2+","3+"], key="p_8")
-        st.session_state.c_9 = rc2.selectbox("C9", ["Neg","w+","1+","2+","3+"], key="p_9")
-        st.session_state.c_10 = rc2.selectbox("C10", ["Neg","w+","1+","2+","3+"], key="p_10")
-        st.session_state.c_11 = rc2.selectbox("C11", ["Neg","w+","1+","2+","3+"], key="p_11")
-        
-        if st.button("Set Panel Neg"):
-            for i in range(1,12): st.session_state[f"c_{i}"]="Neg"
-            st.rerun()
-
-    st.divider()
-    if st.button("🚀 Analyze Result", type="primary"):
-        matches = analyze_logic()
-        
-        st.subheader("Interpretation")
-        if not matches:
-            st.error("No antibody identified / Inconclusive.")
+        # SUBMIT BUTTON TRIGGER
+        submit = st.form_submit_button("🚀 Submit & Analyze")
+    
+    # 🟢 LOGIC RUNS ONLY AFTER SUBMIT
+    if submit:
+        if ac_res == "Positive":
+            st.error("🚨 Auto Control Positive: Perform DAT (Polyspecific -> Mono).")
         else:
-            final_allow = True
-            for m in matches:
-                p, n, ok = check_rule_3(m)
-                color = "success-box" if ok else "fail-box"
-                txt = "Confirmed (Rule of 3)" if ok else "Rule Not Met (Need cells)"
-                st.markdown(f"<div class='{color}'><b>Anti-{m}:</b> {txt} ({p} Pos / {n} Neg)</div>", unsafe_allow_html=True)
-                if not ok: final_allow = False
+            # Gather inputs into map
+            inp_p = {1:c1, 2:c2, 3:c3, 4:c4, 5:c5, 6:c6, 7:c7, 8:c8, 9:c9, 10:c10, 11:c11}
+            inp_s = {"I":si, "II":sii, "III":siii}
             
-            if final_allow:
-                if st.button("🖨️ Print Final Report"):
-                    rpt = f"""
-                    <div class='print-only'>
-                        <br><center><h2>MCH Tabuk - Serology Lab</h2></center>
-                        <div class='report-paper'>
-                            <p><b>Patient:</b> {nm} | <b>MRN:</b> {mr}</p>
-                            <p><b>Tech:</b> {tc} | <b>Date:</b> {dt}</p>
-                            <hr>
-                            <h3>Results</h3>
-                            <p><b>Identified:</b> Anti-{', '.join(matches)}</p>
-                            <p><b>Validation:</b> Statistical rule (p<=0.05) Met.</p>
-                            <p><b>Notes:</b> Please Phenotype patient (Must be Negative).</p>
-                            <br><br><br>
-                            <p><b>Signature:</b> ___________________________</p>
-                        </div>
-                        <div style='position:fixed;bottom:0;text-align:center;width:100%'>Dr. Haitham Ismail</div>
-                    </div>
-                    <script>window.print();</script>
-                    """
-                    st.markdown(rpt, unsafe_allow_html=True)
+            # Logic Vars
+            r11 = [st.session_state.p11.iloc[i].to_dict() for i in range(11)]
+            r3  = [st.session_state.p3.iloc[i].to_dict() for i in range(3)]
+            ruled = set()
+            
+            # Exclusion
+            for ag in AGS:
+                for i in range(1, 12):
+                    if inp_p[i]=="Neg" and can_out(ag, r11[i-1]): ruled.add(ag); break
+            sm={"I":0,"II":1,"III":2}
+            for k in ["I","II","III"]:
+                if inp_s[k]=="Neg":
+                    for ag in AGS: 
+                        if ag not in ruled and can_out(ag, r3[sm[k]]): ruled.add(ag)
+            
+            # Inclusion
+            match = []
+            for c in [x for x in AGS if x not in ruled]:
+                mis=False
+                for i in range(1,12):
+                    if inp_p[i]!="Neg" and r11[i-1].get(c,0)==0: mis=True
+                if not mis: match.append(c)
+            
+            # Output
+            if not match: st.error("No pattern matched.")
             else:
-                with st.expander("➕ Add Selected Cell (External)"):
-                    ex_id = st.text_input("Cell Lot ID")
-                    ex_res = st.selectbox("Reaction", ["Neg","Pos"])
-                    ex_ph = {}
-                    # Build pheno checkboxes for matches only
-                    cls = st.columns(len(matches))
-                    for i, mat in enumerate(matches):
-                        if cls[i].checkbox(mat, key=f"xc_{mat}"): ex_ph[mat]=1
-                        else: ex_ph[mat]=0
-                    
-                    if st.button("Confirm Addition"):
-                        sc = 1 if ex_res=="Pos" else 0
-                        st.session_state.ext.append({"id":ex_id, "s":sc, "ph":ex_ph})
-                        st.rerun()
+                allow_final = True
+                for m in match:
+                    ok, p, n, msg = rule_check(m, st.session_state.p11, inp_p, st.session_state.p3, inp_s, st.session_state.ext)
+                    cls = "status-ok" if ok else "status-no"
+                    st.markdown(f"<div class='{cls}'><b>Anti-{m}:</b> {msg} ({p}P / {n}N)</div>",unsafe_allow_html=True)
+                    if not ok: allow_final = False
+                
+                if allow_final:
+                    h=f"<div class='print-only'><center><h2>MCH Tabuk</h2></center><br>Pt:{nm}<hr>Res: Anti-{', '.join(match)}<br>Valid Rule 3.<br><br>Sig:_________<div class='consultant-footer'>Dr. Haitham Ismail</div></div><script>window.print()</script>"
+                    st.markdown(h, unsafe_allow_html=True)
+                    st.info("Analysis Validated. Ready to print.")
+                else:
+                    st.warning("⚠️ Validation failed (Rule of 3). Add Extra Cells below.")
+
+    # EXTRA CELLS (OUTSIDE FORM TO ALLOW DYNAMIC ADDITION)
+    if st.session_state.ext:
+        st.write("Added Cells:")
+        st.table(pd.DataFrame(st.session_state.ext))
+
+    with st.expander("➕ Add External Cell"):
+        with st.form("add_cell"):
+            idx=st.text_input("ID")
+            res=st.selectbox("Res",["Neg","Pos"])
+            st.write("Phenotype:")
+            # Use simple text area for ease inside form or hardcode commons
+            # For simplicity: Hardcode matches if known, else let user select
+            # Simplest approach for stable UI:
+            ag_txt = st.multiselect("Select Present Antigens:", AGS)
+            if st.form_submit_button("Add Cell"):
+                ph = {a:1 if a in ag_txt else 0 for a in AGS}
+                st.session_state.ext.append({"src":idx, "s":1 if res=="Pos" else 0, "res":1 if res=="Pos" else 0, "ph":ph, "p":ph})
+                st.rerun()
