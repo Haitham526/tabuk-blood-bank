@@ -1,301 +1,282 @@
 import streamlit as st
 import pandas as pd
 import io
-from datetime import date
 
-# ==========================================
-# 1. SETUP (STABLE)
-# ==========================================
-st.set_page_config(page_title="MCH Tabuk - Serology", layout="wide", page_icon="🩸")
+# --------------------------------------------------------
+# 1. BASE SETUP
+# --------------------------------------------------------
+st.set_page_config(page_title="Tabuk Blood Bank", layout="wide", page_icon="🩸")
 
 st.markdown("""
 <style>
-    @media print { 
-        .stApp > header, .sidebar, footer, .no-print { display: none !important; } 
-        .print-only { display: block !important; }
-        .results-box { border: 2px solid #000; padding: 15px; margin-top: 15px; }
-        .footer-sig { position: fixed; bottom: 0; width: 100%; text-align: center; font-size: 12px; }
-    }
+    @media print { .stApp > header, .sidebar, footer, .no-print { display: none !important; } .print-only { display: block !important; } .results-box { border: 2px solid #000; padding: 20px; font-family: 'Times New Roman'; margin-top: 10px; } }
     .print-only { display: none; }
-    
-    .status-ok { background:#d4edda; padding:10px; margin:5px 0; border-left: 5px solid green; }
-    .status-no { background:#f8d7da; padding:10px; margin:5px 0; border-left: 5px solid red; }
-    
-    /* Force Grid Width */
+    .status-ok { background: #d4edda; color: #155724; padding: 10px; margin: 5px 0; border-radius: 5px; }
+    .status-fail { background: #f8d7da; color: #721c24; padding: 10px; margin: 5px 0; border-radius: 5px; }
     div[data-testid="stDataEditor"] table { width: 100% !important; }
 </style>
 """, unsafe_allow_html=True)
 
-st.markdown("<div style='position:fixed;bottom:10px;right:10px;background:white;padding:5px;border:1px solid #ccc;z-index:999' class='no-print'>Dr. Haitham Ismail</div>", unsafe_allow_html=True)
-
-# CONSTANTS
+# definitions
 AGS = ["D","C","E","c","e","Cw","K","k","Kpa","Kpb","Jsa","Jsb","Fya","Fyb","Jka","Jkb","Lea","Leb","P1","M","N","S","s","Lua","Lub","Xga"]
 DOSAGE = ["C","c","E","e","Fya","Fyb","Jka","Jkb","M","N","S","s"]
 PAIRS = {'C':'c','c':'C','E':'e','e':'E','K':'k','k':'K','Fya':'Fyb','Fyb':'Fya','Jka':'Jkb','Jkb':'Jka','M':'N','N':'M','S':'s','s':'S'}
 
-# STATE INITIALIZATION
-if 'panel' not in st.session_state:
-    st.session_state.panel = pd.DataFrame([{"ID": f"C{i+1}", **{a:0 for a in AGS}} for i in range(11)])
-if 'screen' not in st.session_state:
-    st.session_state.screen = pd.DataFrame([{"ID": f"S{i}", **{a:0 for a in AGS}} for i in ["I","II","III"]])
-if 'extra' not in st.session_state:
-    st.session_state.extra = []
+# INITIALIZATION (Reset-Proof)
+if 'panel_11' not in st.session_state:
+    st.session_state.panel_11 = pd.DataFrame([{"ID": f"C{i+1}", **{a:0 for a in AGS}} for i in range(11)])
+if 'panel_3' not in st.session_state:
+    st.session_state.panel_3 = pd.DataFrame([{"ID": f"S{i}", **{a:0 for a in AGS}} for i in ["I","II","III"]])
+if 'extras' not in st.session_state:
+    st.session_state.extras = []
 
-# ==========================================
+# --------------------------------------------------------
 # 2. LOGIC FUNCTIONS
-# ==========================================
-def clean_val(v):
-    # Translator: +w, 1, + -> 1
-    s = str(v).lower().strip()
-    return 1 if any(x in s for x in ['+','1','pos','w']) else 0
+# --------------------------------------------------------
+def normalize(val):
+    s = str(val).lower().strip()
+    return 1 if any(x in s for x in ['+', '1', 'pos', 'yes', 'w']) else 0
 
-def robust_parser(file):
+def exact_parser(file):
     try:
         xls = pd.ExcelFile(file)
-        # Scan ALL Sheets
         for sheet in xls.sheet_names:
             df = pd.read_excel(file, sheet_name=sheet, header=None)
             
-            # 1. MAP COLUMNS
-            # Looking for Header Row
-            head_idx = -1
-            col_map = {} 
+            # Map Header
+            col_map = {}
+            header_row = -1
             
-            # Scan first 40 rows
             for r in range(min(40, len(df))):
-                temp_map = {}
-                matches = 0
+                cnt = 0
+                temp = {}
                 for c in range(min(60, len(df.columns))):
-                    val = str(df.iloc[r, c]).strip().replace(" ","").replace("\n","")
+                    v = str(df.iloc[r,c]).strip().replace(" ","").replace("\n","")
                     det = None
-                    # Strict Case Match
-                    if val in ["c","C","e","E","k","K","s","S"]: det = val
-                    elif val.upper() in ["D","RHD"]: det = "D"
+                    if v in ["c","C","e","E","k","K","s","S"]: det = v
+                    elif v.upper() in ["D","RHD"]: det = "D"
                     else:
-                        if val.upper() in AGS: det = val.upper()
+                        if v.upper() in AGS: det = v.upper()
                     
                     if det:
-                        temp_map[det] = c
-                        matches += 1
+                        temp[det] = c
+                        cnt += 1
                 
-                if matches >= 3:
-                    head_idx = r
-                    col_map = temp_map
+                if cnt >= 3:
+                    header_row = r
+                    col_map = temp
                     break
             
-            if head_idx == -1: continue 
-            
-            # 2. EXTRACT ROWS
-            final_data = []
-            count = 0
-            curr = head_idx + 1
-            
-            while count < 11 and curr < len(df):
-                is_valid = False
-                # Check for Data in 'D' or 'C' column (Look Right/Left also for shifted cells)
-                search_cols = []
-                if "D" in col_map: search_cols = [col_map["D"], col_map["D"]-1, col_map["D"]+1]
-                elif "C" in col_map: search_cols = [col_map["C"], col_map["C"]-1, col_map["C"]+1]
+            if header_row != -1:
+                data = []
+                extracted = 0
+                curr = header_row + 1
+                while extracted < 11 and curr < len(df):
+                    is_val = False
+                    # Search around D
+                    chk_cols = []
+                    if "D" in col_map: chk_cols = [col_map["D"], col_map["D"]-1, col_map["D"]+1]
+                    
+                    for cx in chk_cols:
+                        if cx >=0 and cx < len(df.columns):
+                            raw = str(df.iloc[curr, cx]).lower()
+                            if any(x in raw for x in ['+','0','1','w']): is_val = True; break
+                    
+                    if is_val:
+                        rid = f"Cell {extracted+1}"
+                        rd = {"ID": rid}
+                        for ag in AGS:
+                            v = 0
+                            if ag in col_map:
+                                center = col_map[ag]
+                                scans = [center, center-1, center+1]
+                                for z in scans:
+                                    if z>=0 and z<len(df.columns):
+                                        if normalize(df.iloc[curr, z])==1: v=1
+                            rd[ag] = int(v)
+                        data.append(rd)
+                        extracted += 1
+                    curr += 1
                 
-                for sc in search_cols:
-                    if sc >= 0 and sc < len(df.columns):
-                        chk = str(df.iloc[curr, sc]).lower()
-                        if any(x in chk for x in ['+','0','1','w']): 
-                            is_valid = True
-                            break
-                
-                if is_valid:
-                    rd = {"ID": f"C{count+1}"}
-                    for ag in AGS:
-                        v = 0
-                        if ag in col_map:
-                            center = col_map[ag]
-                            # Wide Scan for Value
-                            zones = [center, center-1, center+1]
-                            for z in zones:
-                                if z >=0 and z < len(df.columns):
-                                    if clean_val(df.iloc[curr, z]) == 1:
-                                        v = 1; break
-                        rd[ag] = int(v)
-                    final_data.append(rd)
-                    count += 1
-                curr += 1
-                
-            if count >= 1:
-                return pd.DataFrame(final_data), f"Loaded {count} rows from '{sheet}'"
-                
-        return None, "Columns Not Found."
+                if extracted >= 1:
+                    return pd.DataFrame(data), f"Read OK from {sheet}"
+        return None, "Not Found"
     except Exception as e: return None, str(e)
 
-def can_rule_out(ag, ph):
+def can_out(ag, ph):
     if ph.get(ag,0)==0: return False
     if ag in DOSAGE:
         pr=PAIRS.get(ag)
         if pr and ph.get(pr,0)==1: return False
     return True
 
-def calc_stats(cand, p11_inputs, s3_inputs):
-    # Calculate using direct lists
+def rule_checker(cand, p11_ins, s3_ins, ex):
     p, n = 0, 0
-    
     # Panel
-    p_df = st.session_state.panel
-    for i in range(11):
-        s = 1 if p11_inputs[i] != "Neg" else 0
-        h = p_df.iloc[i].get(cand,0)
+    p_df = st.session_state.panel_11
+    for i in range(1,12):
+        s = 1 if p11_ins[i]!="Neg" else 0
+        h = p_df.iloc[i-1].get(cand,0)
         if s==1 and h==1: p+=1
         if s==0 and h==0: n+=1
-        
     # Screen
-    s_df = st.session_state.screen
-    for i in range(3):
-        s = 1 if s3_inputs[i] != "Neg" else 0
+    s_df = st.session_state.panel_3
+    scrs=["I","II","III"]
+    for i, lb in enumerate(scrs):
+        s = 1 if s3_ins[lb]!="Neg" else 0
         h = s_df.iloc[i].get(cand,0)
         if s==1 and h==1: p+=1
         if s==0 and h==0: n+=1
-    
     # Extra
-    for x in st.session_state.extra:
-        s = x['s']
-        h = x['ph'].get(cand,0)
-        if s==1 and h==1: p+=1
-        if s==0 and h==0: n+=1
-        
+    for x in ex:
+        if x['s']==1 and x['ph'].get(cand,0)==1: p+=1
+        if x['s']==0 and x['ph'].get(cand,0)==0: n+=1
+    
     ok = (p>=3 and n>=3) or (p>=2 and n>=3)
-    return ok, p, n
+    t = "Standard Rule" if (p>=3 and n>=3) else ("Modified" if ok else "Rule Failed")
+    return ok, p, n, t
 
-# ==========================================
-# 3. INTERFACE (HARDCODED = NO ERRORS)
-# ==========================================
+# ========================================================
+# 3. INTERFACE (The Safe Form)
+# ========================================================
 with st.sidebar:
-    st.image("https://cdn-icons-png.flaticon.com/512/2966/2966327.png", width=60)
-    mode = st.radio("Menu", ["Workstation", "Supervisor"])
-    if st.button("RESET ALL"):
-        st.session_state.extra = []
+    st.title("MCH Tabuk")
+    nav = st.radio("Menu", ["Workstation", "Admin"])
+    if st.button("RESET"):
+        st.session_state.extras = []
         st.rerun()
 
-# ----------- ADMIN -----------
-if mode == "Supervisor":
-    st.title("Admin Panel")
-    if st.text_input("Password",type="password")=="admin123":
-        t1, t2 = st.tabs(["Panel 11", "Screening"])
+# -------- ADMIN --------
+if nav == "Admin":
+    st.header("Admin Configuration")
+    if st.text_input("Password", type="password") == "admin123":
+        t1, t2 = st.tabs(["Panel", "Screen"])
         with t1:
-            up = st.file_uploader("Upload P11", type=["xlsx"])
-            if up:
-                df, m = robust_parser(io.BytesIO(up.getvalue()))
-                if df is not None:
-                    st.success(m)
-                    st.session_state.panel = df
-                else: st.error(m)
-            e1 = st.data_editor(st.session_state.panel, hide_index=True)
-            if st.button("Save P11"): st.session_state.panel = e1; st.success("Saved")
-        
+            u1 = st.file_uploader("Upload Panel", type=["xlsx"])
+            if u1:
+                d1,m1 = exact_parser(io.BytesIO(u1.getvalue()))
+                if d1 is not None:
+                    st.success(m1)
+                    st.session_state.panel_11 = d1
+                else: st.error(m1)
+            st.session_state.panel_11 = st.data_editor(st.session_state.panel_11, hide_index=True)
         with t2:
-            st.info("Edit Screening Manually (Faster)")
-            e2 = st.data_editor(st.session_state.screen, hide_index=True)
-            if st.button("Save Scr"): st.session_state.screen = e2; st.success("Saved")
+            st.write("Edit Screening")
+            st.session_state.panel_3 = st.data_editor(st.session_state.panel_3, hide_index=True)
 
-# ----------- USER -----------
+# -------- WORKSTATION (SAFE MODE) --------
 else:
-    st.markdown("<center><h2>Maternity & Children Hospital - Tabuk</h2><h4>Serology Workstation</h4></center><hr>", unsafe_allow_html=True)
-    c1,c2,c3,c4 = st.columns(4)
-    nm=c1.text_input("Pt"); mr=c2.text_input("MRN"); tc=c3.text_input("Tech"); dt=c4.date_input("Date")
+    st.markdown("<h2 style='text-align:center; color:#036'>Blood Bank Workstation</h2>", unsafe_allow_html=True)
+    c1,c2,c3,c4=st.columns(4)
+    nm=c1.text_input("Pt Name"); mr=c2.text_input("MRN"); tc=c3.text_input("Tech"); dt=c4.date_input("Date")
+    st.divider()
     
-    # 🔴 THE FAIL-SAFE FORM 🔴
-    with st.form("entry_grid"):
-        st.write("### Reactions")
-        L, R = st.columns([1, 2])
+    # 🔴 FORM STARTS HERE (PREVENTS CRASHES)
+    with st.form("entry_form"):
+        colL, colR = st.columns([1, 2])
         
-        with L:
-            st.write("**Controls**")
-            ac_res = st.radio("AC", ["Negative","Positive"])
-            st.write("**Screening**")
-            # HARDCODED (NO LOOPS)
-            s1 = st.selectbox("Scn I", ["Neg","w+","1+","2+"])
-            s2 = st.selectbox("Scn II", ["Neg","w+","1+","2+"])
-            s3 = st.selectbox("Scn III", ["Neg","w+","1+","2+"])
+        with colL:
+            st.write("#### Control/Screen")
+            ac = st.radio("Auto Control", ["Negative", "Positive"])
+            s_i = st.selectbox("Scn I", ["Neg","w+","1+","2+"])
+            s_ii = st.selectbox("Scn II", ["Neg","w+","1+","2+"])
+            s_iii = st.selectbox("Scn III", ["Neg","w+","1+","2+"])
             
-        with R:
-            st.write("**Identification Panel**")
-            # HARDCODED GRID (Cannot Fail)
-            rc1, rc2 = st.columns(2)
-            with rc1:
-                c1_in = st.selectbox("Cell 1", ["Neg","w+","1+","2+","3+"])
-                c2_in = st.selectbox("Cell 2", ["Neg","w+","1+","2+","3+"])
-                c3_in = st.selectbox("Cell 3", ["Neg","w+","1+","2+","3+"])
-                c4_in = st.selectbox("Cell 4", ["Neg","w+","1+","2+","3+"])
-                c5_in = st.selectbox("Cell 5", ["Neg","w+","1+","2+","3+"])
-                c6_in = st.selectbox("Cell 6", ["Neg","w+","1+","2+","3+"])
-            with rc2:
-                c7_in = st.selectbox("Cell 7", ["Neg","w+","1+","2+","3+"])
-                c8_in = st.selectbox("Cell 8", ["Neg","w+","1+","2+","3+"])
-                c9_in = st.selectbox("Cell 9", ["Neg","w+","1+","2+","3+"])
-                c10_in = st.selectbox("Cell 10", ["Neg","w+","1+","2+","3+"])
-                c11_in = st.selectbox("Cell 11", ["Neg","w+","1+","2+","3+"])
-                
-        submit = st.form_submit_button("🚀 RUN ANALYSIS")
+        with colR:
+            st.write("#### Panel (11 Cells)")
+            # MANUAL LAYOUT (NO LOOP)
+            ca, cb = st.columns(2)
+            with ca:
+                c1_v = st.selectbox("Cell 1", ["Neg","w+","1+","2+","3+"])
+                c2_v = st.selectbox("Cell 2", ["Neg","w+","1+","2+","3+"])
+                c3_v = st.selectbox("Cell 3", ["Neg","w+","1+","2+","3+"])
+                c4_v = st.selectbox("Cell 4", ["Neg","w+","1+","2+","3+"])
+                c5_v = st.selectbox("Cell 5", ["Neg","w+","1+","2+","3+"])
+                c6_v = st.selectbox("Cell 6", ["Neg","w+","1+","2+","3+"])
+            with cb:
+                c7_v = st.selectbox("Cell 7", ["Neg","w+","1+","2+","3+"])
+                c8_v = st.selectbox("Cell 8", ["Neg","w+","1+","2+","3+"])
+                c9_v = st.selectbox("Cell 9", ["Neg","w+","1+","2+","3+"])
+                c10_v = st.selectbox("Cell 10", ["Neg","w+","1+","2+","3+"])
+                c11_v = st.selectbox("Cell 11", ["Neg","w+","1+","2+","3+"])
         
-    # --- ANALYSIS LOGIC ---
-    if submit:
-        if ac_res == "Positive":
-            st.error("🚨 STOP: Auto Control Positive. Perform DAT/Elution.")
-        else:
-            # Collections
-            p_inputs = [c1_in, c2_in, c3_in, c4_in, c5_in, c6_in, c7_in, c8_in, c9_in, c10_in, c11_in]
-            s_inputs = [s1, s2, s3]
-            
-            # 1. EXCLUSION
-            ruled_out = set()
-            p_rows = [st.session_state.panel.iloc[i].to_dict() for i in range(11)]
-            s_rows = [st.session_state.screen.iloc[i].to_dict() for i in range(3)]
-            
-            # Panel Ex
-            for i, val in enumerate(p_inputs):
-                if val == "Neg":
-                    for ag in AGS:
-                        if can_rule_out(ag, p_rows[i]): ruled_out.add(ag)
-            # Screen Ex
-            for i, val in enumerate(s_inputs):
-                if val == "Neg":
-                    for ag in AGS:
-                        if ag not in ruled_out and can_rule_out(ag, s_rows[i]): ruled_out.add(ag)
-            
-            candidates = [x for x in AGS if x not in ruled_out]
-            
-            # 2. MATCHING
-            matches = []
-            for c in candidates:
-                mis = False
-                for i, val in enumerate(p_inputs):
-                    if val != "Neg" and p_rows[i].get(c,0)==0: mis = True
-                if not mis: matches.append(c)
-            
-            # 3. REPORT
-            st.markdown("---")
-            if not matches: st.error("No consistent pattern found / All excluded.")
+        sub = st.form_submit_button("🚀 RUN ANALYSIS")
+        
+    # LOGIC (Runs ONLY on Submit)
+    if sub:
+        try:
+            if ac == "Positive":
+                st.error("🚨 STOP: Auto Control Positive. Perform DAT.")
             else:
-                valid_all = True
-                for m in matches:
-                    ok, p, n = calc_stats(m, p_inputs, s_inputs)
-                    cls = "status-ok" if ok else "status-no"
-                    txt = "Valid Rule of 3" if ok else "Rule Not Met (Need Cells)"
-                    st.markdown(f"<div class='{cls}'><b>Anti-{m}:</b> {txt} ({p} Pos / {n} Neg)</div>", unsafe_allow_html=True)
-                    if not ok: valid_all = False
+                # Prepare Inputs
+                input_p = {1:c1_v, 2:c2_v, 3:c3_v, 4:c4_v, 5:c5_v, 6:c6_v, 7:c7_v, 8:c8_v, 9:c9_v, 10:c10_v, 11:c11_v}
+                input_s = {"I":s_i, "II":s_ii, "III":s_iii}
                 
-                if valid_all:
-                    ht = f"""<div class='print-only'><br><center><h2>Maternity & Children Hospital - Tabuk</h2><h3>Serology Lab</h3></center><div class='results-box'>Pt Name: {nm} ({mr}) | Tech: {tc} | Date: {dt}<hr><h4>Antibodies Detected: Anti-{', '.join(matches)}</h4><p><b>Verification:</b> Probability Rule Met (p <= 0.05)</p><p><b>Action:</b> Phenotype patient negative. Transfuse Ag-negative blood.</p><br><br>Signature: ____________________</div><div style='position:fixed;bottom:0;text-align:center;width:100%'>Dr. Haitham Ismail | Consultant</div></div><script>window.print()</script>"""
-                    st.markdown(ht, unsafe_allow_html=True)
-                    st.balloons()
+                # Exclusion
+                ruled = set()
+                # P
+                for ag in AGS:
+                    for i in range(1,12):
+                        if input_p[i]=="Neg" and can_out(ag, st.session_state.panel_11.iloc[i-1].to_dict()):
+                            ruled.add(ag); break
+                # S
+                smap={"I":0,"II":1,"III":2}
+                for k,v in input_s.items():
+                    if v=="Neg":
+                        idx = smap[k]
+                        for ag in AGS:
+                            if ag not in ruled and can_out(ag, st.session_state.panel_3.iloc[idx].to_dict()):
+                                ruled.add(ag)
+                                
+                candidates = [x for x in AGS if x not in ruled]
+                matches = []
+                for c in candidates:
+                    miss = False
+                    for i in range(1,12):
+                        if input_p[i]!="Neg" and st.session_state.panel_11.iloc[i-1].get(c,0)==0: miss = True
+                    if not miss: matches.append(c)
+                    
+                st.write("---")
+                if not matches: st.error("No Match Found.")
                 else:
-                    st.warning("⚠️ Add Extra Cells to confirm.")
+                    valid_all = True
+                    for m in matches:
+                        ok, p, n, msg = rule_checker(m, input_p, input_s, st.session_state.extras)
+                        css = "status-ok" if ok else "status-fail"
+                        st.markdown(f"<div class='{css}'><b>Anti-{m}:</b> {msg} ({p} Pos / {n} Neg)</div>", unsafe_allow_html=True)
+                        if not ok: valid_all = False
+                        
+                    if valid_all:
+                        st.balloons()
+                        rpt = f"""<div class='print-only'><br><center><h2>MCH Tabuk</h2></center><div class='results-box'><b>Pt:</b> {nm} ({mr})<br><b>Tech:</b> {tc}<hr><b>Conclusion:</b> Anti-{', '.join(matches)} Detected.<br>Probability Valid.<br><br>Sig: ___________</div></div><script>window.print()</script>"""
+                        st.markdown(rpt, unsafe_allow_html=True)
+                        st.info("Validation OK. Print Report (Ctrl+P).")
+                    else:
+                        st.warning("⚠️ Validation Needed. Add Extra Cells below.")
+                        
+        except Exception as e:
+            st.error(f"Logic Error: {e}")
 
-    # EXTRA CELLS (OUT OF FORM)
+    # EXTRA CELLS (OUTSIDE FORM)
     with st.expander("Add Extra Cells"):
-        with st.form("ext"):
-            eid=st.text_input("ID"); eres=st.selectbox("R",["Neg","Pos"]); eag=st.text_input("Antigens (e.g. D C)")
-            if st.form_submit_button("Add"):
+        with st.form("extra_form"):
+            e_id = st.text_input("ID")
+            e_rs = st.selectbox("Res", ["Neg", "Pos"])
+            st.write("Select Present Antigens:")
+            # Simple selectbox
+            ag_str = st.text_input("Type antigens (e.g. D C E)")
+            if st.form_submit_button("Add Cell"):
                 ph = {a:0 for a in AGS}
-                for x in eag.split(): 
-                    if x.upper() in AGS: ph[x.upper()]=1
-                st.session_state.extra.append({"s":1 if eres=="Pos" else 0,"ph":ph})
-                st.success("Added! Re-Run Analysis.")
+                for item in ag_str.split():
+                    it = item.strip()
+                    if it in AGS: ph[it]=1 # basic map
+                    # Case fix
+                    for std in AGS:
+                        if std.upper() == it.upper(): ph[std]=1
+                        
+                st.session_state.extras.append({"src":e_id, "s":1 if e_rs=="Pos" else 0, "res":1 if e_rs=="Pos" else 0, "ph":ph, "p":ph})
+                st.success("Cell Added! Please click RUN ANALYSIS again.")
+                
+    if st.session_state.extras:
+        st.write("Extra Cells Added:")
+        st.dataframe(pd.DataFrame([{"ID":x['src'], "Result":"Pos" if x['s']==1 else "Neg"} for x in st.session_state.extras]))
