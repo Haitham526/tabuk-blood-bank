@@ -1,470 +1,377 @@
 import streamlit as st
 import pandas as pd
 from datetime import date
-import json
-import base64
-import requests
-from pathlib import Path
 
-# --------------------------------------------------------------------------
-# 0) GitHub Save Engine (uses Streamlit Secrets)
-# --------------------------------------------------------------------------
-def _gh_get_cfg():
-    token = st.secrets.get("GITHUB_TOKEN", None)
-    repo  = st.secrets.get("GITHUB_REPO", None)  # e.g. "Haitham526/tabuk-blood-bank"
-    branch = st.secrets.get("GITHUB_BRANCH", "main")
-    return token, repo, branch
-
-def github_upsert_file(path_in_repo: str, content_text: str, commit_message: str):
-    token, repo, branch = _gh_get_cfg()
-    if not token or not repo:
-        raise RuntimeError("Missing Streamlit Secrets: GITHUB_TOKEN / GITHUB_REPO")
-
-    api = f"https://api.github.com/repos/{repo}/contents/{path_in_repo}"
-    headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github+json"}
-
-    # Get SHA if file exists
-    sha = None
-    r = requests.get(api, headers=headers, params={"ref": branch}, timeout=30)
-    if r.status_code == 200:
-        sha = r.json().get("sha")
-    elif r.status_code != 404:
-        raise RuntimeError(f"GitHub GET error {r.status_code}: {r.text}")
-
-    payload = {
-        "message": commit_message,
-        "content": base64.b64encode(content_text.encode("utf-8")).decode("utf-8"),
-        "branch": branch,
-    }
-    if sha:
-        payload["sha"] = sha
-
-    w = requests.put(api, headers=headers, json=payload, timeout=30)
-    if w.status_code not in (200, 201):
-        raise RuntimeError(f"GitHub PUT error {w.status_code}: {w.text}")
-
-def load_csv_if_exists(local_path: str, default_df: pd.DataFrame) -> pd.DataFrame:
-    p = Path(local_path)
-    if p.exists():
-        try:
-            return pd.read_csv(p)
-        except Exception:
-            return default_df
-    return default_df
-
-def load_json_if_exists(local_path: str, default_obj: dict) -> dict:
-    p = Path(local_path)
-    if p.exists():
-        try:
-            return json.loads(p.read_text(encoding="utf-8"))
-        except Exception:
-            return default_obj
-    return default_obj
-
-# --------------------------------------------------------------------------
-# 1. SETUP & BRANDING
-# --------------------------------------------------------------------------
-st.set_page_config(page_title="MCH Tabuk - Serology Expert", layout="wide", page_icon="🩸")
+# ==========================================
+# 1. SETUP & BRANDING (Final Polish)
+# ==========================================
+st.set_page_config(page_title="Tabuk Serology Expert", layout="wide", page_icon="🩸")
 
 st.markdown("""
 <style>
-    @media print {
-        .stApp > header, .sidebar, footer, .no-print, .element-container:has(button) { display: none !important; }
+    /* Print Layout */
+    @media print { 
+        .stApp > header, .sidebar, footer, .no-print, .element-container:has(button) { display: none !important; } 
         .print-only { display: block !important; }
-        .result-sheet { border: 4px double #8B0000; padding: 25px; font-family: 'Times New Roman'; font-size:14px; }
-        .footer-print {
-            position: fixed; bottom: 0; width: 100%; text-align: center;
-            color: #8B0000; font-weight: bold; border-top: 1px solid #ccc; padding: 10px; font-family: serif;
-        }
+        .result-sheet { border: 5px double #8B0000; padding: 30px; font-family: 'Times New Roman'; }
+        .page-footer { position: fixed; bottom: 0; width: 100%; text-align: center; border-top: 2px solid #ccc; padding: 10px; font-weight: bold; }
     }
     .print-only { display: none; }
-
-    .hospital-logo { color: #8B0000; text-align: center; border-bottom: 5px solid #8B0000; padding-bottom: 5px; font-family: 'Arial'; }
-
-    .lot-bar {
-        display: flex; justify-content: space-around; background-color: #f1f8e9;
-        border: 1px solid #81c784; padding: 8px; border-radius: 5px; margin-bottom: 20px; font-weight: bold; color: #1b5e20;
-    }
-
-    .clinical-waiha { background-color: #f8d7da; border-left: 5px solid #dc3545; padding: 15px; margin: 10px 0; color: #721c24; }
-    .clinical-cold { background-color: #cff4fc; border-left: 5px solid #0dcaf0; padding: 15px; margin: 10px 0; color: #055160; }
-    .clinical-alert { background-color: #fff3cd; border: 2px solid #ffca2c; padding: 10px; color: #000; font-weight: bold; margin: 5px 0;}
-    .cell-hint { font-size: 0.9em; color: #155724; background: #d4edda; padding: 2px 6px; border-radius: 4px; }
-
-    .dr-signature {
-        position: fixed; bottom: 10px; right: 15px;
-        background: rgba(255,255,255,0.95);
-        padding: 8px 15px; border: 2px solid #8B0000; border-radius: 8px; z-index:99; box-shadow: 2px 2px 5px rgba(0,0,0,0.1);
-        text-align: center; font-family: 'Georgia', serif;
-    }
-    .dr-name { color: #8B0000; font-size: 15px; font-weight: bold; display: block;}
-    .dr-title { color: #333; font-size: 11px; }
-
+    
+    .hospital-logo { color: #8B0000; text-align: center; border-bottom: 6px solid #8B0000; padding-bottom: 10px; font-family: sans-serif; font-weight: 800;}
+    .lot-badge { background-color: #f1f8e9; color: #2e7d32; border: 1px solid #c8e6c9; padding: 4px 10px; border-radius: 4px; font-weight: bold; font-size: 0.9em; margin-bottom: 15px;}
+    
+    /* Logic Cards */
+    .card-confirmed { background-color: #d1e7dd; padding: 15px; border-radius: 8px; border-left: 6px solid #198754; color: #0f5132; margin-bottom: 8px; }
+    .card-warning { background-color: #fff3cd; padding: 15px; border-radius: 8px; border-left: 6px solid #ffc107; color: #856404; margin-bottom: 8px; }
+    .card-critical { background-color: #f8d7da; padding: 15px; border-radius: 8px; border-left: 6px solid #dc3545; color: #842029; font-weight: bold; }
+    
+    /* Strategy Section */
+    .strategy-block { border: 1px dashed #004085; background-color: #cce5ff; padding: 10px; border-radius: 5px; color: #004085; margin: 5px 0;}
+    .found-cell { background: #198754; color: white; padding: 2px 8px; border-radius: 4px; font-size: 0.9em; margin-left: 5px; }
+    
+    /* Sticky Footer for Screen */
+    .dr-float { position: fixed; bottom: 10px; right: 20px; background: rgba(255,255,255,0.95); padding: 10px; border: 1px solid #bbb; border-radius: 8px; box-shadow: 2px 2px 8px rgba(0,0,0,0.15); text-align: right; z-index: 9999; }
+    .dr-name { color: #8B0000; font-family: serif; font-size: 14px; font-weight: bold; display: block; margin-bottom: 2px;}
+    .dr-title { font-size: 11px; color: #333; }
+    
     div[data-testid="stDataEditor"] table { width: 100% !important; }
 </style>
 """, unsafe_allow_html=True)
 
 st.markdown("""
-<div class='dr-signature no-print'>
+<div class='dr-float no-print'>
     <span class='dr-name'>Dr. Haitham Ismail</span>
     <span class='dr-title'>Clinical Hematology/Oncology &<br>BM Transplantation & Transfusion Medicine Consultant</span>
 </div>
 """, unsafe_allow_html=True)
 
-# --------------------------------------------------------------------------
-# 2. DEFINITIONS
-# --------------------------------------------------------------------------
+# 2. DEFINITIONS (ALL CONSTANTS)
 AGS = ["D","C","E","c","e","Cw","K","k","Kpa","Kpb","Jsa","Jsb","Fya","Fyb","Jka","Jkb","Lea","Leb","P1","M","N","S","s","Lua","Lub","Xga"]
 DOSAGE = ["C","c","E","e","Fya","Fyb","Jka","Jkb","M","N","S","s"]
 PAIRS = {'C':'c','c':'C','E':'e','e':'E','K':'k','k':'K','Fya':'Fyb','Fyb':'Fya','Jka':'Jkb','Jkb':'Jka','M':'N','N':'M','S':'s','s':'S'}
 
 IGNORED_AGS = ["Kpa", "Kpb", "Jsa", "Jsb", "Lub", "Cw"]
-INSIGNIFICANT_AGS = ["Lea", "Lua", "Leb", "P1"]
-GRADES = ["0", "+1", "+2", "+3", "+4", "Hemolysis"]
+# Anti-M kept as significant. P1/Lea/Lua as Cold/Insignificant
+INSIGNIFICANT_AGS = ["Lea", "Lua", "Leb", "P1"] 
+GRADES = ["Negative", "+1", "+2", "+3", "+4", "Hemolysis"] # Explicit Grades
 
-# --------------------------------------------------------------------------
-# 3. STATE (load defaults from local repo files if present)
-# --------------------------------------------------------------------------
-default_p11 = pd.DataFrame([{"ID": f"C{i+1}", **{a:0 for a in AGS}} for i in range(11)])
-default_p3  = pd.DataFrame([{"ID": f"S{i}", **{a:0 for a in AGS}} for i in ["I","II","III"]])
-
-if 'p11' not in st.session_state:
-    st.session_state.p11 = load_csv_if_exists("data/p11.csv", default_p11)
-
-if 'p3' not in st.session_state:
-    st.session_state.p3 = load_csv_if_exists("data/p3.csv", default_p3)
-
-# Lots stored in lots.json
-default_lots = {"lot_p": "", "lot_s": ""}
-lots_obj = load_json_if_exists("data/lots.json", default_lots)
-
-if 'lot_p' not in st.session_state:
-    st.session_state.lot_p = lots_obj.get("lot_p", "")
-
-if 'lot_s' not in st.session_state:
-    st.session_state.lot_s = lots_obj.get("lot_s", "")
-
+# 3. STATE
+if 'p11' not in st.session_state: st.session_state.p11 = pd.DataFrame([{"ID": f"C{i+1}", **{a:0 for a in AGS}} for i in range(11)])
+if 'p3' not in st.session_state: st.session_state.p3 = pd.DataFrame([{"ID": f"S{i}", **{a:0 for a in AGS}} for i in ["I","II","III"]])
+# Locking mechanism
+if 'lot_p' not in st.session_state: st.session_state.lot_p = ""
+if 'lot_s' not in st.session_state: st.session_state.lot_s = ""
+# App Logic
 if 'dat_mode' not in st.session_state: st.session_state.dat_mode = False
 if 'ext' not in st.session_state: st.session_state.ext = []
 
-# --------------------------------------------------------------------------
-# 4. LOGIC ENGINE (as-is)
-# --------------------------------------------------------------------------
+# ==========================================
+# 4. LOGIC ENGINE (V1000 Verified)
+# ==========================================
 def normalize_grade(val):
     s = str(val).lower().strip()
-    return 0 if s in ["0", "neg"] else 1
+    # Anything other than these specific negs is Positive
+    return 0 if s in ["0", "negative", "neg", "nan", ""] else 1
 
 def parse_paste(txt, limit=11):
     try:
-        rows = txt.strip().split('\n')
+        # Splits lines
+        raw_rows = [r for r in txt.strip().split('\n') if r.strip()]
         data = []
         c = 0
-        for line in rows:
+        for line in raw_rows:
             if c >= limit: break
             parts = line.split('\t')
             vals = []
             for p in parts:
-                v = 1 if any(x in str(p).lower() for x in ['+', '1', 'pos', 'w']) else 0
+                v_clean = str(p).lower().strip()
+                # Accept diverse inputs
+                v = 1 if any(x in v_clean for x in ['+', '1', 'pos', 'w', 'yes']) else 0
                 vals.append(v)
-            if len(vals) > 26: vals=vals[-26:]
+            
+            # Trim/Pad to 26
+            if len(vals) > 26: vals = vals[-26:]
             while len(vals) < 26: vals.append(0)
-            d = {"ID": f"C{c+1}" if limit==11 else f"Scn"}
+            
+            # Create Row
+            lbl = f"Cell {c+1}" if limit==11 else f"Scn"
+            d = {"ID": lbl}
             for i, ag in enumerate(AGS): d[ag] = vals[i]
             data.append(d)
             c+=1
-        return pd.DataFrame(data), f"Updated {c} rows."
-    except Exception as e:
-        return None, str(e)
+        
+        return pd.DataFrame(data), f"Successfully mapped {c} rows."
+    except Exception as e: return None, str(e)
 
+# --- 1. Find cells for Strategy ---
 def find_matching_cells_in_inventory(target_ab, conflicts):
-    found_list = []
+    matches = []
+    # Panel
     for i in range(11):
         cell = st.session_state.p11.iloc[i]
         if cell.get(target_ab,0)==1:
             clean = True
-            for bad in conflicts:
+            for bad in conflicts: 
                 if cell.get(bad,0)==1: clean=False; break
-            if clean: found_list.append(f"Panel #{i+1}")
-    sc_lbls = ["I","II","III"]
+            if clean: matches.append(f"Panel #{i+1}")
+    # Screen
+    sc = ["I","II","III"]
     for i in range(3):
         cell = st.session_state.p3.iloc[i]
         if cell.get(target_ab,0)==1:
             clean = True
-            for bad in conflicts:
+            for bad in conflicts: 
                 if cell.get(bad,0)==1: clean=False; break
-            if clean: found_list.append(f"Screen {sc_lbls[i]}")
-    return found_list
+            if clean: matches.append(f"Screen {sc[i]}")
+    return matches
 
-def analyze_alloantibodies(in_p, in_s, extra_cells):
+# --- 2. Master Analysis ---
+def run_serology_logic(inputs_p, inputs_s, extras):
     ruled_out = set()
-    # 1. Panel Exclusion
+    
+    # 1. EXCLUSION PHASE (Panel + Screen + Extra)
+    # Check Panel Negs
     for i in range(1, 12):
-        if normalize_grade(in_p[i]) == 0:
+        if normalize_grade(inputs_p[i]) == 0:
             ph = st.session_state.p11.iloc[i-1]
             for ag in AGS:
                 safe=True
-                if ag in DOSAGE and ph.get(PAIRS.get(ag),0)==1: safe=False
+                if ag in DOSAGE and ph.get(PAIRS.get(ag),0)==1: safe=False 
                 if ph.get(ag,0)==1 and safe: ruled_out.add(ag)
-    # 2. Screen Exclusion
-    smap={"I":0,"II":1,"III":2}
+    
+    # Check Screen Negs
+    s_idx = {"I":0,"II":1,"III":2}
     for k in ["I","II","III"]:
-        if normalize_grade(in_s[k]) == 0:
-            ph = st.session_state.p3.iloc[smap[k]]
+        if normalize_grade(inputs_s[k]) == 0:
+            ph = st.session_state.p3.iloc[s_idx[k]]
             for ag in AGS:
-                if ag not in ruled_out:
+                if ag not in ruled_out: # Optim
                     safe=True
                     if ag in DOSAGE and ph.get(PAIRS.get(ag),0)==1: safe=False
                     if ph.get(ag,0)==1 and safe: ruled_out.add(ag)
-    # 3. Extra Exclusion
-    for ex in extra_cells:
+                    
+    # Check Extra Cells Negs
+    for ex in extras:
         if normalize_grade(ex['res']) == 0:
             for ag in AGS:
+                # Assume extra cells entered by tech don't have dosage ambiguity or rule strictly
                  if ex['ph'].get(ag,0)==1: ruled_out.add(ag)
 
+    # 2. SURVIVORS & MASKING
     candidates = [x for x in AGS if x not in ruled_out]
     display_cands = [x for x in candidates if x not in IGNORED_AGS]
-
-    g_indices = [1,2,3,4,8]
-    is_G_pattern = True
-    for idx in g_indices:
-        if normalize_grade(in_p[idx]) == 0:
-            is_G_pattern = False
-            break
-
-    is_D = "D" in display_cands
+    
+    # Anti-D Silent Masking Logic
     final_list = []
     notes = []
-
+    
+    # Check D Presence
+    has_D = "D" in display_cands
+    
+    # Check G Pattern (1,2,3,4,8 Pos?) - Only relevant if D and C are present
+    is_G_suspect = False
+    if has_D and "C" in display_cands:
+         # Check reactions of cells 1,2,3,4,8 (indicies 1..8)
+         # Using Safe Get
+         g_cells_reacting = all(normalize_grade(inputs_p.get(i,0))==1 for i in [1,2,3,4,8])
+         if g_cells_reacting: is_G_suspect = True
+    
     for c in display_cands:
-        if is_D:
+        if has_D:
             if c in ["C", "E"]:
-                if c=="C" and is_G_pattern:
-                     notes.append("anti_G_suspect")
-                     final_list.append(c)
+                # If G suspect is active and c is C, keep it and warn
+                if c == "C" and is_G_suspect:
+                    notes.append("suspect_G")
                 else:
-                     continue
+                    continue # Mask
         final_list.append(c)
-
+        
     if "c" in final_list: notes.append("anti-c_risk")
+    
     return final_list, notes
 
-def check_rule_3(cand, in_p, in_s, extras):
+# --- 3. Rule of Three Calc ---
+def check_p_values(cand, in_p, in_s, extras):
     p, n = 0, 0
+    # Panel
     for i in range(1, 12):
         s=normalize_grade(in_p[i]); h=st.session_state.p11.iloc[i-1].get(cand,0)
         if s==1 and h==1: p+=1
         if s==0 and h==0: n+=1
-    si={"I":0,"II":1,"III":2}
+    # Screen
+    sidx = {"I":0,"II":1,"III":2}
     for k in ["I","II","III"]:
-        s=normalize_grade(in_s[k]); h=st.session_state.p3.iloc[si[k]].get(cand,0)
+        s=normalize_grade(in_s[k]); h=st.session_state.p3.iloc[sidx[k]].get(cand,0)
         if s==1 and h==1: p+=1
         if s==0 and h==0: n+=1
+    # Extras
     for c in extras:
         s=normalize_grade(c['res']); h=c['ph'].get(cand,0)
         if s==1 and h==1: p+=1
         if s==0 and h==0: n+=1
-    ok = (p>=3 and n>=3) or (p>=2 and n>=3)
-    return ok, p, n
+        
+    passed = (p>=3 and n>=3) or (p>=2 and n>=3) # Std or Mod
+    return passed, p, n
 
-# --------------------------------------------------------------------------
-# 5. UI
-# --------------------------------------------------------------------------
+# ==========================================
+# 5. UI CONSTRUCTION
+# ==========================================
 with st.sidebar:
     st.image("https://cdn-icons-png.flaticon.com/512/2966/2966327.png", width=60)
     nav = st.radio("Menu", ["Workstation", "Supervisor"])
-    if st.button("RESET DATA"):
-        st.session_state.ext=[]; st.session_state.dat_mode=False
-        st.rerun()
+    if st.button("RESET"): st.session_state.ext=[]; st.rerun()
 
-# ------------------ SUPERVISOR ------------------
+# --- ADMIN VIEW ---
 if nav == "Supervisor":
-    st.title("Config")
-
+    st.title("Admin Configuration")
     if st.text_input("Password",type="password")=="admin123":
-        st.subheader("1. Lot Setup (Separate)")
         c1, c2 = st.columns(2)
-        lp = c1.text_input("ID Panel Lot#", value=st.session_state.lot_p)
-        ls = c2.text_input("Screen Panel Lot#", value=st.session_state.lot_s)
+        lp = c1.text_input("ID Panel Lot", value=st.session_state.lot_p)
+        ls = c2.text_input("Screen Lot", value=st.session_state.lot_s)
+        if st.button("Save & Lock System"):
+            st.session_state.lot_p = lp; st.session_state.lot_s = ls
+            st.success("System Updated!"); st.rerun()
 
-        if st.button("Save Lots (Local)"):
-            st.session_state.lot_p=lp
-            st.session_state.lot_s=ls
-            st.success("Saved locally. Now press **Save to GitHub** to publish to all devices.")
-
-        st.subheader("2. Grid Data (Copy-Paste)")
-        t1, t2 = st.tabs(["Panel (11)", "Screen (3)"])
+        t1,t2 = st.tabs(["Panel (Copy/Paste)", "Screen (Copy/Paste)"])
         with t1:
-            p_txt=st.text_area("Paste Panel Numbers",height=150)
-            if st.button("Upd P11"):
-                d,m=parse_paste(p_txt,11)
-                if d is not None:
-                    st.session_state.p11=d
-                    st.success(m)
+            pt = st.text_area("Paste Excel Digits (11 Rows)", height=150)
+            if st.button("Update Panel"):
+                df, m = parse_paste(pt, 11)
+                if df is not None: st.session_state.p11=df; st.success(m)
             st.dataframe(st.session_state.p11.iloc[:,:15])
-
         with t2:
-            s_txt=st.text_area("Paste Screen Numbers",height=100)
-            if st.button("Upd Scr"):
-                d,m=parse_paste(s_txt,3)
-                if d is not None:
-                    st.session_state.p3=d
-                    st.success(m)
+            st2 = st.text_area("Paste Excel Digits (3 Rows)", height=100)
+            if st.button("Update Screen"):
+                df2, m2 = parse_paste(st2, 3)
+                if df2 is not None: st.session_state.p3=df2; st.success(m2)
             st.dataframe(st.session_state.p3.iloc[:,:15])
 
-        st.write("---")
-        st.subheader("3. Publish to ALL devices (Save to GitHub)")
-
-        st.info("بعد ما تحدث البانل/السكرين واللوت، اضغط الزر ده مرة واحدة. "
-                "هيعمل Commit تلقائي في GitHub، وأي جهاز يفتح اللينك هيشوف نفس الجداول.")
-
-        if st.button("💾 Save to GitHub (Commit)"):
-            try:
-                lots_json = json.dumps(
-                    {"lot_p": st.session_state.lot_p, "lot_s": st.session_state.lot_s},
-                    ensure_ascii=False, indent=2
-                )
-                github_upsert_file("data/p11.csv", st.session_state.p11.to_csv(index=False), "Update monthly p11 panel")
-                github_upsert_file("data/p3.csv",  st.session_state.p3.to_csv(index=False),  "Update monthly p3 screen")
-                github_upsert_file("data/lots.json", lots_json, "Update monthly lots")
-                st.success("✅ Done. Published to GitHub. Now ALL devices will see the updated tables.")
-            except Exception as e:
-                st.error(f"❌ Save failed: {e}")
-
-# ------------------ WORKSTATION ------------------
+# --- USER VIEW ---
 else:
-    st.markdown("""
+    # 1. HEADER (Check Locks)
+    if not st.session_state.lot_p or not st.session_state.lot_s:
+        st.error("⛔ SYSTEM LOCKED: Lots not configured."); st.stop()
+
+    st.markdown(f"""
     <div class='hospital-logo'>
         <h2>Maternity & Children Hospital - Tabuk</h2>
-        <h4 style='color:#555'>Blood Bank Serology Unit</h4>
-    </div>
-    """, unsafe_allow_html=True)
-
-    lp_txt = st.session_state.lot_p if st.session_state.lot_p else "⚠️ REQUIRED"
-    ls_txt = st.session_state.lot_s if st.session_state.lot_s else "⚠️ REQUIRED"
-    st.markdown(f"""
-    <div class='lot-bar'>
-        <span>ID Panel Lot: {lp_txt}</span> | <span>Screen Lot: {ls_txt}</span>
-    </div>
-    """, unsafe_allow_html=True)
-
+        <h4 style='color:#555'>Blood Bank Serology</h4>
+        <span class='lot-badge'>ID Panel: {st.session_state.lot_p}</span> 
+        <span class='lot-badge'>Screen: {st.session_state.lot_s}</span>
+    </div>""", unsafe_allow_html=True)
+    
+    # 2. PATIENT
     c1,c2,c3,c4 = st.columns(4)
     nm=c1.text_input("Name"); mr=c2.text_input("MRN"); tc=c3.text_input("Tech"); dt=c4.date_input("Date")
+    st.divider()
 
-    with st.form("main"):
-        st.write("### Reaction Entry")
-        L, R = st.columns([1, 2.5])
-        with L:
-            st.write("Controls")
-            ac_res = st.radio("Auto Control (AC)", ["Negative", "Positive"])
-            st.write("Screening")
-            s1=st.selectbox("Scn I", GRADES)
-            s2=st.selectbox("Scn II", GRADES)
-            s3=st.selectbox("Scn III", GRADES)
-        with R:
-            st.write("Panel Reactions")
+    # 3. FORM INPUTS (Safety Form)
+    with st.form("entry_grid"):
+        colL, colR = st.columns([1, 2])
+        with colL:
+            st.write("<b>Control & Screen</b>", unsafe_allow_html=True)
+            ac_in = st.radio("Auto Control", ["Negative", "Positive"])
+            s1=st.selectbox("Scn I",GRADES); s2=st.selectbox("Scn II",GRADES); s3=st.selectbox("Scn III",GRADES)
+        with colR:
+            st.write("<b>Panel (11 Cells)</b>", unsafe_allow_html=True)
             g1,g2=st.columns(2)
             with g1:
-                c1=st.selectbox("1",GRADES,key="1"); c2=st.selectbox("2",GRADES,key="2"); c3=st.selectbox("3",GRADES,key="3"); c4=st.selectbox("4",GRADES,key="4"); c5=st.selectbox("5",GRADES,key="5"); c6=st.selectbox("6",GRADES,key="6")
+                c1=st.selectbox("1",GRADES,key="k1"); c2=st.selectbox("2",GRADES,key="k2"); c3=st.selectbox("3",GRADES,key="k3")
+                c4=st.selectbox("4",GRADES,key="k4"); c5=st.selectbox("5",GRADES,key="k5"); c6=st.selectbox("6",GRADES,key="k6")
             with g2:
-                c7=st.selectbox("7",GRADES,key="7"); c8=st.selectbox("8",GRADES,key="8"); c9=st.selectbox("9",GRADES,key="9"); c10=st.selectbox("10",GRADES,key="10"); c11=st.selectbox("11",GRADES,key="11")
-
+                c7=st.selectbox("7",GRADES,key="k7"); c8=st.selectbox("8",GRADES,key="k8"); c9=st.selectbox("9",GRADES,key="k9")
+                c10=st.selectbox("10",GRADES,key="k10"); c11=st.selectbox("11",GRADES,key="k11")
         run = st.form_submit_button("🚀 Run Analysis")
 
     if run:
-        if not st.session_state.lot_p or not st.session_state.lot_s:
-            st.error("⛔ Action Blocked: Lots not configured by Supervisor.")
+        inp_p = {1:c1,2:c2,3:c3,4:c4,5:c5,6:c6,7:c7,8:c8,9:c9,10:c10,11:c11}
+        inp_s = {"I":s1,"II":s2,"III":s3}
+        pos_sum = sum([normalize_grade(x) for x in inp_p.values()]) + sum([normalize_grade(x) for x in inp_s.values()])
+
+        # LOGIC 1: AC POSITIVE
+        if ac_in == "Positive":
+            st.session_state.dat_mode = True # Unlock DAT
+            st.markdown("<div class='status-critical'>🚨 Auto-Control POSITIVE</div>", unsafe_allow_html=True)
+            if pos_sum >= 11:
+                st.warning("⚠️ Critical: Pan-agglutination + Pos AC. Suspect **DHTR** vs WAIHA.")
+            st.info("Allo-antibody Logic Suspended. Please complete DAT below.")
+            
+        # LOGIC 2: HIGH FREQ
+        elif pos_sum >= 13: # (Panel all pos + screen mostly pos)
+             st.session_state.dat_mode = False
+             st.markdown("<div class='status-warning'>⚠️ <b>High Incidence Antibody</b><br>Pan-reactivity with Negative Auto-Control.</div>", unsafe_allow_html=True)
+
+        # LOGIC 3: ALLOANTIBODY
         else:
-            if ac_res == "Positive":
-                st.session_state.dat_mode = True
+            st.session_state.dat_mode = False
+            cands, notes = analyze_master_logic(inp_p, inp_s, st.session_state.ext)
+            
+            # Separation
+            real = [x for x in cands if x not in INSIGNIFICANT_AGS]
+            cold = [x for x in cands if x in INSIGNIFICANT_AGS]
+            
+            st.subheader("Conclusion")
+            
+            if not real and not cold:
+                st.error("No Match / Inconclusive.")
             else:
-                st.session_state.dat_mode = False
-                i_p = {1:c1,2:c2,3:c3,4:c4,5:c5,6:c6,7:c7,8:c8,9:c9,10:c10,11:c11}
-                i_s = {"I":s1,"II":s2,"III":s3}
-                cnt = sum([normalize_grade(x) for x in i_p.values()])
+                # -- ALERTS --
+                if "suspect_G" in notes: st.warning("⚠️ Suspect Anti-G pattern (D+C). Differentiate.")
+                if "anti-c_risk" in notes: st.markdown("<div class='status-critical'>🛑 Anti-c: Give R1R1 (E- c-) Units.</div>", unsafe_allow_html=True)
 
-                if cnt >= 11:
-                    st.markdown("""<div class='clinical-alert'>⚠️ <b>High Incidence Antigen suspected.</b><br>Pan-reactivity with Neg AC.<br>Action: Check siblings / Reference Lab.</div>""", unsafe_allow_html=True)
-                else:
-                    final, notes = analyze_alloantibodies(i_p, i_s, st.session_state.ext)
-                    sigs = [x for x in final if x not in INSIGNIFICANT_AGS]
-                    others = [x for x in final if x in INSIGNIFICANT_AGS]
-
-                    st.subheader("Conclusion")
-
-                    if not sigs and not others:
-                        st.error("No Match Found / Inconclusive.")
-                    else:
-                        valid_all = True
-
-                        if "anti_G_suspect" in notes:
-                            st.warning("⚠️ **Anti-G or Anti-D+C**: Reaction Pattern (Cells 1,2,3,4,8 Pos) suggests Anti-G. Perform Adsorption/Elution to differentiate.")
-                        elif "D" in sigs:
-                            st.caption("ℹ️ Anti-D present (Anti-C/Anti-E excluded/masked).")
-
-                        if "anti-c_risk" in notes:
-                            st.markdown("""<div class='clinical-alert'>🛑 <b>Anti-c Detected:</b> Patient requires R1R1 (E- c-) units to prevent Anti-E formation.</div>""", unsafe_allow_html=True)
-
-                        if sigs:
-                            st.success(f"**Identified:** Anti-{', '.join(sigs)}")
-                        if others:
-                            st.info(f"**Other:** Anti-{', '.join(others)} (Clinically insignificant/Cold)")
-
-                        if len(sigs) > 1:
-                            st.write("---")
-                            st.markdown("**🧪 Separation Strategy (Using Inventory):**")
-                            for t in sigs:
-                                conf = [x for x in sigs if x!=t]
-                                found = find_matching_cells_in_inventory(t, conf)
-                                s_txt = f"<span class='cell-hint'>{', '.join(found)}</span>" if found else "<span style='color:red'>Search External</span>"
-                                st.write(f"- Confirm **{t}**: Needs ({t}+ / {' '.join(conf)} neg) {s_txt}")
-
-                        for ab in (sigs+others):
-                            ok, p, n = check_rule_3(ab, i_p, i_s, st.session_state.ext)
-                            msg = "Rule of 3 MET" if ok else "Unconfirmed"
-                            ic = "✅" if ok else "⚠️"
-                            st.write(f"**{ic} Anti-{ab}:** {msg} (P:{p} / N:{n})")
-                            if not ok: valid_all = False
-
-                        if valid_all:
-                            if st.button("Generate Official Report"):
-                                rpt=f"""<div class='print-only'><center><h2>Maternity & Children Hospital - Tabuk</h2><h3>Serology Report</h3></center><div class='result-sheet'><b>Pt:</b> {nm} ({mr})<br><b>Tech:</b> {tc} | <b>Lot:</b> {st.session_state.lot_p}<hr><b>Result:</b> Anti-{', '.join(sigs)}<br>{'('+','.join(others)+')' if others else ''}<br><b>Validation:</b> Confirmed (p<=0.05).<br><b>Clinical:</b> Phenotype Negative. Transfuse compatible.<br><br><b>Consultant Verified:</b> _____________</div><div class='print-footer'>Dr. Haitham Ismail | Consultant</div></div><script>window.print()</script>"""
-                                st.markdown(rpt, unsafe_allow_html=True)
-                        else:
-                            st.warning("⚠️ Validation Required. Add Cells below.")
-
+                if real: st.success(f"**Identified:** Anti-{', '.join(real)}")
+                if cold: st.info(f"**Insignificant:** Anti-{', '.join(cold)}")
+                
+                # -- STRATEGY --
+                if len(real) > 1:
+                     st.write("---")
+                     st.markdown("#### 🔬 Separation Strategy (Inventory Check)")
+                     for t in real:
+                         others = [o for o in real if o!=t]
+                         # Call Inventory Search Function
+                         hits = find_matching_cells_in_inventory(t, others)
+                         hit_txt = f"<span class='cell-hint'>{', '.join(hits)}</span>" if hits else "<span style='color:red'>Search Library</span>"
+                         st.markdown(f"<div class='strategy-box'>Confirm <b>{t}</b> (Select {t}+ / {' '.join(others)} neg) -> {hit_txt}</div>", unsafe_allow_html=True)
+                
+                st.write("---")
+                # -- VALIDATION --
+                valid_all = True
+                for ab in (real+cold):
+                    ok, p, n = check_p_val_stats(ab, inp_p, inp_s, st.session_state.ext)
+                    icon = "✅" if ok else "⚠️"
+                    msg = "Confirmed (Rule of 3)" if ok else "Unconfirmed"
+                    cls = "status-confirmed" if ok else "status-warning"
+                    st.markdown(f"<div class='{cls}'>{icon} <b>Anti-{ab}:</b> {msg} (Pos:{p} | Neg:{n})</div>", unsafe_allow_html=True)
+                    if not ok: valid_all = False
+                
+                if valid_all and real:
+                    if st.button("🖨️ Official Report"):
+                         t=f"""<div class='print-only'><center><h2>Maternity & Children Hospital - Tabuk</h2><h3>Serology Report</h3></center><br>Pt: {nm} ({mr}) | Tech: {tc} | Date: {dt}<hr><h4>Results: Anti-{', '.join(real)}</h4>Validation: Confirmed.<br>Note: Phenotype Neg.<br><br>Sig:___________<div class='page-footer'>Dr. Haitham Ismail</div></div><script>window.print()</script>"""
+                         st.markdown(t, unsafe_allow_html=True)
+    
+    # 4. DAT SECTION (PERSISTENT)
     if st.session_state.dat_mode:
         st.write("---")
         st.subheader("🧪 Monospecific DAT Workup")
-
-        c_d1, c_d2, c_d3 = st.columns(3)
-        igg = c_d1.selectbox("IgG", ["Negative","Positive"], key="dig")
-        c3d = c_d2.selectbox("C3d", ["Negative","Positive"], key="dc3")
-        ctl = c_d3.selectbox("Control", ["Negative","Positive"], key="dct")
-
-        st.markdown("**Interpretation:**")
-        if ctl == "Positive":
-            st.error("Invalid. Control Positive.")
-        else:
-            if igg=="Positive":
-                st.warning("👉 **WAIHA** (Warm Autoimmune Hemolytic Anemia).")
-                st.write("- Perform Elution/Adsorption.")
-                st.markdown("<div class='clinical-waiha'><b>⚠️ Critical Note:</b> If recently transfused, rule out <b>Delayed Hemolytic Transfusion Reaction (DHTR)</b>. Elution is Mandatory.</div>", unsafe_allow_html=True)
-            elif c3d=="Positive" and igg=="Negative":
-                st.info("👉 **CAS** (Cold Agglutinin Syndrome).")
-                st.write("- Use Pre-warm Technique.")
-
+        with st.container(border=True):
+             d1,d2,d3 = st.columns(3)
+             i=d1.selectbox("IgG",["Neg","Pos"], key="di"); c=d2.selectbox("C3d",["Neg","Pos"], key="dc"); t=d3.selectbox("Ctl",["Neg","Pos"], key="dt")
+             if t=="Pos": st.error("Invalid")
+             elif i=="Pos": st.warning("Probable WAIHA. Rule out DHTR if transfused.")
+             elif c=="Pos": st.info("Probable CAS (Cold Agglutinin).")
+             
+    # 5. EXTRA CELLS
     if not st.session_state.dat_mode:
-        with st.expander("➕ Add Selected Cell (From Library)"):
-            id_x=st.text_input("ID")
-            rs_x=st.selectbox("R",GRADES,key="exr")
-            ag_col=st.columns(6)
-            new_p={}
-            for i,ag in enumerate(AGS):
-                if ag_col[i%6].checkbox(ag): new_p[ag]=1
-                else: new_p[ag]=0
-            if st.button("Confirm Add"):
-                st.session_state.ext.append({"res":normalize_grade(rs_x),"res_txt":rs_x,"ph":new_p})
-                st.success("Added! Re-run Analysis.")
+        with st.expander("➕ Add Selected Cell (Validation)"):
+            ex_id=st.text_input("Cell Lot"); ex_r=st.selectbox("Result",GRADES,key="ex_r")
+            st.write("Phenotype:")
+            cg=st.columns(8); new_ph={}
+            for idx, a in enumerate(AGS):
+                if cg[idx%8].checkbox(a): new_ph[a]=1 
+                else: new_ph[a]=0
+            if st.button("Add"):
+                st.session_state.ext.append({"res":ex_r,"ph":new_ph})
+                st.success("Added! Re-run."); st.rerun()
 
-    if st.session_state.ext:
-        st.table(pd.DataFrame(st.session_state.ext)[['res_txt']])
+    if st.session_state.ext: st.table(pd.DataFrame(st.session_state.ext))
