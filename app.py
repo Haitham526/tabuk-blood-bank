@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 from datetime import date
-
+import os, json
 # --------------------------------------------------------------------------
 # 1. SETUP & BRANDING (RED SIGNATURE FIX)
 # --------------------------------------------------------------------------
@@ -75,6 +75,45 @@ if 'lot_s' not in st.session_state: st.session_state.lot_s = ""
 # DAT STATE
 if 'dat_mode' not in st.session_state: st.session_state.dat_mode = False
 if 'ext' not in st.session_state: st.session_state.ext = []
+    # =========================================================
+# SHARED DATA FROM GITHUB (PERSISTENT FOR ALL USERS)
+# =========================================================
+import os, json
+
+DATA_DIR = "data"
+P11_FILE = os.path.join(DATA_DIR, "p11.csv")
+P3_FILE  = os.path.join(DATA_DIR, "p3.csv")
+LOT_FILE = os.path.join(DATA_DIR, "lots.json")
+
+def load_shared_from_repo():
+    # Load Panel 11
+    if os.path.exists(P11_FILE):
+        df = pd.read_csv(P11_FILE)
+        for a in AGS:
+            if a in df.columns:
+                df[a] = pd.to_numeric(df[a], errors="coerce").fillna(0).astype(int)
+        st.session_state.p11 = df
+
+    # Load Screen 3
+    if os.path.exists(P3_FILE):
+        df = pd.read_csv(P3_FILE)
+        for a in AGS:
+            if a in df.columns:
+                df[a] = pd.to_numeric(df[a], errors="coerce").fillna(0).astype(int)
+        st.session_state.p3 = df
+
+    # Load Lots
+    if os.path.exists(LOT_FILE):
+        try:
+            with open(LOT_FILE, "r", encoding="utf-8") as f:
+                lots = json.load(f)
+            st.session_state.lot_p = lots.get("lot_p", "")
+            st.session_state.lot_s = lots.get("lot_s", "")
+        except:
+            pass
+
+# Run once when app starts
+load_shared_from_repo()
 
 # 4. LOGIC ENGINE
 def normalize_grade(val):
