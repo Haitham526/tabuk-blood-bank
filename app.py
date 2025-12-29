@@ -115,7 +115,10 @@ st.markdown("""
 # 2. DEFINITIONS
 # --------------------------------------------------------------------------
 AGS = ["D","C","E","c","e","Cw","K","k","Kpa","Kpb","Jsa","Jsb","Fya","Fyb","Jka","Jkb","Lea","Leb","P1","M","N","S","s","Lua","Lub","Xga"]
-DOSAGE = ["C","c","E","e","Fya","Fyb","Jka","Jkb","M","N","S","s"]
+
+# ✅ DOSAGE: removed "s" as requested
+DOSAGE = ["C","c","E","e","Fya","Fyb","Jka","Jkb","M","N","S"]
+
 PAIRS = {'C':'c','c':'C','E':'e','e':'E','K':'k','k':'K','Fya':'Fyb','Fyb':'Fya','Jka':'Jkb','Jkb':'Jka','M':'N','N':'M','S':'s','s':'S'}
 
 IGNORED_AGS = ["Kpa", "Kpb", "Jsa", "Jsb", "Lub", "Cw"]
@@ -134,7 +137,6 @@ if 'p11' not in st.session_state:
 if 'p3' not in st.session_state:
     st.session_state.p3 = load_csv_if_exists("data/p3.csv", default_p3)
 
-# Lots stored in lots.json
 default_lots = {"lot_p": "", "lot_s": ""}
 lots_obj = load_json_if_exists("data/lots.json", default_lots)
 
@@ -148,7 +150,7 @@ if 'dat_mode' not in st.session_state: st.session_state.dat_mode = False
 if 'ext' not in st.session_state: st.session_state.ext = []
 
 # --------------------------------------------------------------------------
-# 4. LOGIC ENGINE (as-is)
+# 4. LOGIC ENGINE (kept as-is except rules above)
 # --------------------------------------------------------------------------
 def normalize_grade(val):
     s = str(val).lower().strip()
@@ -166,12 +168,13 @@ def parse_paste(txt, limit=11):
             for p in parts:
                 v = 1 if any(x in str(p).lower() for x in ['+', '1', 'pos', 'w']) else 0
                 vals.append(v)
-            if len(vals) > 26: vals=vals[-26:]
+            if len(vals) > 26: vals = vals[-26:]
             while len(vals) < 26: vals.append(0)
             d = {"ID": f"C{c+1}" if limit==11 else f"Scn"}
-            for i, ag in enumerate(AGS): d[ag] = vals[i]
+            for i, ag in enumerate(AGS):
+                d[ag] = vals[i]
             data.append(d)
-            c+=1
+            c += 1
         return pd.DataFrame(data), f"Updated {c} rows."
     except Exception as e:
         return None, str(e)
@@ -183,29 +186,38 @@ def find_matching_cells_in_inventory(target_ab, conflicts):
         if cell.get(target_ab,0)==1:
             clean = True
             for bad in conflicts:
-                if cell.get(bad,0)==1: clean=False; break
-            if clean: found_list.append(f"Panel #{i+1}")
+                if cell.get(bad,0)==1:
+                    clean=False; break
+            if clean:
+                found_list.append(f"Panel #{i+1}")
+
     sc_lbls = ["I","II","III"]
     for i in range(3):
         cell = st.session_state.p3.iloc[i]
         if cell.get(target_ab,0)==1:
             clean = True
             for bad in conflicts:
-                if cell.get(bad,0)==1: clean=False; break
-            if clean: found_list.append(f"Screen {sc_lbls[i]}")
+                if cell.get(bad,0)==1:
+                    clean=False; break
+            if clean:
+                found_list.append(f"Screen {sc_lbls[i]}")
     return found_list
 
 def analyze_alloantibodies(in_p, in_s, extra_cells):
     ruled_out = set()
-    # 1. Panel Exclusion
+
+    # 1) Panel Exclusion
     for i in range(1, 12):
         if normalize_grade(in_p[i]) == 0:
             ph = st.session_state.p11.iloc[i-1]
             for ag in AGS:
                 safe=True
-                if ag in DOSAGE and ph.get(PAIRS.get(ag),0)==1: safe=False
-                if ph.get(ag,0)==1 and safe: ruled_out.add(ag)
-    # 2. Screen Exclusion
+                if ag in DOSAGE and ph.get(PAIRS.get(ag),0)==1:
+                    safe=False  # heterozygous => not safe for dosage antigens
+                if ph.get(ag,0)==1 and safe:
+                    ruled_out.add(ag)
+
+    # 2) Screen Exclusion
     smap={"I":0,"II":1,"III":2}
     for k in ["I","II","III"]:
         if normalize_grade(in_s[k]) == 0:
@@ -213,17 +225,22 @@ def analyze_alloantibodies(in_p, in_s, extra_cells):
             for ag in AGS:
                 if ag not in ruled_out:
                     safe=True
-                    if ag in DOSAGE and ph.get(PAIRS.get(ag),0)==1: safe=False
-                    if ph.get(ag,0)==1 and safe: ruled_out.add(ag)
-    # 3. Extra Exclusion
+                    if ag in DOSAGE and ph.get(PAIRS.get(ag),0)==1:
+                        safe=False
+                    if ph.get(ag,0)==1 and safe:
+                        ruled_out.add(ag)
+
+    # 3) Extra Exclusion
     for ex in extra_cells:
         if normalize_grade(ex['res']) == 0:
             for ag in AGS:
-                 if ex['ph'].get(ag,0)==1: ruled_out.add(ag)
+                if ex['ph'].get(ag,0)==1:
+                    ruled_out.add(ag)
 
     candidates = [x for x in AGS if x not in ruled_out]
     display_cands = [x for x in candidates if x not in IGNORED_AGS]
 
+    # Anti-G flag pattern
     g_indices = [1,2,3,4,8]
     is_G_pattern = True
     for idx in g_indices:
@@ -236,33 +253,40 @@ def analyze_alloantibodies(in_p, in_s, extra_cells):
     notes = []
 
     for c in display_cands:
+        # Mask C and E when D present; keep C only if Anti-G pattern suggests differential
         if is_D:
             if c in ["C", "E"]:
                 if c=="C" and is_G_pattern:
-                     notes.append("anti_G_suspect")
-                     final_list.append(c)
+                    notes.append("anti_G_suspect")
+                    final_list.append(c)
                 else:
-                     continue
+                    continue
         final_list.append(c)
 
-    if "c" in final_list: notes.append("anti-c_risk")
+    if "c" in final_list:
+        notes.append("anti-c_risk")
+
     return final_list, notes
 
 def check_rule_3(cand, in_p, in_s, extras):
     p, n = 0, 0
+
     for i in range(1, 12):
         s=normalize_grade(in_p[i]); h=st.session_state.p11.iloc[i-1].get(cand,0)
         if s==1 and h==1: p+=1
         if s==0 and h==0: n+=1
+
     si={"I":0,"II":1,"III":2}
     for k in ["I","II","III"]:
         s=normalize_grade(in_s[k]); h=st.session_state.p3.iloc[si[k]].get(cand,0)
         if s==1 and h==1: p+=1
         if s==0 and h==0: n+=1
+
     for c in extras:
         s=normalize_grade(c['res']); h=c['ph'].get(cand,0)
         if s==1 and h==1: p+=1
         if s==0 and h==0: n+=1
+
     ok = (p>=3 and n>=3) or (p>=2 and n>=3)
     return ok, p, n
 
@@ -273,7 +297,8 @@ with st.sidebar:
     st.image("https://cdn-icons-png.flaticon.com/512/2966/2966327.png", width=60)
     nav = st.radio("Menu", ["Workstation", "Supervisor"])
     if st.button("RESET DATA"):
-        st.session_state.ext=[]; st.session_state.dat_mode=False
+        st.session_state.ext=[]
+        st.session_state.dat_mode=False
         st.rerun()
 
 # ------------------ SUPERVISOR ------------------
@@ -383,7 +408,7 @@ else:
                 cnt = sum([normalize_grade(x) for x in i_p.values()])
 
                 if cnt >= 11:
-                    st.markdown("""<div class='clinical-alert'>⚠️ <b>High Incidence Antigen suspected.</b><br>Pan-reactivity with Neg AC.<br>Action: Check siblings / Reference Lab.</div>""", unsafe_allow_html=True)
+                    st.markdown("""<div class='clinical-alert'>⚠️ <b>High Incidence Antigen suspected.</b><br>Pan-reactivity with Neg AC.<br>Action: Search compatible donors among <b>parents & siblings</b>.</div>""", unsafe_allow_html=True)
                 else:
                     final, notes = analyze_alloantibodies(i_p, i_s, st.session_state.ext)
                     sigs = [x for x in final if x not in INSIGNIFICANT_AGS]
@@ -409,6 +434,7 @@ else:
                         if others:
                             st.info(f"**Other:** Anti-{', '.join(others)} (Clinically insignificant/Cold)")
 
+                        # Separation strategy advisor (keep as-is)
                         if len(sigs) > 1:
                             st.write("---")
                             st.markdown("**🧪 Separation Strategy (Using Inventory):**")
@@ -418,12 +444,19 @@ else:
                                 s_txt = f"<span class='cell-hint'>{', '.join(found)}</span>" if found else "<span style='color:red'>Search External</span>"
                                 st.write(f"- Confirm **{t}**: Needs ({t}+ / {' '.join(conf)} neg) {s_txt}")
 
-                        for ab in (sigs+others):
-                            ok, p, n = check_rule_3(ab, i_p, i_s, st.session_state.ext)
-                            msg = "Rule of 3 MET" if ok else "Unconfirmed"
-                            ic = "✅" if ok else "⚠️"
-                            st.write(f"**{ic} Anti-{ab}:** {msg} (P:{p} / N:{n})")
-                            if not ok: valid_all = False
+                        # ✅ IMPORTANT: Do NOT confirm (Rule of 3) before separation when multiple significant antibodies exist
+                        skip_rule3 = (len(sigs) > 1)
+
+                        if skip_rule3:
+                            st.warning("⚠️ Multiple clinically significant antibodies detected. Perform separation/selected cells first. Confirmation (Rule of 3 / Modified) should be assessed after separation.")
+                            valid_all = False
+                        else:
+                            for ab in (sigs+others):
+                                ok, p, n = check_rule_3(ab, i_p, i_s, st.session_state.ext)
+                                msg = "Rule of 3 MET" if ok else "Unconfirmed"
+                                ic = "✅" if ok else "⚠️"
+                                st.write(f"**{ic} Anti-{ab}:** {msg} (P:{p} / N:{n})")
+                                if not ok: valid_all = False
 
                         if valid_all:
                             if st.button("Generate Official Report"):
@@ -432,6 +465,7 @@ else:
                         else:
                             st.warning("⚠️ Validation Required. Add Cells below.")
 
+    # DAT Module (unchanged UI, refined guidance text only)
     if st.session_state.dat_mode:
         st.write("---")
         st.subheader("🧪 Monospecific DAT Workup")
@@ -446,13 +480,17 @@ else:
             st.error("Invalid. Control Positive.")
         else:
             if igg=="Positive":
-                st.warning("👉 **WAIHA** (Warm Autoimmune Hemolytic Anemia).")
-                st.write("- Perform Elution/Adsorption.")
-                st.markdown("<div class='clinical-waiha'><b>⚠️ Critical Note:</b> If recently transfused, rule out <b>Delayed Hemolytic Transfusion Reaction (DHTR)</b>. Elution is Mandatory.</div>", unsafe_allow_html=True)
+                st.warning("👉 **Mostly WAIHA** (Warm Autoimmune Hemolytic Anemia).")
+                st.write("- **Refer to Blood Bank Physician/Consultant.**")
+                st.write("- Consider Adsorption as needed prior to alloantibody workup.")
+                st.markdown("<div class='clinical-waiha'><b>⚠️ Critical Note:</b> Check <b>recent transfusion</b>. Consider <b>Delayed Hemolytic Transfusion Reaction (DHTR)</b>. <b>Elution may be considered</b> as clinically indicated.</div>", unsafe_allow_html=True)
+
             elif c3d=="Positive" and igg=="Negative":
                 st.info("👉 **CAS** (Cold Agglutinin Syndrome).")
-                st.write("- Use Pre-warm Technique.")
+                st.write("- Use **Pre-warm technique**.")
+                st.write("- Refer to Blood Bank Physician if persistent/reactive.")
 
+    # Selected cells (as-is)
     if not st.session_state.dat_mode:
         with st.expander("➕ Add Selected Cell (From Library)"):
             id_x=st.text_input("ID")
