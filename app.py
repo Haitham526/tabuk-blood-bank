@@ -117,9 +117,12 @@ AGS = ["D","C","E","c","e","Cw","K","k","Kpa","Kpb","Jsa","Jsb","Fya","Fyb","Jka
 DOSAGE = ["C","c","E","e","Fya","Fyb","Jka","Jkb","M","N","S","s"]
 PAIRS = {'C':'c','c':'C','E':'e','e':'E','K':'k','k':'K','Fya':'Fyb','Fyb':'Fya','Jka':'Jkb','Jkb':'Jka','M':'N','N':'M','S':'s','s':'S'}
 
-IGNORED_AGS = ["Kpa", "Kpb", "Jsa", "Jsb", "Lub", "Cw"]
-INSIGNIFICANT_AGS = ["Lea", "Lua", "Leb", "P1"]
+IGNORED_AGS = ["Kpa", "Kpb", "Jsa", "Jsb", "Lub", "Cw"]  # excluded from candidate list display
+INSIGNIFICANT_AGS = ["Lea", "Lua", "Leb", "P1"]          # cold/insignificant bucket
 GRADES = ["0", "+1", "+2", "+3", "+4", "Hemolysis"]
+
+# Enzyme hint: (per your instruction: remove 's' from enzyme list)
+ENZYME_DESTROY = ["M", "N", "S", "Fya", "Fyb"]  # guidance only (not changing grading)
 
 # --------------------------------------------------------------------------
 # 3. STATE (load defaults from local repo files if present)
@@ -146,11 +149,26 @@ if 'dat_mode' not in st.session_state: st.session_state.dat_mode = False
 if 'ext' not in st.session_state: st.session_state.ext = []
 
 # --------------------------------------------------------------------------
-# 4. LOGIC ENGINE
+# 4. LOGIC ENGINE (UPDATED)
+#     - Stage 1: Rule-out + Candidate extraction (no confirmation yet)
+#     - Stage 2: Resolve (separate) per antibody
+#     - Stage 3: Confirm only for resolved antibodies
 # --------------------------------------------------------------------------
 def normalize_grade(val):
     s = str(val).lower().strip()
     return 0 if s in ["0", "neg"] else 1
+
+def grade_to_level(val):
+    # For caution note only (strength spread)
+    s = str(val).strip().lower()
+    if s == "0": return 0
+    if s == "hemolysis": return 4
+    if s.startswith("+"):
+        try:
+            return int(s.replace("+",""))
+        except Exception:
+            return 1
+    return 1
 
 def parse_paste(txt, limit=11):
     try:
@@ -162,183 +180,257 @@ def parse_paste(txt, limit=11):
             parts = line.split('\t')
             vals = []
             for p in parts:
-                v = 1 if any(x in str(p).lower() for x in ['+', '1', 'pos', 'w']) else 0
+                # treat any '+' OR 'w' OR 'pos' as positive in paste
+                v = 1 if any(x in str(p).lower() for x in ['+', 'pos', 'w', '1']) else 0
                 vals.append(v)
             if len(vals) > 26: vals=vals[-26:]
             while len(vals) < 26: vals.append(0)
             d = {"ID": f"C{c+1}" if limit==11 else f"Scn"}
             for i, ag in enumerate(AGS): d[ag] = vals[i]
             data.append(d)
-            c+=1
+            c += 1
         return pd.DataFrame(data), f"Updated {c} rows."
     except Exception as e:
         return None, str(e)
 
-def find_matching_cells_in_inventory(target_ab, conflicts):
-    found_list = []
-    for i in range(11):
-        cell = st.session_state.p11.iloc[i]
-        if cell.get(target_ab,0)==1:
-            clean = True
-            for bad in conflicts:
-                if cell.get(bad,0)==1: clean=False; break
-            if clean: found_list.append(f"Panel #{i+1}")
+def _all_cells_iter(extra_cells):
+    # yields tuples: (label, phenotype_row_dict_or_series, reaction_0_1)
+    # Panel
+    for i in range(1, 12):
+        yield (f"Panel {i}", st.session_state.p11.iloc[i-1], None)
+    # Screen
     sc_lbls = ["I","II","III"]
     for i in range(3):
-        cell = st.session_state.p3.iloc[i]
-        if cell.get(target_ab,0)==1:
-            clean = True
-            for bad in conflicts:
-                if cell.get(bad,0)==1: clean=False; break
-            if clean: found_list.append(f"Screen {sc_lbls[i]}")
-    return found_list
+        yield (f"Screen {sc_lbls[i]}", st.session_state.p3.iloc[i], None)
+    # Extras
+    for j, ex in enumerate(extra_cells):
+        yield (f"Selected {j+1}", ex["ph"], None)
 
-def _is_dosage_blocked(ag: str, ph_row: pd.Series) -> bool:
-    """
-    Dosage rule: Rh/Duffy/Kidd/MNS cannot be ruled out using heterozygous cells.
-    If antigen is present AND paired antigen is also present => heterozygous => blocked.
-    """
+def _get_cell_ph(label, extra_cells):
+    if label.startswith("Panel "):
+        idx = int(label.split()[-1])
+        return st.session_state.p11.iloc[idx-1]
+    if label.startswith("Screen "):
+        s = label.split()[-1]
+        mp={"I":0,"II":1,"III":2}
+        return st.session_state.p3.iloc[mp[s]]
+    if label.startswith("Selected "):
+        idx = int(label.split()[-1]) - 1
+        return extra_cells[idx]["ph"]
+    return None
+
+def _get_cell_rx(label, in_p, in_s, extra_cells):
+    if label.startswith("Panel "):
+        idx = int(label.split()[-1])
+        return normalize_grade(in_p[idx])
+    if label.startswith("Screen "):
+        s = label.split()[-1]
+        return normalize_grade(in_s[s])
+    if label.startswith("Selected "):
+        idx = int(label.split()[-1]) - 1
+        return normalize_grade(extra_cells[idx]["res"])
+    return 0
+
+def _is_dosage_safe(ag, ph):
+    # For dosage antigens: only count homozygous positive as safe for rule-out (as per your policy)
     if ag in DOSAGE:
         pair = PAIRS.get(ag)
-        if pair and ph_row.get(pair,0)==1:
-            return True
-    return False
+        if pair and ph.get(pair,0)==1:
+            return False  # heterozygous -> not safe to rule out
+    return True
 
-def analyze_alloantibodies(in_p, in_s, extra_cells):
+def compute_ruled_out(in_p, in_s, extra_cells):
     ruled_out = set()
-    dosage_blocked = {ag: [] for ag in AGS}  # evidence where rule-out was blocked
 
-    # 1) Panel Exclusion
+    # Panel exclusion: eliminate antigens present homozygous on NONreactive cells
     for i in range(1, 12):
         if normalize_grade(in_p[i]) == 0:
             ph = st.session_state.p11.iloc[i-1]
             for ag in AGS:
-                if ph.get(ag,0)==1:
-                    if _is_dosage_blocked(ag, ph):
-                        dosage_blocked[ag].append(f"Panel #{i}")
-                        continue
+                if ph.get(ag,0)==1 and _is_dosage_safe(ag, ph):
                     ruled_out.add(ag)
 
-    # 2) Screen Exclusion
+    # Screen exclusion
     smap={"I":0,"II":1,"III":2}
     for k in ["I","II","III"]:
         if normalize_grade(in_s[k]) == 0:
             ph = st.session_state.p3.iloc[smap[k]]
             for ag in AGS:
-                if ag in ruled_out:
-                    continue
-                if ph.get(ag,0)==1:
-                    if _is_dosage_blocked(ag, ph):
-                        dosage_blocked[ag].append(f"Screen {k}")
-                        continue
+                if ph.get(ag,0)==1 and _is_dosage_safe(ag, ph):
                     ruled_out.add(ag)
 
-    # 3) Extra Exclusion
+    # Extra exclusion
     for ex in extra_cells:
-        if normalize_grade(ex['res']) == 0:
-            ph = ex['ph']
+        if normalize_grade(ex["res"]) == 0:
+            ph = ex["ph"]
             for ag in AGS:
                 if ph.get(ag,0)==1:
-                    # we cannot know heterozygosity from extra cells checkboxes reliably,
-                    # so we treat extras as "selected cell" (user-defined). No dosage blocking here.
                     ruled_out.add(ag)
 
-    candidates = [x for x in AGS if x not in ruled_out]
-    display_cands = [x for x in candidates if x not in IGNORED_AGS]
+    return ruled_out
 
-    # Anti-G heuristic (as-is)
+def compute_fit(ag, in_p, in_s, extra_cells):
+    """
+    Pattern fit score (0-100) to avoid nonsense candidates (e.g. Xga appearing without pattern support).
+    We do NOT "confirm" here; only approximate fit.
+    """
+    total = 0
+    match = 0
+
+    # Panel
+    for i in range(1, 12):
+        rx = normalize_grade(in_p[i])
+        ph = st.session_state.p11.iloc[i-1]
+        h = ph.get(ag,0)
+        # if dosage antigen and hetero, we down-weight exclusion logic,
+        # but for fit we still count it normally (pattern can be affected by dosage).
+        total += 1
+        if (rx==1 and h==1) or (rx==0 and h==0):
+            match += 1
+
+    # Screen
+    mp={"I":0,"II":1,"III":2}
+    for k in ["I","II","III"]:
+        rx = normalize_grade(in_s[k])
+        ph = st.session_state.p3.iloc[mp[k]]
+        h = ph.get(ag,0)
+        total += 1
+        if (rx==1 and h==1) or (rx==0 and h==0):
+            match += 1
+
+    # Extras
+    for ex in extra_cells:
+        rx = normalize_grade(ex["res"])
+        h = ex["ph"].get(ag,0)
+        total += 1
+        if (rx==1 and h==1) or (rx==0 and h==0):
+            match += 1
+
+    if total == 0:
+        return 0
+    return int(round((match/total)*100))
+
+def extract_candidates(in_p, in_s, extra_cells):
+    ruled_out = compute_ruled_out(in_p, in_s, extra_cells)
+    cands = [x for x in AGS if x not in ruled_out and x not in IGNORED_AGS]
+
+    # Fit-based ranking to prevent spurious “identified” antigens (Xga bug symptom)
+    scored = []
+    for ag in cands:
+        scored.append((ag, compute_fit(ag, in_p, in_s, extra_cells)))
+
+    scored.sort(key=lambda x: x[1], reverse=True)
+
+    # Keep list but we will not "identify" anything here.
+    # We only show for subsequent resolve step.
+    notes = []
+
+    # Anti-G hint (keep as a warning note, not an identification)
     g_indices = [1,2,3,4,8]
     is_G_pattern = True
     for idx in g_indices:
         if normalize_grade(in_p[idx]) == 0:
             is_G_pattern = False
             break
+    if is_G_pattern and ("D" in [x[0] for x in scored]):
+        # only suggest if C/E also remain possible
+        notes.append("anti_G_suspect")
 
-    is_D = "D" in display_cands
-    final_list = []
-    notes = []
+    return scored, notes  # list of tuples (ag, fit)
 
-    for c in display_cands:
-        if is_D:
-            if c in ["C", "E"]:
-                if c=="C" and is_G_pattern:
-                    notes.append("anti_G_suspect")
-                    final_list.append(c)
-                else:
-                    continue
-        final_list.append(c)
+def split_significant(scored):
+    sigs = [(a,f) for (a,f) in scored if a not in INSIGNIFICANT_AGS]
+    cold = [(a,f) for (a,f) in scored if a in INSIGNIFICANT_AGS]
+    return sigs, cold
 
-    if "c" in final_list:
-        notes.append("anti-c_risk")
+def find_matching_cells_in_inventory(target_ab, conflicts):
+    found_list = []
+    # Panel
+    for i in range(11):
+        cell = st.session_state.p11.iloc[i]
+        if cell.get(target_ab,0)==1:
+            clean = True
+            for bad in conflicts:
+                if cell.get(bad,0)==1:
+                    clean = False
+                    break
+            if clean:
+                found_list.append(f"Panel #{i+1}")
+    # Screen
+    sc_lbls = ["I","II","III"]
+    for i in range(3):
+        cell = st.session_state.p3.iloc[i]
+        if cell.get(target_ab,0)==1:
+            clean = True
+            for bad in conflicts:
+                if cell.get(bad,0)==1:
+                    clean = False
+                    break
+            if clean:
+                found_list.append(f"Screen {sc_lbls[i]}")
+    return found_list
 
-    # keep only meaningful evidence (non-empty)
-    dosage_protected = {k:v for k,v in dosage_blocked.items() if v}
+def is_resolved(ag, significant_list, in_p, in_s, extra_cells):
+    """
+    Resolved = we have at least one 'separating witness' cell:
+      reactive AND ag+ AND all other significant antibodies negative in that cell.
+    If only one significant antibody: resolved True by default.
+    """
+    others = [x for x in significant_list if x != ag]
+    if len(significant_list) <= 1:
+        return True, None
 
-    return final_list, notes, dosage_protected
+    # Build universe of cells
+    labels = []
+    for i in range(1, 12): labels.append(f"Panel {i}")
+    for s in ["I","II","III"]: labels.append(f"Screen {s}")
+    for j in range(len(extra_cells)): labels.append(f"Selected {j+1}")
+
+    for lb in labels:
+        rx = _get_cell_rx(lb, in_p, in_s, extra_cells)
+        if rx != 1:
+            continue
+        ph = _get_cell_ph(lb, extra_cells)
+        if ph is None:
+            continue
+        if ph.get(ag,0) != 1:
+            continue
+        clean = True
+        for o in others:
+            if ph.get(o,0) == 1:
+                clean = False
+                break
+        if clean:
+            return True, lb
+
+    return False, None
 
 def check_rule_3(cand, in_p, in_s, extras):
     p, n = 0, 0
+    # Panel
     for i in range(1, 12):
         s=normalize_grade(in_p[i]); h=st.session_state.p11.iloc[i-1].get(cand,0)
         if s==1 and h==1: p+=1
         if s==0 and h==0: n+=1
+    # Screen
     si={"I":0,"II":1,"III":2}
     for k in ["I","II","III"]:
         s=normalize_grade(in_s[k]); h=st.session_state.p3.iloc[si[k]].get(cand,0)
         if s==1 and h==1: p+=1
         if s==0 and h==0: n+=1
+    # Extras
     for c in extras:
         s=normalize_grade(c['res']); h=c['ph'].get(cand,0)
         if s==1 and h==1: p+=1
         if s==0 and h==0: n+=1
-    ok_full = (p>=3 and n>=3)
-    ok_mod  = (p>=2 and n>=3)
-    ok = ok_full or ok_mod
-    return ok, ok_full, ok_mod, p, n
 
-def fit_score(cand, in_p, in_s, extras):
-    """
-    Score how well antigen distribution matches reactions.
-    +2 for matching positive (reactive & antigen+)
-    +2 for matching negative (nonreactive & antigen-)
-    -3 for mismatch (reactive & antigen-) or (nonreactive & antigen+)
-    """
-    score = 0
-    total = 0
-
-    # panel
-    for i in range(1, 12):
-        r = normalize_grade(in_p[i])
-        a = st.session_state.p11.iloc[i-1].get(cand,0)
-        total += 1
-        if r==1 and a==1: score += 2
-        elif r==0 and a==0: score += 2
-        else: score -= 3
-
-    # screen
-    si={"I":0,"II":1,"III":2}
-    for k in ["I","II","III"]:
-        r = normalize_grade(in_s[k])
-        a = st.session_state.p3.iloc[si[k]].get(cand,0)
-        total += 1
-        if r==1 and a==1: score += 2
-        elif r==0 and a==0: score += 2
-        else: score -= 3
-
-    # extras
-    for c in extras:
-        r = normalize_grade(c['res'])
-        a = c['ph'].get(cand,0)
-        total += 1
-        if r==1 and a==1: score += 2
-        elif r==0 and a==0: score += 2
-        else: score -= 3
-
-    # normalize to a 0..100-ish range for display
-    # max per cell = +2, min ~ -3
-    # We clamp.
-    norm = max(0, min(100, int((score + (3*total)) * 100 / (5*total))))
-    return norm
+    full = (p>=3 and n>=3)
+    mod  = (p>=2 and n>=3)
+    if full:
+        return True, "Full Rule (3+3)", p, n
+    if mod:
+        return True, "Modified Rule (2+3)", p, n
+    return False, "Unconfirmed", p, n
 
 # --------------------------------------------------------------------------
 # 5. UI
@@ -438,9 +530,9 @@ else:
             st.write("Panel Reactions")
             g1,g2=st.columns(2)
             with g1:
-                c1=st.selectbox("1",GRADES,key="1"); c2=st.selectbox("2",GRADES,key="2"); c3=st.selectbox("3",GRADES,key="3"); c4=st.selectbox("4",GRADES,key="4"); c5=st.selectbox("5",GRADES,key="5"); c6=st.selectbox("6",GRADES,key="6")
+                p1=st.selectbox("1",GRADES,key="p1"); p2=st.selectbox("2",GRADES,key="p2"); p3=st.selectbox("3",GRADES,key="p3"); p4=st.selectbox("4",GRADES,key="p4"); p5=st.selectbox("5",GRADES,key="p5"); p6=st.selectbox("6",GRADES,key="p6")
             with g2:
-                c7=st.selectbox("7",GRADES,key="7"); c8=st.selectbox("8",GRADES,key="8"); c9=st.selectbox("9",GRADES,key="9"); c10=st.selectbox("10",GRADES,key="10"); c11=st.selectbox("11",GRADES,key="11")
+                p7=st.selectbox("7",GRADES,key="p7"); p8=st.selectbox("8",GRADES,key="p8"); p9=st.selectbox("9",GRADES,key="p9"); p10=st.selectbox("10",GRADES,key="p10"); p11=st.selectbox("11",GRADES,key="p11")
 
         run = st.form_submit_button("🚀 Run Analysis")
 
@@ -452,96 +544,121 @@ else:
                 st.session_state.dat_mode = True
             else:
                 st.session_state.dat_mode = False
-                i_p = {1:c1,2:c2,3:c3,4:c4,5:c5,6:c6,7:c7,8:c8,9:c9,10:c10,11:c11}
+
+                i_p = {1:p1,2:p2,3:p3,4:p4,5:p5,6:p6,7:p7,8:p8,9:p9,10:p10,11:p11}
                 i_s = {"I":s1,"II":s2,"III":s3}
+
+                # Strength caution (your requirement: only warn if spread > 2 grades)
+                levels = [grade_to_level(v) for v in list(i_p.values()) + [s1,s2,s3] if str(v)!="0"]
+                if levels:
+                    if (max(levels) - min(levels)) > 2:
+                        st.warning("⚠️ Strength variation > 2 grades detected. Consider dosage effect / cell condition / mixed antibodies. Do NOT rely on strength alone.")
+
                 cnt = sum([normalize_grade(x) for x in i_p.values()])
 
+                # Panreactivity with negative AC
                 if cnt >= 11:
-                    st.markdown("""<div class='clinical-alert'>⚠️ <b>High Incidence Antigen suspected.</b><br>Pan-reactivity with Neg AC.<br>Action: Check siblings / Reference Lab.</div>""", unsafe_allow_html=True)
+                    st.markdown("""<div class='clinical-alert'>⚠️ <b>High Incidence Antigen suspected.</b><br>
+                    Pan-reactivity with Neg AC.<br>
+                    Action: Search compatible donors (consider first-degree relatives) / Reference Lab.</div>""", unsafe_allow_html=True)
                 else:
-                    final, notes, dosage_protected = analyze_alloantibodies(i_p, i_s, st.session_state.ext)
+                    scored, notes = extract_candidates(i_p, i_s, st.session_state.ext)
+                    sigs_scored, cold_scored = split_significant(scored)
 
-                    # Score + Rule-of-3 for display decisions
-                    items = []
-                    for ab in final:
-                        ok, ok_full, ok_mod, p, n = check_rule_3(ab, i_p, i_s, st.session_state.ext)
-                        sc = fit_score(ab, i_p, i_s, st.session_state.ext)
-                        items.append({
-                            "ab": ab, "score": sc, "ok": ok, "ok_full": ok_full, "ok_mod": ok_mod,
-                            "p": p, "n": n,
-                            "dosage_protected": ab in dosage_protected
-                        })
-
-                    # Separate clinically significant vs insignificant
-                    sig_items = [x for x in items if x["ab"] not in INSIGNIFICANT_AGS]
-                    insig_items = [x for x in items if x["ab"] in INSIGNIFICANT_AGS]
-
-                    # Sort: confirmed first by score, then unconfirmed by score
-                    sig_items.sort(key=lambda x: (x["ok"], x["score"]), reverse=True)
-                    insig_items.sort(key=lambda x: (x["ok"], x["score"]), reverse=True)
+                    sigs = [a for a,_ in sigs_scored]
+                    cold = [a for a,_ in cold_scored]
 
                     st.subheader("Conclusion")
 
-                    # Anti-G / anti-c notes remain
-                    if "anti_G_suspect" in notes:
-                        st.warning("⚠️ **Anti-G or Anti-D+C**: Pattern (Cells 1,2,3,4,8 Pos) suggests Anti-G. Perform Adsorption/Elution to differentiate.")
-                    if "anti-c_risk" in notes:
-                        st.markdown("""<div class='clinical-alert'>🛑 <b>Anti-c Detected:</b> Patient requires R1R1 (E- c-) units to prevent Anti-E formation.</div>""", unsafe_allow_html=True)
-
-                    confirmed = [x for x in sig_items if x["ok"]]
-                    pending   = [x for x in sig_items if not x["ok"]]
-                    confirmed_insig = [x for x in insig_items if x["ok"]]
-                    pending_insig   = [x for x in insig_items if not x["ok"]]
-
-                    if not confirmed and not pending and not confirmed_insig and not pending_insig:
+                    if not sigs and not cold:
                         st.error("No Match Found / Inconclusive.")
                     else:
-                        # 1) Confirmed (clinically significant)
-                        if confirmed:
-                            lab = ", ".join([f"Anti-{x['ab']}" for x in confirmed])
-                            st.success(f"✅ **Confirmed (Rule of Three met):** {lab}")
-                            for x in confirmed:
-                                tag = "Full Rule (3+3)" if x["ok_full"] else "Modified Rule (2+3)"
-                                st.write(f"- **Anti-{x['ab']}** | {tag} | Fit: {x['score']}% | (P:{x['p']} / N:{x['n']})")
+                        # Notes (Anti-G)
+                        if "anti_G_suspect" in notes:
+                            st.warning("⚠️ **Anti-G / Anti-D+C possibility**: Pattern suggests Anti-G. If clinically needed: Adsorption/Elution to differentiate (guidance only).")
 
-                        # 2) Not excluded yet (clinically significant)
-                        if pending:
-                            st.warning("⚠️ **Not excluded yet (Needs confirmation / Selected cells):**")
-                            for x in pending:
-                                dp = ""
-                                if x["dosage_protected"]:
-                                    cells = ", ".join(dosage_protected.get(x["ab"], []))
-                                    dp = f" **(Dosage-protected: {cells})**"
-                                st.write(f"- **Anti-{x['ab']}** | Fit: {x['score']}% | (P:{x['p']} / N:{x['n']}){dp}")
+                        # -------- Stage 1: Rule-in / Rule-out outcome (NO confirmation yet) --------
+                        resolved = {}
+                        witness = {}
 
-                        # 3) Clinically insignificant (optional)
-                        if confirmed_insig:
-                            lab = ", ".join([f"Anti-{x['ab']}" for x in confirmed_insig])
-                            st.info(f"ℹ️ **Cold/Insignificant confirmed:** {lab}")
-                        if pending_insig:
-                            st.info("ℹ️ **Cold/Insignificant not excluded yet:** " + ", ".join([f"Anti-{x['ab']}" for x in pending_insig]))
+                        for a in sigs:
+                            ok, lb = is_resolved(a, sigs, i_p, i_s, st.session_state.ext)
+                            resolved[a] = ok
+                            witness[a] = lb
 
-                        # Separation Strategy only when there are multiple clinically significant candidates
-                        sig_names = [x["ab"] for x in sig_items]
-                        if len(sig_names) > 1:
+                        resolved_list = [a for a in sigs if resolved.get(a)]
+                        unresolved_list = [a for a in sigs if not resolved.get(a)]
+
+                        # Display buckets
+                        if resolved_list:
+                            st.success(f"**Rule-in (Resolved):** Anti-{', '.join(resolved_list)}")
+                        if unresolved_list:
+                            st.info(f"**Not excluded yet (Unresolved):** Anti-{', '.join(unresolved_list)}")
+
+                        if cold:
+                            st.info(f"**Cold/Insignificant not excluded yet:** Anti-{', '.join(cold)}")
+
+                        # -------- Stage 2: Separation guidance for UNRESOLVED only --------
+                        if unresolved_list:
                             st.write("---")
-                            st.markdown("**🧪 Separation Strategy (Using Inventory):**")
-                            for t in sig_names:
-                                conf = [x for x in sig_names if x!=t]
+                            st.markdown("**🧪 What is needed to resolve (Separation / Selected cells):**")
+                            for t in unresolved_list:
+                                conf = [x for x in sigs if x != t]
                                 found = find_matching_cells_in_inventory(t, conf)
-                                s_txt = f"<span class='cell-hint'>{', '.join(found)}</span>" if found else "<span style='color:red'>Search External</span>"
-                                st.write(f"- Confirm **{t}**: Needs ({t}+ / {' '.join(conf)} neg) {s_txt}")
+                                if found:
+                                    st.write(f"- **Anti-{t}**: Try cell(s) **{', '.join(found)}** → need ({t}+ / others neg).")
+                                else:
+                                    st.write(f"- **Anti-{t}**: No suitable cell found in current panel/screen → **Search external / different lot**.")
 
-                        # Report only when at least one clinically significant is confirmed AND no pending significant
-                        if confirmed and not pending:
+                                # Enzyme hint if target is in enzyme destroy list
+                                if t in ENZYME_DESTROY:
+                                    st.caption(f"Enzyme note: If separation is blocked by {t} antigen presence on needed cells, enzyme treatment may help (guidance only).")
+
+                        # -------- Stage 3: Confirmation ONLY for RESOLVED --------
+                        st.write("---")
+                        st.markdown("### Confirmation (Rule of Three) — **Resolved only**")
+
+                        confirmed = []
+                        confirm_details = []
+                        all_ok = True
+
+                        for ab in resolved_list:
+                            ok, mode, p_cnt, n_cnt = check_rule_3(ab, i_p, i_s, st.session_state.ext)
+                            fit = dict(sigs_scored + cold_scored).get(ab, None)
+                            fit_txt = f"{fit}%" if fit is not None else "—"
+                            icon = "✅" if ok else "⚠️"
+                            st.write(f"**{icon} Anti-{ab}:** {mode} | Fit: {fit_txt} | (P:{p_cnt} / N:{n_cnt})")
+                            if witness.get(ab):
+                                st.caption(f"Resolved by separating witness: {witness[ab]}")
+                            if ok:
+                                confirmed.append(ab)
+                                confirm_details.append((ab, mode, fit_txt, p_cnt, n_cnt))
+                            else:
+                                all_ok = False
+
+                        if unresolved_list:
+                            st.warning("⚠️ Unresolved antibodies are **not** confirmed and will not appear as 'identified'. Resolve them first using the guidance above.")
+
+                        # Official report only if we have at least one confirmed AND no unresolved AND all resolved are confirmed
+                        if confirmed and not unresolved_list and all_ok:
                             if st.button("Generate Official Report"):
-                                sig_report = ", ".join([x["ab"] for x in confirmed])
-                                rpt=f"""<div class='print-only'><center><h2>Maternity & Children Hospital - Tabuk</h2><h3>Serology Report</h3></center><div class='result-sheet'><b>Pt:</b> {nm} ({mr})<br><b>Tech:</b> {tc} | <b>Lot:</b> {st.session_state.lot_p}<hr><b>Result (Confirmed):</b> Anti-{sig_report}<br><b>Validation:</b> Confirmed (p<=0.05).<br><b>Clinical:</b> Phenotype Negative. Transfuse compatible.<br><br><b>Consultant Verified:</b> _____________</div><div class='print-footer'>Dr. Haitham Ismail | Consultant</div></div><script>window.print()</script>"""
+                                rpt=f"""<div class='print-only'>
+                                <center><h2>Maternity & Children Hospital - Tabuk</h2><h3>Serology Report</h3></center>
+                                <div class='result-sheet'>
+                                <b>Pt:</b> {nm} ({mr})<br>
+                                <b>Tech:</b> {tc} | <b>Lot:</b> {st.session_state.lot_p}<hr>
+                                <b>Confirmed Antibody(ies):</b> Anti-{', '.join(confirmed)}<br>
+                                <b>Validation:</b> Rule of Three satisfied (p≤0.05) where applicable.<br><br>
+                                <b>Consultant Verified:</b> _____________
+                                </div>
+                                <div class='print-footer'>Dr. Haitham Ismail | Consultant</div>
+                                </div>
+                                <script>window.print()</script>"""
                                 st.markdown(rpt, unsafe_allow_html=True)
                         else:
-                            if pending:
-                                st.warning("⚠️ Add Selected Cells / Additional evidence before issuing final report.")
+                            st.info("ℹ️ Official report will be available only after: (1) no unresolved antibodies AND (2) confirmation completed for resolved ones.")
 
+    # ---------------- DAT MODE ----------------
     if st.session_state.dat_mode:
         st.write("---")
         st.subheader("🧪 Monospecific DAT Workup")
@@ -556,13 +673,18 @@ else:
             st.error("Invalid. Control Positive.")
         else:
             if igg=="Positive":
-                st.warning("👉 **WAIHA** (Warm Autoimmune Hemolytic Anemia).")
-                st.write("- Perform Elution/Adsorption.")
-                st.markdown("<div class='clinical-waiha'><b>⚠️ Critical Note:</b> If recently transfused, rule out <b>Delayed Hemolytic Transfusion Reaction (DHTR)</b>. Elution is Mandatory.</div>", unsafe_allow_html=True)
+                st.warning("👉 **Mostly WAIHA** (Warm Autoimmune Hemolytic Anemia).")
+                st.write("- Refer to Blood Bank Physician.")
+                st.write("- Consider Elution / Adsorption (as per policy/workflow).")
+                st.markdown("<div class='clinical-waiha'><b>⚠️ Critical Note:</b> If recently transfused, consider <b>DHTR</b>. Elution is important.</div>", unsafe_allow_html=True)
             elif c3d=="Positive" and igg=="Negative":
                 st.info("👉 **CAS** (Cold Agglutinin Syndrome).")
                 st.write("- Use Pre-warm Technique.")
+                st.write("- Refer to Blood Bank Physician if clinically indicated.")
+            else:
+                st.info("DAT monospecific pattern does not strongly suggest WAIHA/CAS. Correlate clinically and consult physician if needed.")
 
+    # ---------------- ADD SELECTED CELL ----------------
     if not st.session_state.dat_mode:
         with st.expander("➕ Add Selected Cell (From Library)"):
             id_x=st.text_input("ID")
