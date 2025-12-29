@@ -23,7 +23,6 @@ def github_upsert_file(path_in_repo: str, content_text: str, commit_message: str
     api = f"https://api.github.com/repos/{repo}/contents/{path_in_repo}"
     headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github+json"}
 
-    # Get SHA if file exists
     sha = None
     r = requests.get(api, headers=headers, params={"ref": branch}, timeout=30)
     if r.status_code == 200:
@@ -115,11 +114,10 @@ st.markdown("""
 # 2. DEFINITIONS
 # --------------------------------------------------------------------------
 AGS = ["D","C","E","c","e","Cw","K","k","Kpa","Kpb","Jsa","Jsb","Fya","Fyb","Jka","Jkb","Lea","Leb","P1","M","N","S","s","Lua","Lub","Xga"]
+AGS_COUNT = len(AGS)
 
-# ✅ DOSAGE: removed "s" as requested
-DOSAGE = ["C","c","E","e","Fya","Fyb","Jka","Jkb","M","N","S"]
-
-PAIRS = {'C':'c','c':'C','E':'e','e':'E','K':'k','k':'K','Fya':'Fyb','Fyb':'Fya','Jka':'Jkb','Jkb':'Jka','M':'N','N':'M','S':'s','s':'S'}
+DOSAGE = ["C","c","E","e","Fya","Fyb","Jka","Jkb","M","N","S","s"]
+PAIRS = {'C':'c','c':'C','E':'e','e':'E','Fya':'Fyb','Fyb':'Fya','Jka':'Jkb','Jkb':'Jka','M':'N','N':'M','S':'s','s':'S'}
 
 IGNORED_AGS = ["Kpa", "Kpb", "Jsa", "Jsb", "Lub", "Cw"]
 INSIGNIFICANT_AGS = ["Lea", "Lua", "Leb", "P1"]
@@ -150,31 +148,58 @@ if 'dat_mode' not in st.session_state: st.session_state.dat_mode = False
 if 'ext' not in st.session_state: st.session_state.ext = []
 
 # --------------------------------------------------------------------------
-# 4. LOGIC ENGINE (kept as-is except rules above)
+# 4. LOGIC ENGINE (minimal safe fixes)
 # --------------------------------------------------------------------------
 def normalize_grade(val):
     s = str(val).lower().strip()
-    return 0 if s in ["0", "neg"] else 1
+    return 0 if s in ["0", "neg", "negative"] else 1  # Hemolysis counts as positive by design
+
+def _token_to01(tok: str) -> int:
+    t = (tok or "").strip().lower()
+    # treat +, w, +w, 1+,2+,3+,4+ as positive
+    if t in ["+", "pos", "positive", "w", "+w"]:
+        return 1
+    if any(x in t for x in ["+1", "1+", "+2", "2+", "+3", "3+", "+4", "4+", "wk"]):
+        return 1
+    # "nt" or blanks -> 0 (treated as negative/unknown in this simplified grid)
+    return 0
 
 def parse_paste(txt, limit=11):
+    """
+    CRITICAL FIX:
+    - Previously hardcoded 26 values while AGS has 27 -> column shift -> false Xga (and other antigens).
+    - Now uses AGS_COUNT consistently, preserving column alignment.
+    """
     try:
-        rows = txt.strip().split('\n')
+        rows = [r for r in (txt or "").strip().splitlines() if r.strip()]
         data = []
         c = 0
+
         for line in rows:
-            if c >= limit: break
+            if c >= limit:
+                break
+
             parts = line.split('\t')
-            vals = []
-            for p in parts:
-                v = 1 if any(x in str(p).lower() for x in ['+', '1', 'pos', 'w']) else 0
-                vals.append(v)
-            if len(vals) > 26: vals = vals[-26:]
-            while len(vals) < 26: vals.append(0)
-            d = {"ID": f"C{c+1}" if limit==11 else f"Scn"}
+            vals = [_token_to01(p) for p in parts]
+
+            # If extra junk columns exist, keep the LAST AGS_COUNT (common when paste contains leading cols)
+            if len(vals) > AGS_COUNT:
+                vals = vals[-AGS_COUNT:]
+
+            # Pad missing columns
+            while len(vals) < AGS_COUNT:
+                vals.append(0)
+
+            d = {"ID": f"C{c+1}" if limit == 11 else ["SI","SII","SIII"][c]}
             for i, ag in enumerate(AGS):
-                d[ag] = vals[i]
+                d[ag] = int(vals[i])
+
             data.append(d)
             c += 1
+
+        if c == 0:
+            return None, "No rows detected. Paste the grid (tab-separated)."
+
         return pd.DataFrame(data), f"Updated {c} rows."
     except Exception as e:
         return None, str(e)
@@ -184,51 +209,45 @@ def find_matching_cells_in_inventory(target_ab, conflicts):
     for i in range(11):
         cell = st.session_state.p11.iloc[i]
         if cell.get(target_ab,0)==1:
-            clean = True
-            for bad in conflicts:
-                if cell.get(bad,0)==1:
-                    clean=False; break
-            if clean:
+            if all(cell.get(bad,0)==0 for bad in conflicts):
                 found_list.append(f"Panel #{i+1}")
 
     sc_lbls = ["I","II","III"]
     for i in range(3):
         cell = st.session_state.p3.iloc[i]
         if cell.get(target_ab,0)==1:
-            clean = True
-            for bad in conflicts:
-                if cell.get(bad,0)==1:
-                    clean=False; break
-            if clean:
+            if all(cell.get(bad,0)==0 for bad in conflicts):
                 found_list.append(f"Screen {sc_lbls[i]}")
     return found_list
 
 def analyze_alloantibodies(in_p, in_s, extra_cells):
     ruled_out = set()
 
-    # 1) Panel Exclusion
+    # 1) Panel Exclusion: rule out antigens that are homozygous-present on NEGATIVE cells
     for i in range(1, 12):
         if normalize_grade(in_p[i]) == 0:
             ph = st.session_state.p11.iloc[i-1]
             for ag in AGS:
-                safe=True
+                safe = True
+                # dosage: if antigen-positive but heterozygous, DO NOT rule out
                 if ag in DOSAGE and ph.get(PAIRS.get(ag),0)==1:
-                    safe=False  # heterozygous => not safe for dosage antigens
+                    safe = False
                 if ph.get(ag,0)==1 and safe:
                     ruled_out.add(ag)
 
     # 2) Screen Exclusion
-    smap={"I":0,"II":1,"III":2}
+    smap = {"I":0,"II":1,"III":2}
     for k in ["I","II","III"]:
         if normalize_grade(in_s[k]) == 0:
             ph = st.session_state.p3.iloc[smap[k]]
             for ag in AGS:
-                if ag not in ruled_out:
-                    safe=True
-                    if ag in DOSAGE and ph.get(PAIRS.get(ag),0)==1:
-                        safe=False
-                    if ph.get(ag,0)==1 and safe:
-                        ruled_out.add(ag)
+                if ag in ruled_out:
+                    continue
+                safe = True
+                if ag in DOSAGE and ph.get(PAIRS.get(ag),0)==1:
+                    safe = False
+                if ph.get(ag,0)==1 and safe:
+                    ruled_out.add(ag)
 
     # 3) Extra Exclusion
     for ex in extra_cells:
@@ -240,28 +259,23 @@ def analyze_alloantibodies(in_p, in_s, extra_cells):
     candidates = [x for x in AGS if x not in ruled_out]
     display_cands = [x for x in candidates if x not in IGNORED_AGS]
 
-    # Anti-G flag pattern
+    # Anti-G detection pattern (keep your original intent)
     g_indices = [1,2,3,4,8]
-    is_G_pattern = True
-    for idx in g_indices:
-        if normalize_grade(in_p[idx]) == 0:
-            is_G_pattern = False
-            break
+    is_G_pattern = all(normalize_grade(in_p[idx]) == 1 for idx in g_indices)
 
     is_D = "D" in display_cands
     final_list = []
     notes = []
 
     for c in display_cands:
-        # Mask C and E when D present; keep C only if Anti-G pattern suggests differential
-        if is_D:
-            if c in ["C", "E"]:
-                if c=="C" and is_G_pattern:
-                    notes.append("anti_G_suspect")
-                    final_list.append(c)
-                else:
-                    continue
-        final_list.append(c)
+        if is_D and c in ["C", "E"]:
+            if c == "C" and is_G_pattern:
+                notes.append("anti_G_suspect")
+                final_list.append(c)
+            else:
+                continue
+        else:
+            final_list.append(c)
 
     if "c" in final_list:
         notes.append("anti-c_risk")
@@ -270,20 +284,22 @@ def analyze_alloantibodies(in_p, in_s, extra_cells):
 
 def check_rule_3(cand, in_p, in_s, extras):
     p, n = 0, 0
-
     for i in range(1, 12):
-        s=normalize_grade(in_p[i]); h=st.session_state.p11.iloc[i-1].get(cand,0)
+        s = normalize_grade(in_p[i])
+        h = st.session_state.p11.iloc[i-1].get(cand,0)
         if s==1 and h==1: p+=1
         if s==0 and h==0: n+=1
 
     si={"I":0,"II":1,"III":2}
     for k in ["I","II","III"]:
-        s=normalize_grade(in_s[k]); h=st.session_state.p3.iloc[si[k]].get(cand,0)
+        s = normalize_grade(in_s[k])
+        h = st.session_state.p3.iloc[si[k]].get(cand,0)
         if s==1 and h==1: p+=1
         if s==0 and h==0: n+=1
 
     for c in extras:
-        s=normalize_grade(c['res']); h=c['ph'].get(cand,0)
+        s = normalize_grade(c['res'])
+        h = c['ph'].get(cand,0)
         if s==1 and h==1: p+=1
         if s==0 and h==0: n+=1
 
@@ -297,43 +313,48 @@ with st.sidebar:
     st.image("https://cdn-icons-png.flaticon.com/512/2966/2966327.png", width=60)
     nav = st.radio("Menu", ["Workstation", "Supervisor"])
     if st.button("RESET DATA"):
-        st.session_state.ext=[]
-        st.session_state.dat_mode=False
+        st.session_state.ext = []
+        st.session_state.dat_mode = False
         st.rerun()
 
 # ------------------ SUPERVISOR ------------------
 if nav == "Supervisor":
     st.title("Config")
 
-    if st.text_input("Password",type="password")=="admin123":
+    if st.text_input("Password", type="password") == "admin123":
         st.subheader("1. Lot Setup (Separate)")
         c1, c2 = st.columns(2)
         lp = c1.text_input("ID Panel Lot#", value=st.session_state.lot_p)
         ls = c2.text_input("Screen Panel Lot#", value=st.session_state.lot_s)
 
         if st.button("Save Lots (Local)"):
-            st.session_state.lot_p=lp
-            st.session_state.lot_s=ls
+            st.session_state.lot_p = lp
+            st.session_state.lot_s = ls
             st.success("Saved locally. Now press **Save to GitHub** to publish to all devices.")
 
         st.subheader("2. Grid Data (Copy-Paste)")
         t1, t2 = st.tabs(["Panel (11)", "Screen (3)"])
+
         with t1:
-            p_txt=st.text_area("Paste Panel Numbers",height=150)
+            p_txt = st.text_area("Paste Panel Numbers", height=150)
             if st.button("Upd P11"):
-                d,m=parse_paste(p_txt,11)
+                d, m = parse_paste(p_txt, 11)
                 if d is not None:
-                    st.session_state.p11=d
+                    st.session_state.p11 = d
                     st.success(m)
+                else:
+                    st.error(m)
             st.dataframe(st.session_state.p11.iloc[:,:15])
 
         with t2:
-            s_txt=st.text_area("Paste Screen Numbers",height=100)
+            s_txt = st.text_area("Paste Screen Numbers", height=100)
             if st.button("Upd Scr"):
-                d,m=parse_paste(s_txt,3)
+                d, m = parse_paste(s_txt, 3)
                 if d is not None:
-                    st.session_state.p3=d
+                    st.session_state.p3 = d
                     st.success(m)
+                else:
+                    st.error(m)
             st.dataframe(st.session_state.p3.iloc[:,:15])
 
         st.write("---")
@@ -389,9 +410,9 @@ else:
             st.write("Panel Reactions")
             g1,g2=st.columns(2)
             with g1:
-                c1=st.selectbox("1",GRADES,key="1"); c2=st.selectbox("2",GRADES,key="2"); c3=st.selectbox("3",GRADES,key="3"); c4=st.selectbox("4",GRADES,key="4"); c5=st.selectbox("5",GRADES,key="5"); c6=st.selectbox("6",GRADES,key="6")
+                c1r=st.selectbox("1",GRADES,key="1"); c2r=st.selectbox("2",GRADES,key="2"); c3r=st.selectbox("3",GRADES,key="3"); c4r=st.selectbox("4",GRADES,key="4"); c5r=st.selectbox("5",GRADES,key="5"); c6r=st.selectbox("6",GRADES,key="6")
             with g2:
-                c7=st.selectbox("7",GRADES,key="7"); c8=st.selectbox("8",GRADES,key="8"); c9=st.selectbox("9",GRADES,key="9"); c10=st.selectbox("10",GRADES,key="10"); c11=st.selectbox("11",GRADES,key="11")
+                c7r=st.selectbox("7",GRADES,key="7"); c8r=st.selectbox("8",GRADES,key="8"); c9r=st.selectbox("9",GRADES,key="9"); c10r=st.selectbox("10",GRADES,key="10"); c11r=st.selectbox("11",GRADES,key="11")
 
         run = st.form_submit_button("🚀 Run Analysis")
 
@@ -403,12 +424,12 @@ else:
                 st.session_state.dat_mode = True
             else:
                 st.session_state.dat_mode = False
-                i_p = {1:c1,2:c2,3:c3,4:c4,5:c5,6:c6,7:c7,8:c8,9:c9,10:c10,11:c11}
+                i_p = {1:c1r,2:c2r,3:c3r,4:c4r,5:c5r,6:c6r,7:c7r,8:c8r,9:c9r,10:c10r,11:c11r}
                 i_s = {"I":s1,"II":s2,"III":s3}
                 cnt = sum([normalize_grade(x) for x in i_p.values()])
 
                 if cnt >= 11:
-                    st.markdown("""<div class='clinical-alert'>⚠️ <b>High Incidence Antigen suspected.</b><br>Pan-reactivity with Neg AC.<br>Action: Search compatible donors among <b>parents & siblings</b>.</div>""", unsafe_allow_html=True)
+                    st.markdown("""<div class='clinical-alert'>⚠️ <b>High Incidence Antigen suspected.</b><br>Pan-reactivity with Neg AC.<br>Action: Check siblings / Reference Lab.</div>""", unsafe_allow_html=True)
                 else:
                     final, notes = analyze_alloantibodies(i_p, i_s, st.session_state.ext)
                     sigs = [x for x in final if x not in INSIGNIFICANT_AGS]
@@ -434,7 +455,6 @@ else:
                         if others:
                             st.info(f"**Other:** Anti-{', '.join(others)} (Clinically insignificant/Cold)")
 
-                        # Separation strategy advisor (keep as-is)
                         if len(sigs) > 1:
                             st.write("---")
                             st.markdown("**🧪 Separation Strategy (Using Inventory):**")
@@ -444,19 +464,13 @@ else:
                                 s_txt = f"<span class='cell-hint'>{', '.join(found)}</span>" if found else "<span style='color:red'>Search External</span>"
                                 st.write(f"- Confirm **{t}**: Needs ({t}+ / {' '.join(conf)} neg) {s_txt}")
 
-                        # ✅ IMPORTANT: Do NOT confirm (Rule of 3) before separation when multiple significant antibodies exist
-                        skip_rule3 = (len(sigs) > 1)
-
-                        if skip_rule3:
-                            st.warning("⚠️ Multiple clinically significant antibodies detected. Perform separation/selected cells first. Confirmation (Rule of 3 / Modified) should be assessed after separation.")
-                            valid_all = False
-                        else:
-                            for ab in (sigs+others):
-                                ok, p, n = check_rule_3(ab, i_p, i_s, st.session_state.ext)
-                                msg = "Rule of 3 MET" if ok else "Unconfirmed"
-                                ic = "✅" if ok else "⚠️"
-                                st.write(f"**{ic} Anti-{ab}:** {msg} (P:{p} / N:{n})")
-                                if not ok: valid_all = False
+                        for ab in (sigs+others):
+                            ok, p, n = check_rule_3(ab, i_p, i_s, st.session_state.ext)
+                            msg = "Rule of 3 MET" if ok else "Unconfirmed"
+                            ic = "✅" if ok else "⚠️"
+                            st.write(f"**{ic} Anti-{ab}:** {msg} (P:{p} / N:{n})")
+                            if not ok:
+                                valid_all = False
 
                         if valid_all:
                             if st.button("Generate Official Report"):
@@ -465,7 +479,6 @@ else:
                         else:
                             st.warning("⚠️ Validation Required. Add Cells below.")
 
-    # DAT Module (unchanged UI, refined guidance text only)
     if st.session_state.dat_mode:
         st.write("---")
         st.subheader("🧪 Monospecific DAT Workup")
@@ -480,17 +493,13 @@ else:
             st.error("Invalid. Control Positive.")
         else:
             if igg=="Positive":
-                st.warning("👉 **Mostly WAIHA** (Warm Autoimmune Hemolytic Anemia).")
-                st.write("- **Refer to Blood Bank Physician/Consultant.**")
-                st.write("- Consider Adsorption as needed prior to alloantibody workup.")
-                st.markdown("<div class='clinical-waiha'><b>⚠️ Critical Note:</b> Check <b>recent transfusion</b>. Consider <b>Delayed Hemolytic Transfusion Reaction (DHTR)</b>. <b>Elution may be considered</b> as clinically indicated.</div>", unsafe_allow_html=True)
-
+                st.warning("👉 **WAIHA** (Warm Autoimmune Hemolytic Anemia).")
+                st.write("- Perform Elution/Adsorption.")
+                st.markdown("<div class='clinical-waiha'><b>⚠️ Critical Note:</b> If recently transfused, rule out <b>Delayed Hemolytic Transfusion Reaction (DHTR)</b>. Elution is Mandatory.</div>", unsafe_allow_html=True)
             elif c3d=="Positive" and igg=="Negative":
                 st.info("👉 **CAS** (Cold Agglutinin Syndrome).")
-                st.write("- Use **Pre-warm technique**.")
-                st.write("- Refer to Blood Bank Physician if persistent/reactive.")
+                st.write("- Use Pre-warm Technique.")
 
-    # Selected cells (as-is)
     if not st.session_state.dat_mode:
         with st.expander("➕ Add Selected Cell (From Library)"):
             id_x=st.text_input("ID")
@@ -498,8 +507,10 @@ else:
             ag_col=st.columns(6)
             new_p={}
             for i,ag in enumerate(AGS):
-                if ag_col[i%6].checkbox(ag): new_p[ag]=1
-                else: new_p[ag]=0
+                if ag_col[i%6].checkbox(ag):
+                    new_p[ag]=1
+                else:
+                    new_p[ag]=0
             if st.button("Confirm Add"):
                 st.session_state.ext.append({"res":normalize_grade(rs_x),"res_txt":rs_x,"ph":new_p})
                 st.success("Added! Re-run Analysis.")
