@@ -293,6 +293,58 @@ def enzyme_hint_if_needed(targets_needing_help: list):
     return None
 
 # --------------------------------------------------------------------------
+# NEW: Auto-resolution using discriminating (selected) cells already available
+# --------------------------------------------------------------------------
+def _discriminating_cells_for_target(target: str, suspects: tuple, cells: list):
+    """Return cells that are target+ and negative for all other suspects."""
+    others = [x for x in suspects if x != target]
+    disc = []
+    for c in cells:
+        ph = c["ph"]
+        if ph_has(ph, target) and all(not ph_has(ph, o) for o in others):
+            disc.append(c)
+    return disc
+
+def auto_refine_combo_using_discriminating(best: tuple, cells: list):
+    """
+    If discriminating cells exist in current data (panel/screen/added selected),
+    auto rule-out or support antibodies WITHOUT asking user.
+      - If any discriminating cell for Ag is NEGATIVE => rule-out Ag.
+      - If any discriminating cell for Ag is POSITIVE => support Ag (needs confirmation by Rule of Three).
+    Returns: (new_best_tuple, supported_set, ruled_out_set, evidence_lines)
+    """
+    if not best:
+        return None, set(), set(), []
+
+    supported = set()
+    ruled_out = set()
+    evidence = []
+
+    for ag in best:
+        disc = _discriminating_cells_for_target(ag, best, cells)
+        if not disc:
+            continue
+
+        neg_disc = [c for c in disc if c["react"] == 0]
+        pos_disc = [c for c in disc if c["react"] == 1]
+
+        # Rule-out has priority if contradiction exists
+        if neg_disc:
+            ruled_out.add(ag)
+            labs = ", ".join([c["label"] for c in neg_disc[:5]])
+            evidence.append(f"Auto Rule-out Anti-{ag}: discriminating cell(s) NEGATIVE → {labs}")
+        elif pos_disc:
+            supported.add(ag)
+            labs = ", ".join([c["label"] for c in pos_disc[:5]])
+            evidence.append(f"Auto Support Anti-{ag}: discriminating cell(s) POSITIVE → {labs}")
+
+    new_best = tuple([a for a in best if a not in ruled_out])
+    if len(new_best) == 0:
+        new_best = None
+
+    return new_best, supported, ruled_out, evidence
+
+# --------------------------------------------------------------------------
 # 5) SIDEBAR
 # --------------------------------------------------------------------------
 with st.sidebar:
@@ -455,7 +507,7 @@ else:
 
             else:
                 # ------------------------------
-                # Normal algorithm (unchanged)
+                # Normal algorithm (UPDATED ONLY at the point you requested)
                 # ------------------------------
                 cells = get_cells(in_p, in_s, st.session_state.ext)
                 ruled = rule_out(in_p, in_s, st.session_state.ext)
@@ -475,84 +527,108 @@ else:
                         if poss_cold:
                             st.info("Cold/Insignificant possibilities: " + ", ".join([f"Anti-{x}" for x in poss_cold]))
                 else:
-                    sep_map = separability_map(best, cells)
-                    resolved = [a for a in best if sep_map.get(a, False)]
-                    needs_work = [a for a in best if not sep_map.get(a, False)]
+                    # ------------------------------------------------------------------
+                    # ✅ NEW: If discriminating cells already exist in panel/screen/selected,
+                    # the program MUST auto-solve (rule-out / support) without asking user.
+                    # ------------------------------------------------------------------
+                    refined_best, supported_by_disc, ruled_out_by_disc, evidence_lines = auto_refine_combo_using_discriminating(best, cells)
 
-                    if resolved:
-                        st.success("Resolved (pattern explained & separable): " + ", ".join([f"Anti-{a}" for a in resolved]))
-                    if needs_work:
-                        st.warning("Pattern suggests these, but NOT separable yet (DO NOT confirm): " +
-                                   ", ".join([f"Anti-{a}" for a in needs_work]))
+                    if evidence_lines:
+                        st.markdown("### 🔎 Auto-resolution from Discriminating Cells (already available)")
+                        for line in evidence_lines:
+                            st.write(f"- {line}")
 
-                    remaining_other = [a for a in candidates if a not in best]
-                    other_sig = [a for a in remaining_other if a not in INSIGNIFICANT_AGS][:10]
-                    other_cold = [a for a in remaining_other if a in INSIGNIFICANT_AGS][:6]
-                    if other_sig or other_cold:
-                        st.markdown("### ⚠️ Not excluded yet (background possibilities):")
-                        if other_sig:
-                            st.write("**Clinically significant:** " + ", ".join([f"Anti-{x}" for x in other_sig]))
-                        if other_cold:
-                            st.info("Cold/Insignificant: " + ", ".join([f"Anti-{x}" for x in other_cold]))
+                    # If we ruled-out something automatically, we update the working combo immediately
+                    best = refined_best
 
-                    # ------------------------------
-                    # Confirmation (Rule of Three) — Resolved & Separable only
-                    # ------------------------------
-                    st.write("---")
-                    st.subheader("Confirmation (Rule of Three) — Resolved & Separable only")
-
-                    confirmation = {}
-                    confirmed = set()
-                    needs_more_for_confirmation = set()
-
-                    if not resolved:
-                        st.info("No antibody is separable yet → DO NOT apply Rule of Three. Add discriminating selected cells.")
+                    if not best:
+                        st.error("After applying discriminating-cell logic, no remaining specificity fits. Add new selected cells / another lot.")
                     else:
-                        for a in resolved:
-                            full, mod, p_cnt, n_cnt = check_rule_three_only_on_discriminating(a, best, cells)
-                            confirmation[a] = (full, mod, p_cnt, n_cnt)
-                            if full or mod:
-                                confirmed.add(a)
-                            else:
-                                needs_more_for_confirmation.add(a)
+                        sep_map = separability_map(best, cells)
+                        resolved = [a for a in best if sep_map.get(a, False)]
+                        needs_work = [a for a in best if not sep_map.get(a, False)]
 
-                        for a in resolved:
-                            full, mod, p_cnt, n_cnt = confirmation[a]
-                            if full:
-                                st.write(f"✅ **Anti-{a} CONFIRMED**: Full Rule (3+3) met on discriminating cells (P:{p_cnt} / N:{n_cnt})")
-                            elif mod:
-                                st.write(f"✅ **Anti-{a} CONFIRMED**: Modified Rule (2+3) met on discriminating cells (P:{p_cnt} / N:{n_cnt})")
-                            else:
-                                st.write(f"⚠️ **Anti-{a} NOT confirmed yet**: need more discriminating cells (P:{p_cnt} / N:{n_cnt})")
+                        # If supported_by_disc exists, prioritize showing it (still needs confirmation)
+                        if supported_by_disc:
+                            show_supported = [a for a in supported_by_disc if a in best]
+                            if show_supported:
+                                st.info("Supported by discriminating cells (needs confirmation): " +
+                                        ", ".join([f"Anti-{a}" for a in show_supported]))
 
-                    # ------------------------------
-                    # Selected Cells suggestions — ONLY WHEN NEEDED
-                    # ------------------------------
-                    targets_needing_selected = list(dict.fromkeys(needs_work + list(needs_more_for_confirmation)))
+                        if resolved:
+                            st.success("Resolved (pattern explained & separable): " + ", ".join([f"Anti-{a}" for a in resolved]))
+                        if needs_work:
+                            st.warning("Pattern suggests these, but NOT separable yet (DO NOT confirm): " +
+                                       ", ".join([f"Anti-{a}" for a in needs_work]))
 
-                    if targets_needing_selected:
+                        remaining_other = [a for a in candidates if a not in best]
+                        other_sig = [a for a in remaining_other if a not in INSIGNIFICANT_AGS][:10]
+                        other_cold = [a for a in remaining_other if a in INSIGNIFICANT_AGS][:6]
+                        if other_sig or other_cold:
+                            st.markdown("### ⚠️ Not excluded yet (background possibilities):")
+                            if other_sig:
+                                st.write("**Clinically significant:** " + ", ".join([f"Anti-{x}" for x in other_sig]))
+                            if other_cold:
+                                st.info("Cold/Insignificant: " + ", ".join([f"Anti-{x}" for x in other_cold]))
+
+                        # ------------------------------
+                        # Confirmation (Rule of Three) — Resolved & Separable only
+                        # ------------------------------
                         st.write("---")
-                        st.markdown("### 🧪 Selected Cells (Only if needed to resolve interference / confirm)")
+                        st.subheader("Confirmation (Rule of Three) — Resolved & Separable only")
 
-                        for a in targets_needing_selected:
-                            if a in needs_work:
-                                st.warning(f"Anti-{a}: **Interference / not separable** → need {a}+ cells that are NEGATIVE for other antibodies in the combo.")
-                            else:
-                                st.info(f"Anti-{a}: **Not confirmed yet** → need more discriminating cells ({a}+ / others in combo negative).")
+                        confirmation = {}
+                        confirmed = set()
+                        needs_more_for_confirmation = set()
 
-                            sugg = suggest_selected_cells(a, best)
-                            if sugg:
-                                for lab, note in sugg[:12]:
-                                    st.write(f"- {lab}  <span class='cell-hint'>{note}</span>", unsafe_allow_html=True)
-                            else:
-                                st.write(f"- No suitable discriminating cell in current inventory → use another lot / external selected cells.")
+                        if not resolved:
+                            st.info("No antibody is separable yet → DO NOT apply Rule of Three. Add discriminating selected cells.")
+                        else:
+                            for a in resolved:
+                                full, mod, p_cnt, n_cnt = check_rule_three_only_on_discriminating(a, best, cells)
+                                confirmation[a] = (full, mod, p_cnt, n_cnt)
+                                if full or mod:
+                                    confirmed.add(a)
+                                else:
+                                    needs_more_for_confirmation.add(a)
 
-                        enz = enzyme_hint_if_needed(targets_needing_selected)
-                        if enz:
-                            st.info("💡 " + enz)
-                    else:
-                        st.write("---")
-                        st.success("No Selected Cells needed: all resolved antibodies are confirmed and separable based on current data.")
+                            for a in resolved:
+                                full, mod, p_cnt, n_cnt = confirmation[a]
+                                if full:
+                                    st.write(f"✅ **Anti-{a} CONFIRMED**: Full Rule (3+3) met on discriminating cells (P:{p_cnt} / N:{n_cnt})")
+                                elif mod:
+                                    st.write(f"✅ **Anti-{a} CONFIRMED**: Modified Rule (2+3) met on discriminating cells (P:{p_cnt} / N:{n_cnt})")
+                                else:
+                                    st.write(f"⚠️ **Anti-{a} NOT confirmed yet**: need more discriminating cells (P:{p_cnt} / N:{n_cnt})")
+
+                        # ------------------------------
+                        # Selected Cells suggestions — ONLY WHEN NEEDED
+                        # ------------------------------
+                        targets_needing_selected = list(dict.fromkeys(needs_work + list(needs_more_for_confirmation)))
+
+                        if targets_needing_selected:
+                            st.write("---")
+                            st.markdown("### 🧪 Selected Cells (Only if needed to resolve interference / confirm)")
+
+                            for a in targets_needing_selected:
+                                if a in needs_work:
+                                    st.warning(f"Anti-{a}: **Interference / not separable** → need {a}+ cells that are NEGATIVE for other antibodies in the combo.")
+                                else:
+                                    st.info(f"Anti-{a}: **Not confirmed yet** → need more discriminating cells ({a}+ / others in combo negative).")
+
+                                sugg = suggest_selected_cells(a, best)
+                                if sugg:
+                                    for lab, note in sugg[:12]:
+                                        st.write(f"- {lab}  <span class='cell-hint'>{note}</span>", unsafe_allow_html=True)
+                                else:
+                                    st.write(f"- No suitable discriminating cell in current inventory → use another lot / external selected cells.")
+
+                            enz = enzyme_hint_if_needed(targets_needing_selected)
+                            if enz:
+                                st.info("💡 " + enz)
+                        else:
+                            st.write("---")
+                            st.success("No Selected Cells needed: all resolved antibodies are confirmed and separable based on current data.")
 
     # Selected cells library input
     with st.expander("➕ Add Selected Cell (From Library)"):
