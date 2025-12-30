@@ -132,7 +132,7 @@ if "lot_s" not in st.session_state:
 if "ext" not in st.session_state:
     st.session_state.ext = []
 
-# analysis persistence (fix DAT disappearing + keep outputs stable)
+# analysis persistence
 if "analysis_ready" not in st.session_state:
     st.session_state.analysis_ready = False
 if "analysis_payload" not in st.session_state:
@@ -268,9 +268,6 @@ def check_rule_three_only_on_discriminating(ag: str, combo: tuple, cells: list):
     return full, mod, p, n
 
 def suggest_selected_cells(target: str, other_set: list):
-    """
-    Suggest cells where target is POSITIVE and ALL others in other_set are NEGATIVE.
-    """
     others = [x for x in other_set if x != target]
     out = []
 
@@ -307,11 +304,6 @@ def enzyme_hint_if_needed(targets_needing_help: list):
     return None
 
 def discriminating_cells_for(target: str, active_not_excluded: set, cells: list):
-    """
-    Discriminating cell for target:
-      - target antigen POSITIVE
-      - all other (active_not_excluded - {target}) antigens NEGATIVE
-    """
     others = [x for x in active_not_excluded if x != target]
     disc = []
     for c in cells:
@@ -347,13 +339,8 @@ def background_auto_resolution(background_list: list, active_not_excluded: set, 
 
     return auto_ruled_out, supported, inconclusive, no_disc
 
-# ---------------- NEW (YOUR REQUEST): Patient antigen-negative check reminder ----------------
+# ---------------- Patient antigen-negative check reminder ----------------
 def patient_antigen_negative_reminder(antibodies: list, strong: bool = True) -> str:
-    """
-    Generates an HTML reminder:
-    - strong=True  => final confirmation reminder (after CONFIRMED)
-    - strong=False => pre-final reminder (resolved/suspected but not yet confirmed)
-    """
     if not antibodies:
         return ""
 
@@ -362,9 +349,7 @@ def patient_antigen_negative_reminder(antibodies: list, strong: bool = True) -> 
         if a and a not in uniq:
             uniq.append(a)
 
-    # Filter out ignored antigens in case any slipped in
     uniq = [a for a in uniq if a not in IGNORED_AGS]
-
     if not uniq:
         return ""
 
@@ -383,6 +368,22 @@ def patient_antigen_negative_reminder(antibodies: list, strong: bool = True) -> 
       <ul style="margin-top:6px;">
         {bullets}
       </ul>
+    </div>
+    """
+
+# ---------------- NEW: Anti-G alert (D + C pattern) ----------------
+def anti_g_alert_html(strong: bool = False) -> str:
+    box = "clinical-danger" if strong else "clinical-alert"
+    return f"""
+    <div class='{box}'>
+      ⚠️ <b>Consider Anti-G (D + C pattern)</b><br>
+      Anti-G may mimic <b>Anti-D + Anti-C</b>. If clinically relevant (especially pregnancy / RhIG decision), do not label as true Anti-D until Anti-G is excluded.<br>
+      <b>Suggested next steps (per SOP/reference lab):</b>
+      <ol style="margin-top:6px;">
+        <li>Assess if this impacts management (e.g., RhIG eligibility).</li>
+        <li>Perform differential workup using appropriate adsorption/elution strategy (D+ C− and D− C+ cells) if available, or refer to reference lab.</li>
+        <li>Use pre-transfusion sample when possible.</li>
+      </ol>
     </div>
     """
 
@@ -741,13 +742,22 @@ else:
                             st.write(f"⚠️ **Anti-{a} NOT confirmed yet**: need more discriminating cells (P:{p_cnt} / N:{n_cnt})")
 
                 # ------------------------------
-                # NEW: Patient antigen-negative confirmation reminder
+                # Patient antigen-negative confirmation reminder
                 # ------------------------------
                 if confirmed:
                     st.markdown(patient_antigen_negative_reminder(sorted(list(confirmed)), strong=True), unsafe_allow_html=True)
                 elif resolved:
-                    # If resolved but not confirmed, still remind gently
                     st.markdown(patient_antigen_negative_reminder(sorted(list(resolved)), strong=False), unsafe_allow_html=True)
+
+                # ------------------------------
+                # Anti-G alert (D + C pattern)  ✅ ADDED NOW
+                # Show if Anti-D is confirmed/resolved AND Anti-C is not excluded/suggested
+                # ------------------------------
+                d_present = ("D" in confirmed) or ("D" in resolved) or ("D" in needs_work)
+                c_present = ("C" in confirmed) or ("C" in resolved) or ("C" in needs_work) or ("C" in supported_bg) or ("C" in other_sig_final)
+                if d_present and c_present:
+                    strong = ("D" in confirmed and "C" in confirmed)
+                    st.markdown(anti_g_alert_html(strong=strong), unsafe_allow_html=True)
 
                 st.write("---")
 
