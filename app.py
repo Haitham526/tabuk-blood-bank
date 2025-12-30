@@ -388,6 +388,74 @@ def anti_g_alert_html(strong: bool = False) -> str:
     """
 
 # --------------------------------------------------------------------------
+# ✅ Supervisor Copy/Paste monthly grid updater (from old stable version)
+# --------------------------------------------------------------------------
+def _cp_to_bool(token: str) -> int:
+    t = str(token).strip().lower()
+    if t in ["", "0", "neg", "negative", "none", "n", "no", "-", "–", "—"]:
+        return 0
+    if "hem" in t:
+        return 1
+    if "+" in t:
+        return 1
+    if t in ["pos", "positive", "p", "yes", "y"]:
+        return 1
+    try:
+        return 1 if float(t) > 0 else 0
+    except Exception:
+        return 0
+
+def parse_paste_grid(txt: str, rows_expected: int):
+    """
+    Paste from Excel after PDF->Excel conversion:
+    - Accepts tab-separated rows
+    - Converts each cell to 0/1
+    - Uses LAST 26 columns if more provided
+    """
+    try:
+        raw = (txt or "").strip()
+        if not raw:
+            return None, "No data pasted."
+
+        lines = [ln for ln in raw.splitlines() if ln.strip() != ""]
+        if not lines:
+            return None, "No valid rows detected."
+
+        data = []
+        used = 0
+        for ln in lines:
+            if used >= rows_expected:
+                break
+            parts = ln.split("\t")
+            vals = [_cp_to_bool(p) for p in parts]
+
+            # keep last 26 columns if too many; pad if too few
+            if len(vals) > len(AGS):
+                vals = vals[-len(AGS):]
+            while len(vals) < len(AGS):
+                vals.append(0)
+
+            if rows_expected == 11:
+                row = {"ID": f"C{used+1}"}
+            else:
+                row = {"ID": f"S{['I','II','III'][used]}"}
+
+            for i, ag in enumerate(AGS):
+                row[ag] = int(vals[i])
+
+            data.append(row)
+            used += 1
+
+        df = pd.DataFrame(data)
+        if rows_expected == 11 and len(df) != 11:
+            return df, f"Updated {len(df)} row(s). (Expected 11)"
+        if rows_expected == 3 and len(df) != 3:
+            return df, f"Updated {len(df)} row(s). (Expected 3)"
+        return df, f"Updated {used} row(s)."
+    except Exception as e:
+        return None, f"Parse error: {e}"
+
+# --------------------------------------------------------------------------
 # 5) SIDEBAR
 # --------------------------------------------------------------------------
 with st.sidebar:
@@ -418,7 +486,37 @@ if nav == "Supervisor":
             st.session_state.lot_s = ls
             st.success("Saved locally. Press **Save to GitHub** to publish.")
 
-        st.subheader("2) Publish to ALL devices (Save to GitHub)")
+        # ------------------------------
+        # ✅ Restored: Copy/Paste monthly grid update (Panel + Screen)
+        # ------------------------------
+        st.subheader("2) Grid Data (Copy-Paste Monthly Update)")
+        t1, t2 = st.tabs(["Panel (11)", "Screen (3)"])
+
+        with t1:
+            st.caption("Paste (tab-separated) from Excel after PDF→Excel conversion. Last 26 columns will be used.")
+            p_txt = st.text_area("Paste Panel Numbers", height=160, key="paste_p11")
+            if st.button("Update P11", key="btn_upd_p11"):
+                df, msg = parse_paste_grid(p_txt, 11)
+                if df is not None and not df.empty:
+                    st.session_state.panel11_df = df
+                    st.success(msg)
+                else:
+                    st.error(msg)
+            st.dataframe(st.session_state.panel11_df, use_container_width=True)
+
+        with t2:
+            st.caption("Paste (tab-separated) from Excel after PDF→Excel conversion. Last 26 columns will be used.")
+            s_txt = st.text_area("Paste Screen Numbers", height=120, key="paste_p3")
+            if st.button("Update P3", key="btn_upd_p3"):
+                df, msg = parse_paste_grid(s_txt, 3)
+                if df is not None and not df.empty:
+                    st.session_state.screen3_df = df
+                    st.success(msg)
+                else:
+                    st.error(msg)
+            st.dataframe(st.session_state.screen3_df, use_container_width=True)
+
+        st.subheader("3) Publish to ALL devices (Save to GitHub)")
 
         if st.button("💾 Save to GitHub (Commit)", key="save_gh"):
             try:
@@ -750,8 +848,7 @@ else:
                     st.markdown(patient_antigen_negative_reminder(sorted(list(resolved)), strong=False), unsafe_allow_html=True)
 
                 # ------------------------------
-                # Anti-G alert (D + C pattern)  ✅ ADDED NOW
-                # Show if Anti-D is confirmed/resolved AND Anti-C is not excluded/suggested
+                # Anti-G alert (D + C pattern)
                 # ------------------------------
                 d_present = ("D" in confirmed) or ("D" in resolved) or ("D" in needs_work)
                 c_present = ("C" in confirmed) or ("C" in resolved) or ("C" in needs_work) or ("C" in supported_bg) or ("C" in other_sig_final)
