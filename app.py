@@ -61,6 +61,23 @@ def load_json_if_exists(local_path: str, default_obj: dict) -> dict:
             return default_obj
     return default_obj
 
+def ensure_data_dir():
+    Path("data").mkdir(parents=True, exist_ok=True)
+
+def save_local_files(panel_df: pd.DataFrame, screen_df: pd.DataFrame, lots: dict):
+    ensure_data_dir()
+    Path("data/p11.csv").write_text(panel_df.to_csv(index=False), encoding="utf-8")
+    Path("data/p3.csv").write_text(screen_df.to_csv(index=False), encoding="utf-8")
+    Path("data/lots.json").write_text(json.dumps(lots, ensure_ascii=False, indent=2), encoding="utf-8")
+
+def _coerce_01(df: pd.DataFrame, cols: list) -> pd.DataFrame:
+    # Ensure phenotype columns are 0/1 int
+    out = df.copy()
+    for c in cols:
+        if c in out.columns:
+            out[c] = pd.to_numeric(out[c], errors="coerce").fillna(0).astype(int).clip(0, 1)
+    return out
+
 # --------------------------------------------------------------------------
 # 1) PAGE SETUP & CSS
 # --------------------------------------------------------------------------
@@ -112,6 +129,8 @@ YN3 = ["Not Done", "Negative", "Positive"]
 # --------------------------------------------------------------------------
 # 3) STATE
 # --------------------------------------------------------------------------
+ensure_data_dir()
+
 default_panel11_df = pd.DataFrame([{"ID": f"C{i+1}", **{a:0 for a in AGS}} for i in range(11)])
 default_screen3_df = pd.DataFrame([{"ID": f"S{i}", **{a:0 for a in AGS}} for i in ["I","II","III"]])
 
@@ -120,6 +139,10 @@ if "panel11_df" not in st.session_state:
 
 if "screen3_df" not in st.session_state:
     st.session_state.screen3_df = load_csv_if_exists("data/p3.csv", default_screen3_df)
+
+# coerce at load
+st.session_state.panel11_df = _coerce_01(st.session_state.panel11_df, AGS)
+st.session_state.screen3_df = _coerce_01(st.session_state.screen3_df, AGS)
 
 default_lots = {"lot_p": "", "lot_s": ""}
 lots_obj = load_json_if_exists("data/lots.json", default_lots)
@@ -339,28 +362,22 @@ def background_auto_resolution(background_list: list, active_not_excluded: set, 
 
     return auto_ruled_out, supported, inconclusive, no_disc
 
-# ---------------- Patient antigen-negative check reminder ----------------
 def patient_antigen_negative_reminder(antibodies: list, strong: bool = True) -> str:
     if not antibodies:
         return ""
-
     uniq = []
     for a in antibodies:
         if a and a not in uniq:
             uniq.append(a)
-
     uniq = [a for a in uniq if a not in IGNORED_AGS]
     if not uniq:
         return ""
-
     title = "✅ Final confirmation step (Patient antigen check)" if strong else "⚠️ Before final reporting (Patient antigen check)"
     box_class = "clinical-danger" if strong else "clinical-alert"
     intro = ("Confirm the patient is <b>ANTIGEN-NEGATIVE</b> for the corresponding antigen(s) to support the antibody identification."
              if strong else
              "Before you finalize/report, confirm the patient is <b>ANTIGEN-NEGATIVE</b> for the corresponding antigen(s).")
-
     bullets = "".join([f"<li>Anti-{ag} → verify patient is <b>{ag}-negative</b> (phenotype/genotype; pre-transfusion sample preferred).</li>" for ag in uniq])
-
     return f"""
     <div class='{box_class}'>
       <b>{title}</b><br>
@@ -371,7 +388,6 @@ def patient_antigen_negative_reminder(antibodies: list, strong: bool = True) -> 
     </div>
     """
 
-# ---------------- NEW: Anti-G alert (D + C pattern) ----------------
 def anti_g_alert_html(strong: bool = False) -> str:
     box = "clinical-danger" if strong else "clinical-alert"
     return f"""
@@ -401,7 +417,7 @@ with st.sidebar:
         st.rerun()
 
 # --------------------------------------------------------------------------
-# 6) SUPERVISOR
+# 6) SUPERVISOR  ✅ FIXED: restore panel/screen editors
 # --------------------------------------------------------------------------
 if nav == "Supervisor":
     st.title("Config")
@@ -413,17 +429,75 @@ if nav == "Supervisor":
         lp = c1.text_input("ID Panel Lot#", value=st.session_state.lot_p, key="lot_p_in")
         ls = c2.text_input("Screen Panel Lot#", value=st.session_state.lot_s, key="lot_s_in")
 
-        if st.button("Save Lots (Local)", key="save_lots_local"):
+        # ------------------------------------------------------------------
+        # ✅ Restore Panel/Screen Editors
+        # ------------------------------------------------------------------
+        st.subheader("2) Panel & Screening Cell Configuration (Edit Tables)")
+
+        st.markdown("**ID Panel (11 Cells)**")
+        panel_editor = st.data_editor(
+            st.session_state.panel11_df,
+            use_container_width=True,
+            num_rows="fixed",
+            key="panel_editor",
+            column_config={
+                "ID": st.column_config.TextColumn("ID"),
+                **{ag: st.column_config.NumberColumn(ag, min_value=0, max_value=1, step=1) for ag in AGS}
+            }
+        )
+
+        st.markdown("**Screening Cells (3 Cells)**")
+        screen_editor = st.data_editor(
+            st.session_state.screen3_df,
+            use_container_width=True,
+            num_rows="fixed",
+            key="screen_editor",
+            column_config={
+                "ID": st.column_config.TextColumn("ID"),
+                **{ag: st.column_config.NumberColumn(ag, min_value=0, max_value=1, step=1) for ag in AGS}
+            }
+        )
+
+        # normalize editor output safely
+        panel_editor = _coerce_01(panel_editor, AGS)
+        screen_editor = _coerce_01(screen_editor, AGS)
+
+        b1, b2, b3 = st.columns([1.2, 1.2, 1.6])
+
+        if b1.button("✅ Apply Edits to Session", use_container_width=True):
+            st.session_state.panel11_df = panel_editor.copy()
+            st.session_state.screen3_df = screen_editor.copy()
+            st.success("Edits applied in-memory (session).")
+
+        if b2.button("💾 Save Locally (CSV/JSON)", use_container_width=True):
             st.session_state.lot_p = lp
             st.session_state.lot_s = ls
-            st.success("Saved locally. Press **Save to GitHub** to publish.")
+            st.session_state.panel11_df = panel_editor.copy()
+            st.session_state.screen3_df = screen_editor.copy()
+            save_local_files(
+                st.session_state.panel11_df,
+                st.session_state.screen3_df,
+                {"lot_p": st.session_state.lot_p, "lot_s": st.session_state.lot_s}
+            )
+            st.success("Saved locally to /data (p11.csv, p3.csv, lots.json).")
 
-        st.subheader("2) Publish to ALL devices (Save to GitHub)")
+        if b3.button("↩️ Restore Defaults (This Session)", use_container_width=True):
+            st.session_state.panel11_df = default_panel11_df.copy()
+            st.session_state.screen3_df = default_screen3_df.copy()
+            st.success("Defaults restored (session). You can Save Local / Publish to persist.")
 
+        st.subheader("3) Publish to ALL devices (Save to GitHub)")
         if st.button("💾 Save to GitHub (Commit)", key="save_gh"):
             try:
+                # make sure current editor values are applied
+                st.session_state.lot_p = lp
+                st.session_state.lot_s = ls
+                st.session_state.panel11_df = panel_editor.copy()
+                st.session_state.screen3_df = screen_editor.copy()
+
                 lots_json = json.dumps({"lot_p": st.session_state.lot_p, "lot_s": st.session_state.lot_s},
                                        ensure_ascii=False, indent=2)
+
                 github_upsert_file("data/p11.csv", st.session_state.panel11_df.to_csv(index=False), "Update monthly p11 panel")
                 github_upsert_file("data/p3.csv",  st.session_state.screen3_df.to_csv(index=False), "Update monthly p3 screen")
                 github_upsert_file("data/lots.json", lots_json, "Update monthly lots")
@@ -530,9 +604,6 @@ else:
         ac_negative = (ac_res == "Negative")
         all_rx = all_reactive_pattern(in_p, in_s)
 
-        # --------------------------------------------------------------
-        # PAN-REACTIVE LOGIC
-        # --------------------------------------------------------------
         if all_rx and ac_negative:
             tx_note = ""
             if recent_tx:
@@ -741,18 +812,11 @@ else:
                         else:
                             st.write(f"⚠️ **Anti-{a} NOT confirmed yet**: need more discriminating cells (P:{p_cnt} / N:{n_cnt})")
 
-                # ------------------------------
-                # Patient antigen-negative confirmation reminder
-                # ------------------------------
                 if confirmed:
                     st.markdown(patient_antigen_negative_reminder(sorted(list(confirmed)), strong=True), unsafe_allow_html=True)
                 elif resolved:
                     st.markdown(patient_antigen_negative_reminder(sorted(list(resolved)), strong=False), unsafe_allow_html=True)
 
-                # ------------------------------
-                # Anti-G alert (D + C pattern)  ✅ ADDED NOW
-                # Show if Anti-D is confirmed/resolved AND Anti-C is not excluded/suggested
-                # ------------------------------
                 d_present = ("D" in confirmed) or ("D" in resolved) or ("D" in needs_work)
                 c_present = ("C" in confirmed) or ("C" in resolved) or ("C" in needs_work) or ("C" in supported_bg) or ("C" in other_sig_final)
                 if d_present and c_present:
