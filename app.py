@@ -73,7 +73,9 @@ st.markdown("""
         display: flex; justify-content: space-around; background-color: #f1f8e9;
         border: 1px solid #81c784; padding: 8px; border-radius: 5px; margin-bottom: 20px; font-weight: bold; color: #1b5e20;
     }
-    .clinical-alert { background-color: #fff3cd; border: 2px solid #ffca2c; padding: 10px; color: #000; font-weight: bold; margin: 5px 0;}
+    .clinical-alert { background-color: #fff3cd; border: 2px solid #ffca2c; padding: 12px; color: #000; font-weight: 600; margin: 8px 0; border-radius: 6px;}
+    .clinical-danger { background-color: #f8d7da; border: 2px solid #dc3545; padding: 12px; color: #000; font-weight: 700; margin: 8px 0; border-radius: 6px;}
+    .clinical-info { background-color: #cff4fc; border: 2px solid #0dcaf0; padding: 12px; color: #000; font-weight: 600; margin: 8px 0; border-radius: 6px;}
     .cell-hint { font-size: 0.9em; color: #155724; background: #d4edda; padding: 2px 6px; border-radius: 4px; }
     .dr-signature {
         position: fixed; bottom: 10px; right: 15px;
@@ -97,15 +99,11 @@ st.markdown("""
 # 2) CONSTANTS
 # --------------------------------------------------------------------------
 AGS = ["D","C","E","c","e","Cw","K","k","Kpa","Kpb","Jsa","Jsb","Fya","Fyb","Jka","Jkb","Lea","Leb","P1","M","N","S","s","Lua","Lub","Xga"]
-
-# dosage-sensitive antigens (need homozygous exclusion)
 DOSAGE = ["C","c","E","e","Fya","Fyb","Jka","Jkb","M","N","S","s"]
 PAIRS = {'C':'c','c':'C','E':'e','e':'E','Fya':'Fyb','Fyb':'Fya','Jka':'Jkb','Jkb':'Jka','M':'N','N':'M','S':'s','s':'S'}
 
 IGNORED_AGS = ["Kpa", "Kpb", "Jsa", "Jsb", "Lub", "Cw"]
 INSIGNIFICANT_AGS = ["Lea", "Lua", "Leb", "P1"]
-
-# For enzyme suggestion: these are commonly destroyed/affected by ficin/papain
 ENZYME_DESTROYED = ["Fya","Fyb","M","N","S","s"]
 
 GRADES = ["0", "+1", "+2", "+3", "+4", "Hemolysis"]
@@ -143,7 +141,6 @@ def normalize_grade(val) -> int:
     return 1
 
 def is_homozygous(ph, ag: str) -> bool:
-    """For dosage antigens: homozygous means ag=1 and its pair=0."""
     if ag not in DOSAGE:
         return True
     pair = PAIRS.get(ag)
@@ -178,7 +175,6 @@ def get_cells(in_p: dict, in_s: dict, extras: list):
     return cells
 
 def rule_out(in_p: dict, in_s: dict, extras: list):
-    """Rule-out using NEGATIVE cells ONLY, and only if antigen is homozygous (for dosage)."""
     ruled_out = set()
     for c in get_cells(in_p, in_s, extras):
         if c["react"] == 0:
@@ -190,19 +186,12 @@ def rule_out(in_p: dict, in_s: dict, extras: list):
                     ruled_out.add(ag)
     return ruled_out
 
-def high_incidence(in_p: dict, in_s: dict, ac_negative: bool):
-    """Only if ALL 11 panel + ALL 3 screen are reactive AND AC negative."""
-    if not ac_negative:
-        return False
+def all_reactive_pattern(in_p: dict, in_s: dict):
     all_panel = all(normalize_grade(in_p[i])==1 for i in range(1,12))
     all_screen = all(normalize_grade(in_s[k])==1 for k in ["I","II","III"])
     return all_panel and all_screen
 
 def combo_valid_against_negatives(combo: tuple, cells: list):
-    """
-    A combo is invalid if there exists a NEGATIVE cell that is homozygous-positive
-    for ANY antibody in combo (meaning it should have reacted).
-    """
     for c in cells:
         if c["react"] == 0:
             ph = c["ph"]
@@ -212,7 +201,6 @@ def combo_valid_against_negatives(combo: tuple, cells: list):
     return True
 
 def combo_covers_all_positives(combo: tuple, cells: list):
-    """Every POSITIVE cell must have at least one antigen from combo present."""
     for c in cells:
         if c["react"] == 1:
             ph = c["ph"]
@@ -221,36 +209,20 @@ def combo_covers_all_positives(combo: tuple, cells: list):
     return True
 
 def find_best_combo(candidates: list, cells: list, max_size: int = 3):
-    """
-    Find smallest combo (1..max_size) that:
-    - covers all positives
-    - doesn't contradict negative homozygous exclusions
-    Prefer clinically significant first.
-    """
-    # Prioritize clinically significant in search
     cand_sig = [c for c in candidates if c not in INSIGNIFICANT_AGS]
     cand_cold = [c for c in candidates if c in INSIGNIFICANT_AGS]
-
     ordered = cand_sig + cand_cold
 
-    best = None
     for r in range(1, max_size+1):
         for combo in combinations(ordered, r):
             if not combo_valid_against_negatives(combo, cells):
                 continue
             if not combo_covers_all_positives(combo, cells):
                 continue
-            best = combo
-            return best
+            return combo
     return None
 
 def separability_map(combo: tuple, cells: list):
-    """
-    For each antibody in combo: can we find at least one POSITIVE cell where:
-    - this antigen is present
-    - and all other combo antigens are absent
-    If not, then it is NOT separable -> needs selected cells.
-    """
     sep = {}
     for ag in combo:
         other = [x for x in combo if x != ag]
@@ -265,13 +237,7 @@ def separability_map(combo: tuple, cells: list):
     return sep
 
 def check_rule_three_only_on_discriminating(ag: str, combo: tuple, cells: list):
-    """
-    Apply rule-of-three using only cells that DISCRIMINATE ag from other antibodies in combo:
-    POS count: reactive & ag+ & all other combo antigens -
-    NEG count: nonreactive & ag-  (no need to enforce others)
-    """
     other = [x for x in combo if x != ag]
-
     p = 0
     n = 0
     for c in cells:
@@ -279,11 +245,9 @@ def check_rule_three_only_on_discriminating(ag: str, combo: tuple, cells: list):
         ag_pos = ph_has(ph, ag)
 
         if c["react"] == 1:
-            # discriminating positives only
             if ag_pos and all(not ph_has(ph, o) for o in other):
                 p += 1
         else:
-            # negatives that are ag-
             if not ag_pos:
                 n += 1
 
@@ -292,10 +256,6 @@ def check_rule_three_only_on_discriminating(ag: str, combo: tuple, cells: list):
     return full, mod, p, n
 
 def suggest_selected_cells(target: str, combo: tuple):
-    """
-    Suggest cells where target is present AND all other combo antigens absent.
-    Also indicate homozygous preference for dosage.
-    """
     others = [x for x in combo if x != target]
     out = []
 
@@ -326,9 +286,8 @@ def suggest_selected_cells(target: str, combo: tuple):
 
     return out
 
-def enzyme_hint(unresolved_list: list):
-    """If unresolved includes enzyme-destroyed antigens, suggest enzyme as option."""
-    hits = [x for x in unresolved_list if x in ENZYME_DESTROYED]
+def enzyme_hint_if_needed(targets_needing_help: list):
+    hits = [x for x in targets_needing_help if x in ENZYME_DESTROYED]
     if hits:
         return f"Enzyme option may help (destroys/weakens: {', '.join(hits)}). Use only per SOP and interpret carefully."
     return None
@@ -402,6 +361,10 @@ else:
         with L:
             st.write("Controls")
             ac_res = st.radio("Auto Control (AC)", ["Negative", "Positive"], key="rx_ac")
+
+            # ✅ Added: Recent transfusion checkbox (≤3 months)
+            recent_tx = st.checkbox("Recent transfusion (≤ 3 months)?", value=False, key="recent_tx")
+
             st.write("Screening")
             s_I   = st.selectbox("Scn I", GRADES, key="rx_sI")
             s_II  = st.selectbox("Scn II", GRADES, key="rx_sII")
@@ -434,28 +397,75 @@ else:
             in_s = {"I": s_I, "II": s_II, "III": s_III}
 
             ac_negative = (ac_res == "Negative")
+            all_rx = all_reactive_pattern(in_p, in_s)
 
-            if high_incidence(in_p, in_s, ac_negative):
-                st.markdown("""
-                <div class='clinical-alert'>
-                ⚠️ <b>High Incidence Antigen suspected</b><br>
-                (Only when ALL panel + ALL screen reactive with NEG AC)
+            # --------------------------------------------------------------
+            # PAN-REACTIVE LOGIC (RESTORED + upgraded with recent transfusion)
+            # --------------------------------------------------------------
+            if all_rx and ac_negative:
+                dhty = "<li>If recently transfused / anemia / hemolysis → consider <b>DHTR (Delayed Hemolytic Transfusion Reaction)</b>.</li>"
+                if recent_tx:
+                    dhty = "<li><b>Recent transfusion ≤ 3 months YES</b> → High suspicion for <b>DHTR</b> if clinical hemolysis/anemia present (compare pre/post transfusion samples if available).</li>"
+
+                st.markdown(f"""
+                <div class='clinical-danger'>
+                ⚠️ <b>Pan-reactive pattern with NEGATIVE autocontrol</b><br>
+                Likely: <b>Antibody to High-Frequency (High-Incidence) Antigen</b> OR <b>Multiple alloantibodies</b> (rare pattern).<br><br>
+                <u>Do NOT interpret as a routine single specificity using simple rule-out.</u><br>
+                <b>Recommended Work-up (priority):</b>
+                <ol>
+                  <li><b>DAT (Monospecific):</b> IgG and C3d.</li>
+                  {dhty}
+                  <li>Check hemolysis markers: Hb trend, bilirubin, LDH, haptoglobin, DAT/eluate as indicated.</li>
+                  <li>Consider <b>send-out / reference lab</b> for high-frequency antibody investigation, extended phenotype/genotype, and compatible unit search.</li>
+                  <li>Use <b>selected cells</b> / additional panels (different lot) to clarify multiple alloantibodies if suspected.</li>
+                </ol>
                 </div>
                 """, unsafe_allow_html=True)
+
+            elif all_rx and (not ac_negative):
+                ads = "<li>Consider <b>adsorption</b> (auto-adsorption if not transfused recently; otherwise alloadsorption) to uncover masked alloantibodies.</li>"
+                if recent_tx:
+                    ads = "<li><b>Recent transfusion ≤ 3 months YES</b> → Prefer <b>alloadsorption</b> (avoid auto-adsorption) to uncover masked alloantibodies.</li>"
+
+                st.markdown(f"""
+                <div class='clinical-danger'>
+                ⚠️ <b>Pan-reactive pattern with POSITIVE autocontrol</b><br>
+                Likely: <b>WAIHA (Warm autoantibody)</b> / warm autoagglutinin (panagglutination).<br><br>
+                <u>Do NOT confirm alloantibodies until autoantibody work-up is done.</u><br>
+                <b>Recommended Work-up (priority):</b>
+                <ol>
+                  <li><b>DAT (Monospecific):</b> IgG and C3d.</li>
+                  <li>If DAT positive → consider <b>eluate</b> (to assess underlying alloantibody).</li>
+                  {ads}
+                  <li>Phenotype/genotype patient (pre-transfusion sample preferred).</li>
+                  <li>Transfuse least-incompatible / antigen-matched as per policy & clinical urgency.</li>
+                </ol>
+                </div>
+                """, unsafe_allow_html=True)
+
+            # If pan-reactive, stop normal algorithm here
+            if all_rx:
+                st.markdown("""
+                <div class='clinical-info'>
+                🔎 <b>Note:</b> Because the pattern is pan-reactive, the standard Rule-out/Rule-in engine is intentionally <b>paused</b> to avoid false specificity calls.
+                Proceed with the work-up above and/or add selected cells from different lots/reference lab guidance.
+                </div>
+                """, unsafe_allow_html=True)
+
             else:
+                # ------------------------------
+                # Normal algorithm (unchanged)
+                # ------------------------------
                 cells = get_cells(in_p, in_s, st.session_state.ext)
                 ruled = rule_out(in_p, in_s, st.session_state.ext)
-
-                # Remaining candidates after rule-out
                 candidates = [a for a in AGS if a not in ruled and a not in IGNORED_AGS]
-
                 best = find_best_combo(candidates, cells, max_size=3)
 
                 st.subheader("Conclusion (Step 1: Rule-out / Rule-in)")
 
                 if not best:
                     st.error("No resolved specificity from current data. Proceed with Selected Cells / Enhancement.")
-                    # show not excluded as possibilities (limited)
                     poss_sig = [a for a in candidates if a not in INSIGNIFICANT_AGS][:12]
                     poss_cold = [a for a in candidates if a in INSIGNIFICANT_AGS][:6]
                     if poss_sig or poss_cold:
@@ -465,9 +475,7 @@ else:
                         if poss_cold:
                             st.info("Cold/Insignificant possibilities: " + ", ".join([f"Anti-{x}" for x in poss_cold]))
                 else:
-                    # We have a rule-in combo that explains all positives without neg-homo conflict
                     sep_map = separability_map(best, cells)
-
                     resolved = [a for a in best if sep_map.get(a, False)]
                     needs_work = [a for a in best if not sep_map.get(a, False)]
 
@@ -477,7 +485,6 @@ else:
                         st.warning("Pattern suggests these, but NOT separable yet (DO NOT confirm): " +
                                    ", ".join([f"Anti-{a}" for a in needs_work]))
 
-                    # Always show remaining not-excluded outside the best combo (as background possibilities)
                     remaining_other = [a for a in candidates if a not in best]
                     other_sig = [a for a in remaining_other if a not in INSIGNIFICANT_AGS][:10]
                     other_cold = [a for a in remaining_other if a in INSIGNIFICANT_AGS][:6]
@@ -488,38 +495,64 @@ else:
                         if other_cold:
                             st.info("Cold/Insignificant: " + ", ".join([f"Anti-{x}" for x in other_cold]))
 
-                    # Selected cells suggestions:
-                    st.write("---")
-                    st.markdown("### 🧪 Suggested Selected Cells (to SEPARATE / CONFIRM)")
-                    for a in best:
-                        sugg = suggest_selected_cells(a, best)
-                        if sugg:
-                            st.write(f"**For Anti-{a}:** (need {a}+ and all other in combo negative)")
-                            for lab, note in sugg[:10]:
-                                st.write(f"- {lab}  <span class='cell-hint'>{note}</span>", unsafe_allow_html=True)
-                        else:
-                            st.write(f"**For Anti-{a}:** No suitable discriminating cell in current inventory → use another lot / external panel.")
-
-                    # Enzyme suggestion (only if unresolved includes enzyme-destroyed ones or separation is hard)
-                    hint = enzyme_hint(list(best))
-                    if hint:
-                        st.info("💡 " + hint)
-
-                    # Confirmation step:
+                    # ------------------------------
+                    # Confirmation (Rule of Three) — Resolved & Separable only
+                    # ------------------------------
                     st.write("---")
                     st.subheader("Confirmation (Rule of Three) — Resolved & Separable only")
+
+                    confirmation = {}
+                    confirmed = set()
+                    needs_more_for_confirmation = set()
 
                     if not resolved:
                         st.info("No antibody is separable yet → DO NOT apply Rule of Three. Add discriminating selected cells.")
                     else:
                         for a in resolved:
                             full, mod, p_cnt, n_cnt = check_rule_three_only_on_discriminating(a, best, cells)
-                            if full:
-                                st.write(f"✅ **Anti-{a}**: Full Rule (3+3) met on discriminating cells (P:{p_cnt} / N:{n_cnt})")
-                            elif mod:
-                                st.write(f"✅ **Anti-{a}**: Modified Rule (2+3) met on discriminating cells (P:{p_cnt} / N:{n_cnt})")
+                            confirmation[a] = (full, mod, p_cnt, n_cnt)
+                            if full or mod:
+                                confirmed.add(a)
                             else:
-                                st.write(f"⚠️ **Anti-{a}**: Not confirmed yet (need more discriminating cells) (P:{p_cnt} / N:{n_cnt})")
+                                needs_more_for_confirmation.add(a)
+
+                        for a in resolved:
+                            full, mod, p_cnt, n_cnt = confirmation[a]
+                            if full:
+                                st.write(f"✅ **Anti-{a} CONFIRMED**: Full Rule (3+3) met on discriminating cells (P:{p_cnt} / N:{n_cnt})")
+                            elif mod:
+                                st.write(f"✅ **Anti-{a} CONFIRMED**: Modified Rule (2+3) met on discriminating cells (P:{p_cnt} / N:{n_cnt})")
+                            else:
+                                st.write(f"⚠️ **Anti-{a} NOT confirmed yet**: need more discriminating cells (P:{p_cnt} / N:{n_cnt})")
+
+                    # ------------------------------
+                    # Selected Cells suggestions — ONLY WHEN NEEDED
+                    # ------------------------------
+                    targets_needing_selected = list(dict.fromkeys(needs_work + list(needs_more_for_confirmation)))
+
+                    if targets_needing_selected:
+                        st.write("---")
+                        st.markdown("### 🧪 Selected Cells (Only if needed to resolve interference / confirm)")
+
+                        for a in targets_needing_selected:
+                            if a in needs_work:
+                                st.warning(f"Anti-{a}: **Interference / not separable** → need {a}+ cells that are NEGATIVE for other antibodies in the combo.")
+                            else:
+                                st.info(f"Anti-{a}: **Not confirmed yet** → need more discriminating cells ({a}+ / others in combo negative).")
+
+                            sugg = suggest_selected_cells(a, best)
+                            if sugg:
+                                for lab, note in sugg[:12]:
+                                    st.write(f"- {lab}  <span class='cell-hint'>{note}</span>", unsafe_allow_html=True)
+                            else:
+                                st.write(f"- No suitable discriminating cell in current inventory → use another lot / external selected cells.")
+
+                        enz = enzyme_hint_if_needed(targets_needing_selected)
+                        if enz:
+                            st.info("💡 " + enz)
+                    else:
+                        st.write("---")
+                        st.success("No Selected Cells needed: all resolved antibodies are confirmed and separable based on current data.")
 
     # Selected cells library input
     with st.expander("➕ Add Selected Cell (From Library)"):
