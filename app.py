@@ -267,7 +267,7 @@ def check_rule_three_only_on_discriminating(ag: str, combo: tuple, cells: list):
     mod  = (p >= 2 and n >= 3)
     return full, mod, p, n
 
-def suggest_selected_cells(target: str, other_set: list, cells_inventory_only=True):
+def suggest_selected_cells(target: str, other_set: list):
     """
     Suggest cells where target is POSITIVE and ALL others in other_set are NEGATIVE.
     """
@@ -282,7 +282,6 @@ def suggest_selected_cells(target: str, other_set: list, cells_inventory_only=Tr
                 return False
         return True
 
-    # only suggest from panel/screen inventory (not user-entered selected) unless needed
     for i in range(11):
         ph = st.session_state.panel11_df.iloc[i]
         if ok(ph):
@@ -307,7 +306,6 @@ def enzyme_hint_if_needed(targets_needing_help: list):
         return f"Enzyme option may help (destroys/weakens: {', '.join(hits)}). Use only per SOP and interpret carefully."
     return None
 
-# ---------------- NEW: discriminating cell logic for background auto-resolution ----------------
 def discriminating_cells_for(target: str, active_not_excluded: set, cells: list):
     """
     Discriminating cell for target:
@@ -320,25 +318,16 @@ def discriminating_cells_for(target: str, active_not_excluded: set, cells: list)
         ph = c["ph"]
         if not ph_has(ph, target):
             continue
-        # strict: others must be negative
         if any(ph_has(ph, o) for o in others):
             continue
         disc.append(c)
     return disc
 
 def background_auto_resolution(background_list: list, active_not_excluded: set, cells: list):
-    """
-    For each background antibody:
-      - if any discriminating cell exists:
-           * if ALL discriminating cells are NEGATIVE => auto-ruled-out
-           * if ANY discriminating cell is POSITIVE => supported/suspected (needs confirmation)
-           * if mixed results => inconclusive
-      - else: no discriminating cells available -> needs external selected cells
-    """
-    auto_ruled_out = {}     # ag -> [cell labels used]
-    supported = {}          # ag -> [positive cell labels]
-    inconclusive = {}       # ag -> [cell labels]
-    no_disc = []            # [ag]
+    auto_ruled_out = {}
+    supported = {}
+    inconclusive = {}
+    no_disc = []
 
     for ag in background_list:
         disc = discriminating_cells_for(ag, active_not_excluded, cells)
@@ -357,30 +346,6 @@ def background_auto_resolution(background_list: list, active_not_excluded: set, 
             auto_ruled_out[ag] = [c["label"] for c in neg]
 
     return auto_ruled_out, supported, inconclusive, no_disc
-
-def check_rule_three_discriminating(target: str, active_not_excluded: set, cells: list):
-    """
-    Rule-of-three counts on discriminating positives, and antigen-negative cells for negatives.
-    Same logic as your discriminating concept:
-      P: reactive cells that are target+ and others-
-      N: nonreactive cells that are target-
-    """
-    others = [x for x in active_not_excluded if x != target]
-    p = 0
-    n = 0
-    for c in cells:
-        ph = c["ph"]
-        tpos = ph_has(ph, target)
-
-        if c["react"] == 1:
-            if tpos and all(not ph_has(ph, o) for o in others):
-                p += 1
-        else:
-            if not tpos:
-                n += 1
-    full = (p >= 3 and n >= 3)
-    mod  = (p >= 2 and n >= 3)
-    return full, mod, p, n
 
 # --------------------------------------------------------------------------
 # 5) SIDEBAR
@@ -455,7 +420,22 @@ else:
         with L:
             st.write("Controls")
             ac_res = st.radio("Auto Control (AC)", ["Negative", "Positive"], key="rx_ac")
-            recent_tx = st.checkbox("Recent transfusion (≤ 3 months)?", value=False, key="recent_tx")
+
+            # ✅ Changed: Recent transfusion is now 4 weeks (≈28 days) + immediate red warning UI
+            recent_tx = st.checkbox("Recent transfusion (≤ 4 weeks)?", value=False, key="recent_tx")
+
+            if recent_tx:
+                st.markdown("""
+                <div class='clinical-danger'>
+                🩸 <b>RECENT TRANSFUSION FLAGGED</b><br>
+                ⚠️ Consider <b>Delayed Hemolytic Transfusion Reaction (DHTR)</b> / anamnestic alloantibody response if compatible with clinical picture.<br>
+                <ul>
+                  <li>Review Hb trend, hemolysis markers (bilirubin/LDH/haptoglobin), DAT as indicated.</li>
+                  <li>Compare pre- vs post-transfusion samples if available.</li>
+                  <li>Escalate early if new alloantibody suspected.</li>
+                </ul>
+                </div>
+                """, unsafe_allow_html=True)
 
             st.write("Screening")
             s_I   = st.selectbox("Scn I", GRADES, key="rx_sI")
@@ -481,9 +461,6 @@ else:
 
         run_btn = st.form_submit_button("🚀 Run Analysis", use_container_width=True)
 
-    # -------------------------
-    # Persist analysis payload (fix DAT disappearing)
-    # -------------------------
     if run_btn:
         if not st.session_state.lot_p or not st.session_state.lot_s:
             st.error("⛔ Lots not configured by Supervisor.")
@@ -501,14 +478,10 @@ else:
             }
             st.session_state.analysis_ready = True
 
-            # determine whether DAT section should persist
             ac_negative = (ac_res == "Negative")
             all_rx = all_reactive_pattern(in_p, in_s)
             st.session_state.show_dat = bool(all_rx and (not ac_negative))
 
-    # ----------------------------------------------------------------------
-    # Main Output: ALWAYS from session_state.analysis_payload if available
-    # ----------------------------------------------------------------------
     if st.session_state.analysis_ready and st.session_state.analysis_payload:
         in_p = st.session_state.analysis_payload["in_p"]
         in_s = st.session_state.analysis_payload["in_s"]
@@ -519,12 +492,14 @@ else:
         all_rx = all_reactive_pattern(in_p, in_s)
 
         # --------------------------------------------------------------
-        # PAN-REACTIVE LOGIC (as you requested)
+        # PAN-REACTIVE LOGIC
         # --------------------------------------------------------------
         if all_rx and ac_negative:
             tx_note = ""
             if recent_tx:
-                tx_note = "<li><b>Recent transfusion ≤ 3 months</b>: compare pre/post transfusion samples if possible; reference lab approach strongly preferred.</li>"
+                tx_note = """
+                <li style="color:#7a0000;"><b>Recent transfusion ≤ 4 weeks</b>: strongly consider <b>DHTR</b> / anamnestic alloantibody response if clinically compatible; compare pre/post samples and review hemolysis markers.</li>
+                """
 
             st.markdown(f"""
             <div class='clinical-danger'>
@@ -561,7 +536,6 @@ else:
             </div>
             """, unsafe_allow_html=True)
 
-            # DAT input persists (does not disappear on rerun)
             st.subheader("Monospecific DAT Entry (Required)")
             c1, c2, c3 = st.columns(3)
             dat_igg = c1.selectbox("DAT IgG", YN3, key="dat_igg")
@@ -629,14 +603,9 @@ else:
             </div>
             """, unsafe_allow_html=True)
 
-        # If pan-reactive, stop normal algorithm
         if all_rx:
             pass
-
         else:
-            # ------------------------------
-            # Normal algorithm (preserved)
-            # ------------------------------
             cells = get_cells(in_p, in_s, st.session_state.ext)
             ruled = rule_out(in_p, in_s, st.session_state.ext)
             candidates = [a for a in AGS if a not in ruled and a not in IGNORED_AGS]
@@ -656,7 +625,6 @@ else:
                         st.info("Cold/Insignificant possibilities: " + ", ".join([f"Anti-{x}" for x in poss_cold]))
 
             else:
-                # Step A: resolve + separability (same)
                 sep_map = separability_map(best, cells)
                 resolved = [a for a in best if sep_map.get(a, False)]
                 needs_work = [a for a in best if not sep_map.get(a, False)]
@@ -667,13 +635,10 @@ else:
                     st.warning("Pattern suggests these, but NOT separable yet (DO NOT confirm): " +
                                ", ".join([f"Anti-{a}" for a in needs_work]))
 
-                # Step B: background possibilities (but now auto-resolve if discriminating cells exist)
                 remaining_other = [a for a in candidates if a not in best]
-
                 other_sig = [a for a in remaining_other if a not in INSIGNIFICANT_AGS]
                 other_cold = [a for a in remaining_other if a in INSIGNIFICANT_AGS]
 
-                # active_not_excluded set = resolved + needs_work + background sig+cold
                 active_not_excluded = set(resolved + needs_work + other_sig + other_cold)
 
                 auto_ruled_out, supported_bg, inconclusive_bg, no_disc_bg = background_auto_resolution(
@@ -682,7 +647,6 @@ else:
                     cells=cells
                 )
 
-                # remove auto-ruled-out from the displayed "not excluded"
                 other_sig_final = [a for a in other_sig if a not in auto_ruled_out]
                 other_cold_final = [a for a in other_cold if a not in auto_ruled_out]
 
@@ -691,33 +655,26 @@ else:
                     for ag, labs in auto_ruled_out.items():
                         st.write(f"- **Anti-{ag} ruled out** (discriminating cell(s) NEGATIVE): " + ", ".join(labs))
 
-                # show supported (discriminating cells POSITIVE)
                 if supported_bg:
                     st.markdown("### ⚠️ Background antibodies suggested by discriminating cells (NOT confirmed yet):")
                     for ag, labs in supported_bg.items():
                         st.write(f"- **Anti-{ag} suspected** (discriminating cell(s) POSITIVE): " + ", ".join(labs))
 
-                # show inconclusive (mixed)
                 if inconclusive_bg:
                     st.markdown("### ⚠️ Inconclusive background (mixed discriminating results):")
                     for ag, labs in inconclusive_bg.items():
                         st.write(f"- **Anti-{ag} inconclusive** (mixed results): " + ", ".join(labs))
 
-                # show remaining "not excluded yet"
                 if other_sig_final or other_cold_final or no_disc_bg:
                     st.markdown("### ⚠️ Not excluded yet (background possibilities):")
                     if other_sig_final:
                         st.write("**Clinically significant:** " + ", ".join([f"Anti-{x}" for x in other_sig_final]))
                     if other_cold_final:
                         st.info("Cold/Insignificant: " + ", ".join([f"Anti-{x}" for x in other_cold_final]))
-                    # also explicitly list those with no discriminating cells available
                     if no_disc_bg:
                         st.warning("No discriminating cells available in current panel/screen for: " +
                                    ", ".join([f"Anti-{x}" for x in no_disc_bg]))
 
-                # ------------------------------
-                # Confirmation (Rule of Three) — Resolved & Separable only
-                # ------------------------------
                 st.write("---")
                 st.subheader("Confirmation (Rule of Three) — Resolved & Separable only")
 
@@ -745,29 +702,20 @@ else:
                         else:
                             st.write(f"⚠️ **Anti-{a} NOT confirmed yet**: need more discriminating cells (P:{p_cnt} / N:{n_cnt})")
 
-                # ------------------------------
-                # Selected Cells suggestions — ONLY WHEN NEEDED (fix contradictions)
-                # ------------------------------
-                # Needs selected cells if:
-                #  - combo members not separable OR not confirmed
-                #  - OR any clinically significant background still not excluded
-                #  - OR any supported background needs confirmation
+                st.write("---")
+
                 targets_needing_selected = list(dict.fromkeys(
                     needs_work +
                     list(needs_more_for_confirmation) +
                     list(supported_bg.keys()) +
-                    other_sig_final  # clinically significant background not excluded
+                    other_sig_final
                 ))
 
                 if targets_needing_selected:
-                    st.write("---")
                     st.markdown("### 🧪 Selected Cells (Only if needed to resolve interference / exclude / confirm)")
 
                     for a in targets_needing_selected:
-                        # define current active set strictly for discrimination
-                        # keep it stable: resolved + needs_work + remaining clinically significant background + supported background
                         active_set_now = set(resolved + needs_work + other_sig_final + list(supported_bg.keys()))
-                        # for cold/insignificant, include only if user wants strict—kept minimal by default
 
                         if a in needs_work:
                             st.warning(f"Anti-{a}: **Interference / not separable** → need {a}+ cells NEGATIVE for other active suspects.")
@@ -785,17 +733,13 @@ else:
                         else:
                             st.write("- No suitable discriminating cell in current inventory → use another lot / external selected cells.")
 
-                        # If this antibody is enzyme-destroyed and we have trouble finding discriminating cells
-                        # show enzyme hint (as per your workflow)
                     enz = enzyme_hint_if_needed(targets_needing_selected)
                     if enz:
                         st.info("💡 " + enz)
 
                 else:
-                    st.write("---")
                     st.success("No Selected Cells needed: all resolved antibodies are confirmed AND no clinically significant background remains unexcluded.")
 
-    # Selected cells library input
     with st.expander("➕ Add Selected Cell (From Library)"):
         ex_id = st.text_input("ID", key="ex_id")
         ex_res = st.selectbox("Reaction", GRADES, key="ex_res")
