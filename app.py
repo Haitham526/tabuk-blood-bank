@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-from datetime import date, datetime
+from datetime import date
 import json
 import base64
 import requests
@@ -43,12 +43,6 @@ def github_upsert_file(path_in_repo: str, content_text: str, commit_message: str
     if w.status_code not in (200, 201):
         raise RuntimeError(f"GitHub PUT error {w.status_code}: {w.text}")
 
-# --------------------------------------------------------------------------
-# 0.1) Local IO Helpers
-# --------------------------------------------------------------------------
-def ensure_data_dir():
-    Path("data").mkdir(parents=True, exist_ok=True)
-
 def load_csv_if_exists(local_path: str, default_df: pd.DataFrame) -> pd.DataFrame:
     p = Path(local_path)
     if p.exists():
@@ -67,30 +61,8 @@ def load_json_if_exists(local_path: str, default_obj: dict) -> dict:
             return default_obj
     return default_obj
 
-def write_text(path: str, text: str):
-    ensure_data_dir()
-    Path(path).write_text(text, encoding="utf-8")
-
-def read_text(path: str, default: str = "") -> str:
-    p = Path(path)
-    if p.exists():
-        return p.read_text(encoding="utf-8")
-    return default
-
-def _coerce_01(df: pd.DataFrame, cols: list) -> pd.DataFrame:
-    out = df.copy()
-    for c in cols:
-        if c in out.columns:
-            out[c] = pd.to_numeric(out[c], errors="coerce").fillna(0).astype(int).clip(0, 1)
-    return out
-
-def _validate_panel_df(df: pd.DataFrame, expected_rows: int, ags: list) -> (bool, str):
-    missing = [c for c in (["ID"] + ags) if c not in df.columns]
-    if missing:
-        return False, f"Missing columns: {', '.join(missing)}"
-    if len(df) != expected_rows:
-        return False, f"Expected {expected_rows} rows, got {len(df)}"
-    return True, "OK"
+def ensure_data_dir():
+    Path("data").mkdir(parents=True, exist_ok=True)
 
 # --------------------------------------------------------------------------
 # 1) PAGE SETUP & CSS
@@ -138,56 +110,25 @@ INSIGNIFICANT_AGS = ["Lea", "Lua", "Leb", "P1"]
 ENZYME_DESTROYED = ["Fya","Fyb","M","N","S","s"]
 
 GRADES = ["0", "+1", "+2", "+3", "+4", "Hemolysis"]
-YN3 = ["Not Done", "Negative", "Positive"]
+DAT_OPT = ["Not done", "Negative", "Positive"]
 
 # --------------------------------------------------------------------------
-# 3) STATE + PANEL LIBRARY (Sheets)
+# 3) STATE
 # --------------------------------------------------------------------------
 ensure_data_dir()
 
 default_panel11_df = pd.DataFrame([{"ID": f"C{i+1}", **{a:0 for a in AGS}} for i in range(11)])
 default_screen3_df = pd.DataFrame([{"ID": f"S{i}", **{a:0 for a in AGS}} for i in ["I","II","III"]])
 
-# Panel library manifest
-manifest_path = "data/panels_manifest.json"
-default_manifest = {
-    "active_key": "ACTIVE",
-    "panels": {
-        "ACTIVE": {
-            "name": "Active Panel (Current)",
-            "created": "",
-            "p11_path": "data/p11.csv",
-            "p3_path": "data/p3.csv",
-            "lots_path": "data/lots.json"
-        }
-    }
-}
-manifest = load_json_if_exists(manifest_path, default_manifest)
-
-# Ensure base files exist
-if not Path("data/p11.csv").exists():
-    write_text("data/p11.csv", default_panel11_df.to_csv(index=False))
-if not Path("data/p3.csv").exists():
-    write_text("data/p3.csv", default_screen3_df.to_csv(index=False))
-if not Path("data/lots.json").exists():
-    write_text("data/lots.json", json.dumps({"lot_p": "", "lot_s": ""}, ensure_ascii=False, indent=2))
-
-# Load active
-active_key = manifest.get("active_key", "ACTIVE")
-active_meta = manifest["panels"].get(active_key, manifest["panels"]["ACTIVE"])
-p11_path = active_meta.get("p11_path", "data/p11.csv")
-p3_path  = active_meta.get("p3_path",  "data/p3.csv")
-lots_path = active_meta.get("lots_path", "data/lots.json")
-
 if "panel11_df" not in st.session_state:
-    st.session_state.panel11_df = load_csv_if_exists(p11_path, default_panel11_df)
+    st.session_state.panel11_df = load_csv_if_exists("data/p11.csv", default_panel11_df)
+
 if "screen3_df" not in st.session_state:
-    st.session_state.screen3_df = load_csv_if_exists(p3_path, default_screen3_df)
+    st.session_state.screen3_df = load_csv_if_exists("data/p3.csv", default_screen3_df)
 
-st.session_state.panel11_df = _coerce_01(st.session_state.panel11_df, AGS)
-st.session_state.screen3_df = _coerce_01(st.session_state.screen3_df, AGS)
+default_lots = {"lot_p": "", "lot_s": ""}
+lots_obj = load_json_if_exists("data/lots.json", default_lots)
 
-lots_obj = load_json_if_exists(lots_path, {"lot_p": "", "lot_s": ""})
 if "lot_p" not in st.session_state:
     st.session_state.lot_p = lots_obj.get("lot_p", "")
 if "lot_s" not in st.session_state:
@@ -196,15 +137,96 @@ if "lot_s" not in st.session_state:
 if "ext" not in st.session_state:
     st.session_state.ext = []
 
-if "analysis_ready" not in st.session_state:
-    st.session_state.analysis_ready = False
-if "analysis_payload" not in st.session_state:
-    st.session_state.analysis_payload = None
-if "show_dat" not in st.session_state:
-    st.session_state.show_dat = False
+# DAT persistent fields (for panreactive AC+)
+if "dat_igg" not in st.session_state:
+    st.session_state.dat_igg = "Not done"
+if "dat_c3d" not in st.session_state:
+    st.session_state.dat_c3d = "Not done"
+if "dat_ctrl" not in st.session_state:
+    st.session_state.dat_ctrl = "Not done"
 
 # --------------------------------------------------------------------------
-# 4) HELPERS / ENGINE (UNCHANGED)
+# 4) PASTE PARSERS (Excel -> program)
+# --------------------------------------------------------------------------
+def _split_table(text: str):
+    t = (text or "").strip().replace("\r\n", "\n").replace("\r", "\n")
+    if not t:
+        return []
+    rows = [r for r in t.split("\n") if r.strip() != ""]
+    table = []
+    for r in rows:
+        # try tab first, else comma
+        if "\t" in r:
+            parts = [p.strip() for p in r.split("\t")]
+        else:
+            parts = [p.strip() for p in r.split(",")]
+        table.append(parts)
+    return table
+
+def _coerce_01_df(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    for ag in AGS:
+        if ag in out.columns:
+            out[ag] = pd.to_numeric(out[ag], errors="coerce").fillna(0).astype(int).clip(0, 1)
+        else:
+            out[ag] = 0
+    if "ID" not in out.columns:
+        out.insert(0, "ID", "")
+    out = out[["ID"] + AGS]
+    return out
+
+def parse_paste_to_panel_df(paste_text: str, expected_rows: int, default_ids: list) -> pd.DataFrame:
+    table = _split_table(paste_text)
+    if not table:
+        raise ValueError("Paste area is empty.")
+
+    # Detect header row
+    header = table[0]
+    has_header = any(h in AGS or h == "ID" for h in header)
+    if has_header:
+        df = pd.DataFrame(table[1:], columns=header)
+    else:
+        df = pd.DataFrame(table)
+
+    # If IDs not provided, create them
+    if "ID" in df.columns:
+        pass
+    else:
+        # if first col looks like IDs (non 0/1 values), treat as ID column
+        if df.shape[1] >= (len(AGS)+1):
+            # assume first column is ID
+            df.columns = ["ID"] + AGS + [f"X{i}" for i in range(df.shape[1] - (len(AGS)+1))]
+        elif df.shape[1] == len(AGS):
+            df.insert(0, "ID", default_ids[:len(df)])
+        else:
+            # if fewer columns, user probably copied only part — reject clearly
+            raise ValueError(f"Paste columns are {df.shape[1]}. Expected {len(AGS)} antigens (or {len(AGS)+1} including ID).")
+
+    # Keep only needed columns if extra
+    if "ID" not in df.columns:
+        df.insert(0, "ID", default_ids[:len(df)])
+    keep_cols = ["ID"] + [c for c in AGS if c in df.columns]
+    df = df[keep_cols].copy()
+
+    # Ensure all antigen columns exist
+    for ag in AGS:
+        if ag not in df.columns:
+            df[ag] = 0
+
+    df = df[["ID"] + AGS].copy()
+    df = _coerce_01_df(df)
+
+    # row count strict
+    if len(df) != expected_rows:
+        raise ValueError(f"Row count mismatch: got {len(df)} rows, expected {expected_rows}.")
+    # fill empty IDs if needed
+    for i in range(expected_rows):
+        if not str(df.loc[i, "ID"]).strip():
+            df.loc[i, "ID"] = default_ids[i]
+    return df
+
+# --------------------------------------------------------------------------
+# 5) HELPERS / ENGINE
 # --------------------------------------------------------------------------
 def normalize_grade(val) -> int:
     s = str(val).lower().strip()
@@ -218,7 +240,7 @@ def is_homozygous(ph, ag: str) -> bool:
     pair = PAIRS.get(ag)
     if not pair:
         return True
-    return (ph.get(ag,0)==1 and ph.get(pair,0)==0)
+    return (int(ph.get(ag,0))==1 and int(ph.get(pair,0))==0)
 
 def ph_has(ph, ag: str) -> bool:
     try:
@@ -290,6 +312,7 @@ def find_best_combo(candidates: list, cells: list, max_size: int = 3):
     cand_sig = [c for c in candidates if c not in INSIGNIFICANT_AGS]
     cand_cold = [c for c in candidates if c in INSIGNIFICANT_AGS]
     ordered = cand_sig + cand_cold
+
     for r in range(1, max_size+1):
         for combo in combinations(ordered, r):
             if not combo_valid_against_negatives(combo, cells):
@@ -303,14 +326,14 @@ def separability_map(combo: tuple, cells: list):
     sep = {}
     for ag in combo:
         other = [x for x in combo if x != ag]
-        found_unique = False
+        found_unique_pos = False
         for c in cells:
             if c["react"] == 1:
                 ph = c["ph"]
                 if ph_has(ph, ag) and all(not ph_has(ph, o) for o in other):
-                    found_unique = True
+                    found_unique_pos = True
                     break
-        sep[ag] = found_unique
+        sep[ag] = found_unique_pos
     return sep
 
 def check_rule_three_only_on_discriminating(ag: str, combo: tuple, cells: list):
@@ -320,19 +343,22 @@ def check_rule_three_only_on_discriminating(ag: str, combo: tuple, cells: list):
     for c in cells:
         ph = c["ph"]
         ag_pos = ph_has(ph, ag)
+
         if c["react"] == 1:
             if ag_pos and all(not ph_has(ph, o) for o in other):
                 p += 1
         else:
             if not ag_pos:
                 n += 1
+
     full = (p >= 3 and n >= 3)
     mod  = (p >= 2 and n >= 3)
     return full, mod, p, n
 
-def suggest_selected_cells(target: str, other_set: list):
-    others = [x for x in other_set if x != target]
+def suggest_selected_cells(target: str, combo: tuple):
+    others = [x for x in combo if x != target]
     out = []
+
     def ok(ph):
         if not ph_has(ph, target):
             return False
@@ -357,6 +383,7 @@ def suggest_selected_cells(target: str, other_set: list):
             if target in DOSAGE:
                 note = "Homozygous preferred" if is_homozygous(ph, target) else "Heterozygous (dosage caution)"
             out.append((f"Screen {sc_lbls[i]}", note))
+
     return out
 
 def enzyme_hint_if_needed(targets_needing_help: list):
@@ -365,233 +392,170 @@ def enzyme_hint_if_needed(targets_needing_help: list):
         return f"Enzyme option may help (destroys/weakens: {', '.join(hits)}). Use only per SOP and interpret carefully."
     return None
 
-def patient_antigen_negative_reminder(antibodies: list) -> str:
-    uniq = []
-    for a in antibodies:
-        if a and a not in uniq and a not in IGNORED_AGS:
-            uniq.append(a)
-    if not uniq:
+def patient_antigen_negative_reminder(ags: list) -> str:
+    if not ags:
         return ""
-    bullets = "".join([f"<li>Anti-{ag} → verify patient is <b>{ag}-negative</b> (phenotype/genotype; pre-transfusion sample preferred).</li>" for ag in uniq])
+    bullets = "".join([f"<li>Anti-{a} → confirm patient is <b>{a}-negative</b> (phenotype/genotype; pre-transfusion sample preferred).</li>" for a in ags])
     return f"""
     <div class='clinical-alert'>
-      ✅ <b>Final confirmation step (Patient antigen check)</b><br>
-      Confirm the patient is <b>ANTIGEN-NEGATIVE</b> for the corresponding antigen(s) to support the antibody identification.
+      ✅ <b>Final confirmation step</b><br>
+      Verify the patient is <b>ANTIGEN-NEGATIVE</b> for the corresponding antigen(s):
       <ul style="margin-top:6px;">{bullets}</ul>
     </div>
     """
 
-def anti_g_alert_html() -> str:
+def anti_g_alert() -> str:
     return """
     <div class='clinical-alert'>
-      ⚠️ <b>Consider Anti-G (D + C pattern)</b><br>
-      Anti-G may mimic <b>Anti-D + Anti-C</b>. If clinically relevant (especially pregnancy / RhIG decision),
-      do not label as true Anti-D until Anti-G is excluded. Refer per SOP/reference lab.
+      ⚠️ <b>Anti-G consideration (D + C pattern)</b><br>
+      Anti-G may mimic <b>Anti-D + Anti-C</b>. If clinically important (especially pregnancy / RhIG decision),
+      do not label as true Anti-D until Anti-G is excluded per SOP / reference lab.
     </div>
     """
 
+def dat_guidance_html(igg: str, c3d: str, ctrl: str) -> str:
+    if ctrl == "Positive":
+        return """
+        <div class='clinical-danger'>
+        ⛔ <b>DAT CONTROL POSITIVE</b> → Invalid DAT run. Repeat DAT before interpretation.
+        </div>
+        """
+    if igg == "Not done" and c3d == "Not done":
+        return ""
+    if igg == "Negative" and c3d == "Negative":
+        return """
+        <div class='clinical-info'>
+        DAT (IgG/C3d) NEGATIVE → consider non-immune causes / low-level antibody; correlate clinically.
+        </div>
+        """
+    if igg == "Positive" and c3d == "Negative":
+        return """
+        <div class='clinical-alert'>
+        DAT IgG POSITIVE / C3d NEGATIVE → consistent with <b>warm autoantibody</b> (WAIHA) pattern. Consider eluate / adsorption per SOP.
+        </div>
+        """
+    if igg == "Negative" and c3d == "Positive":
+        return """
+        <div class='clinical-alert'>
+        DAT IgG NEGATIVE / C3d POSITIVE → complement-mediated pattern (cold antibody / drug / etc.). Correlate with RT/IS reactivity and clinical context.
+        </div>
+        """
+    if igg == "Positive" and c3d == "Positive":
+        return """
+        <div class='clinical-alert'>
+        DAT IgG POSITIVE / C3d POSITIVE → mixed immune pattern. Consider eluate + adsorption strategy per SOP and evaluate for underlying alloantibody.
+        </div>
+        """
+    return ""
+
 # --------------------------------------------------------------------------
-# 5) SIDEBAR
+# 6) SIDEBAR
 # --------------------------------------------------------------------------
 with st.sidebar:
     st.image("https://cdn-icons-png.flaticon.com/512/2966/2966327.png", width=60)
     nav = st.radio("Menu", ["Workstation", "Supervisor"], key="nav_menu")
     if st.button("RESET DATA", key="btn_reset"):
         st.session_state.ext = []
-        st.session_state.analysis_ready = False
-        st.session_state.analysis_payload = None
-        st.session_state.show_dat = False
         st.rerun()
 
 # --------------------------------------------------------------------------
-# 6) SUPERVISOR (with SHEET/Panel Library)
+# 7) SUPERVISOR
 # --------------------------------------------------------------------------
 if nav == "Supervisor":
     st.title("Config")
 
     if st.text_input("Password", type="password", key="sup_pass") == "admin123":
 
-        # --- Panel Library / Sheet selector
-        st.subheader("A) Panel Library (Sheets)")
-
-        panel_keys = list(manifest.get("panels", {}).keys())
-        labels = []
-        for k in panel_keys:
-            meta = manifest["panels"][k]
-            nm = meta.get("name", k)
-            created = meta.get("created", "")
-            labels.append(f"{k} — {nm}" + (f" ({created})" if created else ""))
-
-        chosen_label = st.selectbox("Select Panel Sheet", labels, index=panel_keys.index(active_key) if active_key in panel_keys else 0)
-        chosen_key = panel_keys[labels.index(chosen_label)]
-
-        cL1, cL2 = st.columns([1.2, 1.8])
-        if cL1.button("✅ Set as ACTIVE (Workstations will use it)", use_container_width=True):
-            manifest["active_key"] = chosen_key
-            write_text(manifest_path, json.dumps(manifest, ensure_ascii=False, indent=2))
-            st.success("Active sheet updated. Reloading…")
-            st.session_state.clear()
-            st.rerun()
-
-        if cL2.button("🗑️ Delete Sheet (except ACTIVE)", use_container_width=True):
-            if chosen_key == "ACTIVE":
-                st.error("Cannot delete ACTIVE base sheet.")
-            else:
-                try:
-                    meta = manifest["panels"][chosen_key]
-                    for p in [meta.get("p11_path"), meta.get("p3_path"), meta.get("lots_path")]:
-                        if p and Path(p).exists():
-                            Path(p).unlink()
-                    del manifest["panels"][chosen_key]
-                    write_text(manifest_path, json.dumps(manifest, ensure_ascii=False, indent=2))
-                    st.success("Sheet deleted.")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Delete failed: {e}")
-
-        st.write("---")
-
-        # --- Create new sheet (IMPORT)
-        st.subheader("B) Add NEW Sheet (New Monthly Panel)")
-
-        st.info("Upload two CSV files: (1) p11 panel (11 rows) and (2) p3 screening (3 rows). Must include columns: ID + all antigens.")
-        new_key = st.text_input("New Sheet Key (e.g., 2026-01 or LOT123)", value="", key="new_sheet_key")
-        new_name = st.text_input("Sheet Name (e.g., Jan-2026 Ortho Panel)", value="", key="new_sheet_name")
-        new_lot_p = st.text_input("ID Panel Lot#", value="", key="new_lot_p")
-        new_lot_s = st.text_input("Screen Panel Lot#", value="", key="new_lot_s")
-
-        up1 = st.file_uploader("Upload p11.csv (11-cell panel)", type=["csv"], key="up_p11")
-        up2 = st.file_uploader("Upload p3.csv (3 screening cells)", type=["csv"], key="up_p3")
-
-        if st.button("➕ Create Sheet from Upload", use_container_width=True):
-            if not new_key.strip():
-                st.error("Please enter New Sheet Key.")
-            elif new_key.strip() in manifest["panels"]:
-                st.error("This Sheet Key already exists. Choose another.")
-            elif not up1 or not up2:
-                st.error("Please upload both p11.csv and p3.csv.")
-            else:
-                try:
-                    df_p11 = pd.read_csv(up1)
-                    df_p3  = pd.read_csv(up2)
-                    df_p11 = _coerce_01(df_p11, AGS)
-                    df_p3  = _coerce_01(df_p3, AGS)
-
-                    ok1, msg1 = _validate_panel_df(df_p11, 11, AGS)
-                    ok2, msg2 = _validate_panel_df(df_p3, 3, AGS)
-                    if not ok1:
-                        st.error(f"p11.csv invalid: {msg1}")
-                    elif not ok2:
-                        st.error(f"p3.csv invalid: {msg2}")
-                    else:
-                        key = new_key.strip()
-                        p11_new = f"data/p11_{key}.csv"
-                        p3_new  = f"data/p3_{key}.csv"
-                        lots_new = f"data/lots_{key}.json"
-
-                        write_text(p11_new, df_p11.to_csv(index=False))
-                        write_text(p3_new, df_p3.to_csv(index=False))
-                        write_text(lots_new, json.dumps({"lot_p": new_lot_p.strip(), "lot_s": new_lot_s.strip()}, ensure_ascii=False, indent=2))
-
-                        manifest["panels"][key] = {
-                            "name": new_name.strip() if new_name.strip() else key,
-                            "created": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                            "p11_path": p11_new,
-                            "p3_path": p3_new,
-                            "lots_path": lots_new
-                        }
-                        write_text(manifest_path, json.dumps(manifest, ensure_ascii=False, indent=2))
-                        st.success("New sheet created. You can now set it ACTIVE above.")
-                except Exception as e:
-                    st.error(f"Create failed: {e}")
-
-        st.write("---")
-
-        # --- Edit CURRENT ACTIVE sheet
-        st.subheader("C) Edit CURRENT ACTIVE Sheet (Tables)")
-
-        # reload active paths (after set active)
-        manifest_live = load_json_if_exists(manifest_path, default_manifest)
-        active_key_live = manifest_live.get("active_key", "ACTIVE")
-        meta_live = manifest_live["panels"].get(active_key_live, manifest_live["panels"]["ACTIVE"])
-
-        p11_live = meta_live.get("p11_path", "data/p11.csv")
-        p3_live  = meta_live.get("p3_path",  "data/p3.csv")
-        lots_live = meta_live.get("lots_path", "data/lots.json")
-
-        panel_df = load_csv_if_exists(p11_live, default_panel11_df)
-        screen_df = load_csv_if_exists(p3_live, default_screen3_df)
-        panel_df = _coerce_01(panel_df, AGS)
-        screen_df = _coerce_01(screen_df, AGS)
-        lots_live_obj = load_json_if_exists(lots_live, {"lot_p": "", "lot_s": ""})
-
+        st.subheader("1) Lot Setup")
         c1, c2 = st.columns(2)
-        lp = c1.text_input("ID Panel Lot# (ACTIVE)", value=lots_live_obj.get("lot_p",""), key="lot_p_in")
-        ls = c2.text_input("Screen Panel Lot# (ACTIVE)", value=lots_live_obj.get("lot_s",""), key="lot_s_in")
+        lp = c1.text_input("ID Panel Lot#", value=st.session_state.lot_p, key="lot_p_in")
+        ls = c2.text_input("Screen Panel Lot#", value=st.session_state.lot_s, key="lot_s_in")
 
-        st.markdown("**ID Panel (11 Cells)**")
-        panel_editor = st.data_editor(
-            panel_df,
+        if st.button("Save Lots (Local)", key="save_lots_local"):
+            st.session_state.lot_p = lp
+            st.session_state.lot_s = ls
+            Path("data").mkdir(exist_ok=True)
+            Path("data/lots.json").write_text(json.dumps({"lot_p": lp, "lot_s": ls}, ensure_ascii=False, indent=2), encoding="utf-8")
+            st.success("Saved locally. Press **Save to GitHub** to publish.")
+
+        st.write("---")
+
+        st.subheader("2) Paste from Excel (Fast Monthly Update) — NO CSV / NO Upload")
+        st.markdown("""
+- افتح الـPDF في Excel → ظلّل الجدول كله (0/1 + ID لو موجود) → **Copy**
+- ارجع هنا → **Paste** → اضغط **Update**
+""")
+
+        colA, colB = st.columns(2)
+
+        with colA:
+            st.markdown("### ID Panel (11 Cells) — Paste here")
+            paste_p11 = st.text_area("Paste Panel 11 table", height=220, key="paste_p11")
+            if st.button("✅ Update ID Panel from Paste", use_container_width=True, key="btn_up_p11"):
+                try:
+                    ids = [f"C{i+1}" for i in range(11)]
+                    df = parse_paste_to_panel_df(paste_p11, expected_rows=11, default_ids=ids)
+                    st.session_state.panel11_df = df
+                    Path("data/p11.csv").write_text(df.to_csv(index=False), encoding="utf-8")
+                    st.success("ID Panel updated successfully (Local).")
+                except Exception as e:
+                    st.error(f"Paste/Update failed: {e}")
+
+        with colB:
+            st.markdown("### Screening Cells (3 Cells) — Paste here")
+            paste_p3 = st.text_area("Paste Screening 3 table", height=220, key="paste_p3")
+            if st.button("✅ Update Screening Cells from Paste", use_container_width=True, key="btn_up_p3"):
+                try:
+                    ids = ["SI","SII","SIII"]
+                    df = parse_paste_to_panel_df(paste_p3, expected_rows=3, default_ids=ids)
+                    st.session_state.screen3_df = df
+                    Path("data/p3.csv").write_text(df.to_csv(index=False), encoding="utf-8")
+                    st.success("Screening Cells updated successfully (Local).")
+                except Exception as e:
+                    st.error(f"Paste/Update failed: {e}")
+
+        st.write("---")
+        st.subheader("3) Manual Edit (Optional)")
+        st.info("لو حبيت تعدّل يدويًا بدل الـPaste، استخدم الجداول دي.")
+
+        ed1 = st.data_editor(
+            st.session_state.panel11_df,
             use_container_width=True,
             num_rows="fixed",
-            key="panel_editor",
-            column_config={
-                "ID": st.column_config.TextColumn("ID"),
-                **{ag: st.column_config.NumberColumn(ag, min_value=0, max_value=1, step=1) for ag in AGS}
-            }
+            key="ed_panel11"
         )
-
-        st.markdown("**Screening Cells (3 Cells)**")
-        screen_editor = st.data_editor(
-            screen_df,
+        ed2 = st.data_editor(
+            st.session_state.screen3_df,
             use_container_width=True,
             num_rows="fixed",
-            key="screen_editor",
-            column_config={
-                "ID": st.column_config.TextColumn("ID"),
-                **{ag: st.column_config.NumberColumn(ag, min_value=0, max_value=1, step=1) for ag in AGS}
-            }
+            key="ed_screen3"
         )
 
-        panel_editor = _coerce_01(panel_editor, AGS)
-        screen_editor = _coerce_01(screen_editor, AGS)
+        ed1 = _coerce_01_df(ed1)
+        ed2 = _coerce_01_df(ed2)
 
-        b1, b2 = st.columns([1.2, 1.8])
+        c3, c4 = st.columns(2)
+        if c3.button("💾 Save Edited Tables (Local)", use_container_width=True):
+            st.session_state.panel11_df = ed1
+            st.session_state.screen3_df = ed2
+            Path("data/p11.csv").write_text(ed1.to_csv(index=False), encoding="utf-8")
+            Path("data/p3.csv").write_text(ed2.to_csv(index=False), encoding="utf-8")
+            st.success("Saved edited tables locally.")
 
-        if b1.button("💾 Save ACTIVE Locally", use_container_width=True):
-            ok1, msg1 = _validate_panel_df(panel_editor, 11, AGS)
-            ok2, msg2 = _validate_panel_df(screen_editor, 3, AGS)
-            if not ok1:
-                st.error(f"Panel invalid: {msg1}")
-            elif not ok2:
-                st.error(f"Screen invalid: {msg2}")
-            else:
-                write_text(p11_live, panel_editor.to_csv(index=False))
-                write_text(p3_live, screen_editor.to_csv(index=False))
-                write_text(lots_live, json.dumps({"lot_p": lp.strip(), "lot_s": ls.strip()}, ensure_ascii=False, indent=2))
-                st.success("Saved ACTIVE locally.")
-
-        if b2.button("💾 Publish ACTIVE to GitHub (Commit)", use_container_width=True):
+        st.subheader("4) Publish to ALL devices (Save to GitHub)")
+        if c4.button("💾 Save to GitHub (Commit)", use_container_width=True):
             try:
-                ok1, msg1 = _validate_panel_df(panel_editor, 11, AGS)
-                ok2, msg2 = _validate_panel_df(screen_editor, 3, AGS)
-                if not ok1:
-                    st.error(f"Panel invalid: {msg1}")
-                elif not ok2:
-                    st.error(f"Screen invalid: {msg2}")
-                else:
-                    lots_json = json.dumps({"lot_p": lp.strip(), "lot_s": ls.strip()}, ensure_ascii=False, indent=2)
-
-                    github_upsert_file(p11_live.replace("\\","/"), panel_editor.to_csv(index=False), f"Update panel sheet {active_key_live}")
-                    github_upsert_file(p3_live.replace("\\","/"),  screen_editor.to_csv(index=False), f"Update screen sheet {active_key_live}")
-                    github_upsert_file(lots_live.replace("\\","/"), lots_json, f"Update lots sheet {active_key_live}")
-                    github_upsert_file(manifest_path.replace("\\","/"), json.dumps(manifest_live, ensure_ascii=False, indent=2), "Update panels manifest")
-                    st.success("✅ Published ACTIVE + manifest to GitHub successfully.")
+                lots_json = json.dumps({"lot_p": st.session_state.lot_p, "lot_s": st.session_state.lot_s},
+                                       ensure_ascii=False, indent=2)
+                github_upsert_file("data/p11.csv", st.session_state.panel11_df.to_csv(index=False), "Update monthly p11 panel")
+                github_upsert_file("data/p3.csv",  st.session_state.screen3_df.to_csv(index=False), "Update monthly p3 screen")
+                github_upsert_file("data/lots.json", lots_json, "Update monthly lots")
+                st.success("✅ Published to GitHub successfully.")
             except Exception as e:
-                st.error(f"❌ Publish failed: {e}")
+                st.error(f"❌ Save failed: {e}")
 
 # --------------------------------------------------------------------------
-# 7) WORKSTATION
+# 8) WORKSTATION
 # --------------------------------------------------------------------------
 else:
     st.markdown("""
@@ -663,39 +627,70 @@ else:
             ac_negative = (ac_res == "Negative")
             all_rx = all_reactive_pattern(in_p, in_s)
 
+            # ------------------------------------------------------------------
+            # PAN-REACTIVE PATHWAYS (as requested)
+            # ------------------------------------------------------------------
             if all_rx and ac_negative:
                 st.markdown("""
                 <div class='clinical-danger'>
-                ⚠️ <b>Pan-reactive pattern with NEGATIVE autocontrol</b><br>
-                Most consistent with <b>Antibody to High-Incidence Antigen</b> or multiple alloantibodies not separable here.<br>
-                <b>STOP</b> routine interpretation → refer to Blood Bank Physician / Reference Lab.
+                ⚠️ <b>PAN-REACTIVE (ALL CELLS POSITIVE) with NEGATIVE AUTOCONTROL</b><br>
+                Most consistent with <b>Antibody to High-Incidence (High-Frequency) Antigen</b> (± multiple alloantibodies – rare).<br><br>
+                <b>Action:</b>
+                <ol>
+                  <li><b>STOP</b> routine rule-out / single-specificity interpretation.</li>
+                  <li><b>Refer to Blood Bank Physician</b> / Reference Laboratory.</li>
+                  <li>Consider patient phenotype/genotype; compatible unit search.</li>
+                  <li>If urgent: investigate rare compatible donors (including <b>first-degree relatives</b>) per policy/regulations.</li>
+                </ol>
                 </div>
                 """, unsafe_allow_html=True)
 
             elif all_rx and (not ac_negative):
                 st.markdown("""
                 <div class='clinical-danger'>
-                ⚠️ <b>Pan-reactive pattern with POSITIVE autocontrol</b><br>
-                Requires <b>Monospecific DAT</b> pathway (IgG / C3d / Control) before any alloantibody claims.
+                ⚠️ <b>PAN-REACTIVE (ALL CELLS POSITIVE) with POSITIVE AUTOCONTROL</b><br>
+                Suggests <b>autoantibody / WAIHA</b> until proven otherwise. Perform <b>Monospecific DAT</b> first.
                 </div>
                 """, unsafe_allow_html=True)
 
-            if all_rx:
+                st.markdown("### Monospecific DAT (Enter results)")
+                d1, d2, d3 = st.columns(3)
+                st.session_state.dat_igg = d1.selectbox("DAT IgG", DAT_OPT, key="dat_igg_key")
+                st.session_state.dat_c3d = d2.selectbox("DAT C3d", DAT_OPT, key="dat_c3d_key")
+                st.session_state.dat_ctrl = d3.selectbox("DAT Control", DAT_OPT, key="dat_ctrl_key")
+                st.markdown(dat_guidance_html(st.session_state.dat_igg, st.session_state.dat_c3d, st.session_state.dat_ctrl),
+                            unsafe_allow_html=True)
+
                 st.markdown("""
                 <div class='clinical-info'>
-                🔎 Routine specificity engine paused in pan-reactive cases.
+                🔎 <b>Note:</b> Routine specificity engine is <b>paused</b> in pan-reactive cases. Complete DAT/eluate/adsorption workflow per SOP.
                 </div>
                 """, unsafe_allow_html=True)
 
+            # If pan-reactive → stop normal algorithm
+            if all_rx:
+                pass
             else:
+                # ------------------------------
+                # Normal algorithm
+                # ------------------------------
                 cells = get_cells(in_p, in_s, st.session_state.ext)
                 ruled = rule_out(in_p, in_s, st.session_state.ext)
                 candidates = [a for a in AGS if a not in ruled and a not in IGNORED_AGS]
                 best = find_best_combo(candidates, cells, max_size=3)
 
                 st.subheader("Conclusion (Step 1: Rule-out / Rule-in)")
+
                 if not best:
                     st.error("No resolved specificity from current data. Proceed with Selected Cells / Enhancement.")
+                    poss_sig = [a for a in candidates if a not in INSIGNIFICANT_AGS][:12]
+                    poss_cold = [a for a in candidates if a in INSIGNIFICANT_AGS][:6]
+                    if poss_sig or poss_cold:
+                        st.markdown("### ⚠️ Not excluded yet (Needs more work — DO NOT confirm now):")
+                        if poss_sig:
+                            st.write("**Clinically significant possibilities:** " + ", ".join([f"Anti-{x}" for x in poss_sig]))
+                        if poss_cold:
+                            st.info("Cold/Insignificant possibilities: " + ", ".join([f"Anti-{x}" for x in poss_cold]))
                 else:
                     sep_map = separability_map(best, cells)
                     resolved = [a for a in best if sep_map.get(a, False)]
@@ -707,48 +702,63 @@ else:
                         st.warning("Pattern suggests these, but NOT separable yet (DO NOT confirm): " +
                                    ", ".join([f"Anti-{a}" for a in needs_work]))
 
+                    remaining_other = [a for a in candidates if a not in best]
+                    other_sig = [a for a in remaining_other if a not in INSIGNIFICANT_AGS][:10]
+                    other_cold = [a for a in remaining_other if a in INSIGNIFICANT_AGS][:6]
+                    if other_sig or other_cold:
+                        st.markdown("### ⚠️ Not excluded yet (background possibilities):")
+                        if other_sig:
+                            st.write("**Clinically significant:** " + ", ".join([f"Anti-{x}" for x in other_sig]))
+                        if other_cold:
+                            st.info("Cold/Insignificant: " + ", ".join([f"Anti-{x}" for x in other_cold]))
+
+                    # Rule of three
                     st.write("---")
                     st.subheader("Confirmation (Rule of Three) — Resolved & Separable only")
+
                     confirmed = []
-                    if resolved:
+                    if not resolved:
+                        st.info("No antibody is separable yet → DO NOT apply Rule of Three. Add discriminating selected cells.")
+                    else:
                         for a in resolved:
                             full, mod, p_cnt, n_cnt = check_rule_three_only_on_discriminating(a, best, cells)
-                            if full or mod:
+                            if full:
+                                st.write(f"✅ **Anti-{a} CONFIRMED**: Full Rule (3+3) met on discriminating cells (P:{p_cnt} / N:{n_cnt})")
                                 confirmed.append(a)
-                                if full:
-                                    st.write(f"✅ **Anti-{a} CONFIRMED**: Full Rule (3+3) met (P:{p_cnt} / N:{n_cnt})")
-                                else:
-                                    st.write(f"✅ **Anti-{a} CONFIRMED**: Modified Rule (2+3) met (P:{p_cnt} / N:{n_cnt})")
+                            elif mod:
+                                st.write(f"✅ **Anti-{a} CONFIRMED**: Modified Rule (2+3) met on discriminating cells (P:{p_cnt} / N:{n_cnt})")
+                                confirmed.append(a)
                             else:
                                 st.write(f"⚠️ **Anti-{a} NOT confirmed yet**: need more discriminating cells (P:{p_cnt} / N:{n_cnt})")
-                    else:
-                        st.info("No separable antibody to confirm.")
 
+                    # Patient antigen-negative reminder (for confirmed only)
                     if confirmed:
                         st.markdown(patient_antigen_negative_reminder(confirmed), unsafe_allow_html=True)
 
-                    if ("D" in resolved or "D" in confirmed) and ("C" in resolved or "C" in confirmed):
-                        st.markdown(anti_g_alert_html(), unsafe_allow_html=True)
+                    # Anti-G alert if D + C pattern is present (D resolved/confirmed + C not excluded or present)
+                    if ("D" in resolved or "D" in confirmed) and ("C" in candidates or "C" in remaining_other or "C" in best):
+                        st.markdown(anti_g_alert(), unsafe_allow_html=True)
 
+                    # Selected cells suggestions (ONLY if needed)
                     st.write("---")
-                    targets = list(dict.fromkeys(needs_work))
-                    if targets:
-                        st.markdown("### 🧪 Selected Cells (Only if needed)")
-                        active_set_now = set(resolved + needs_work)
-                        for a in targets:
-                            st.warning(f"Anti-{a}: need {a}+ cells NEGATIVE for other active suspects.")
-                            sugg = suggest_selected_cells(a, list(active_set_now))
+                    targets_needing_selected = needs_work[:]  # interference only
+                    if targets_needing_selected:
+                        st.markdown("### 🧪 Selected Cells (Only if needed to resolve interference / confirm)")
+                        for a in targets_needing_selected:
+                            st.warning(f"Anti-{a}: need {a}+ cells that are NEGATIVE for other antibodies in the combo.")
+                            sugg = suggest_selected_cells(a, best)
                             if sugg:
                                 for lab, note in sugg[:12]:
                                     st.write(f"- {lab}  <span class='cell-hint'>{note}</span>", unsafe_allow_html=True)
                             else:
-                                st.write("- No suitable discriminating cell → use another lot / external selected cells.")
-                        enz = enzyme_hint_if_needed(targets)
+                                st.write(f"- No suitable discriminating cell in current inventory → use another lot / external selected cells.")
+                        enz = enzyme_hint_if_needed(targets_needing_selected)
                         if enz:
                             st.info("💡 " + enz)
                     else:
                         st.success("No Selected Cells needed based on current data.")
 
+    # Selected cells library input
     with st.expander("➕ Add Selected Cell (From Library)"):
         ex_id = st.text_input("ID", key="ex_id")
         ex_res = st.selectbox("Reaction", GRADES, key="ex_res")
