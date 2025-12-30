@@ -347,6 +347,45 @@ def background_auto_resolution(background_list: list, active_not_excluded: set, 
 
     return auto_ruled_out, supported, inconclusive, no_disc
 
+# ---------------- NEW (YOUR REQUEST): Patient antigen-negative check reminder ----------------
+def patient_antigen_negative_reminder(antibodies: list, strong: bool = True) -> str:
+    """
+    Generates an HTML reminder:
+    - strong=True  => final confirmation reminder (after CONFIRMED)
+    - strong=False => pre-final reminder (resolved/suspected but not yet confirmed)
+    """
+    if not antibodies:
+        return ""
+
+    uniq = []
+    for a in antibodies:
+        if a and a not in uniq:
+            uniq.append(a)
+
+    # Filter out ignored antigens in case any slipped in
+    uniq = [a for a in uniq if a not in IGNORED_AGS]
+
+    if not uniq:
+        return ""
+
+    title = "✅ Final confirmation step (Patient antigen check)" if strong else "⚠️ Before final reporting (Patient antigen check)"
+    box_class = "clinical-danger" if strong else "clinical-alert"
+    intro = ("Confirm the patient is <b>ANTIGEN-NEGATIVE</b> for the corresponding antigen(s) to support the antibody identification."
+             if strong else
+             "Before you finalize/report, confirm the patient is <b>ANTIGEN-NEGATIVE</b> for the corresponding antigen(s).")
+
+    bullets = "".join([f"<li>Anti-{ag} → verify patient is <b>{ag}-negative</b> (phenotype/genotype; pre-transfusion sample preferred).</li>" for ag in uniq])
+
+    return f"""
+    <div class='{box_class}'>
+      <b>{title}</b><br>
+      {intro}
+      <ul style="margin-top:6px;">
+        {bullets}
+      </ul>
+    </div>
+    """
+
 # --------------------------------------------------------------------------
 # 5) SIDEBAR
 # --------------------------------------------------------------------------
@@ -421,7 +460,6 @@ else:
             st.write("Controls")
             ac_res = st.radio("Auto Control (AC)", ["Negative", "Positive"], key="rx_ac")
 
-            # ✅ Changed: Recent transfusion is now 4 weeks (≈28 days) + immediate red warning UI
             recent_tx = st.checkbox("Recent transfusion (≤ 4 weeks)?", value=False, key="recent_tx")
 
             if recent_tx:
@@ -701,6 +739,15 @@ else:
                             st.write(f"✅ **Anti-{a} CONFIRMED**: Modified Rule (2+3) met on discriminating cells (P:{p_cnt} / N:{n_cnt})")
                         else:
                             st.write(f"⚠️ **Anti-{a} NOT confirmed yet**: need more discriminating cells (P:{p_cnt} / N:{n_cnt})")
+
+                # ------------------------------
+                # NEW: Patient antigen-negative confirmation reminder
+                # ------------------------------
+                if confirmed:
+                    st.markdown(patient_antigen_negative_reminder(sorted(list(confirmed)), strong=True), unsafe_allow_html=True)
+                elif resolved:
+                    # If resolved but not confirmed, still remind gently
+                    st.markdown(patient_antigen_negative_reminder(sorted(list(resolved)), strong=False), unsafe_allow_html=True)
 
                 st.write("---")
 
