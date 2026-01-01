@@ -85,6 +85,7 @@ st.markdown("""
     }
     .dr-name { color: #8B0000; font-size: 15px; font-weight: bold; display: block;}
     .dr-title { color: #333; font-size: 11px; }
+    div[data-testid="stDataEditor"] table { width: 100% !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -371,7 +372,7 @@ def patient_antigen_negative_reminder(antibodies: list, strong: bool = True) -> 
     </div>
     """
 
-# ---------------- NEW: Anti-G alert (D + C pattern) ----------------
+# ---------------- Anti-G alert (D + C pattern) ----------------
 def anti_g_alert_html(strong: bool = False) -> str:
     box = "clinical-danger" if strong else "clinical-alert"
     return f"""
@@ -388,72 +389,69 @@ def anti_g_alert_html(strong: bool = False) -> str:
     """
 
 # --------------------------------------------------------------------------
-# ✅ Supervisor Copy/Paste monthly grid updater (from old stable version)
+# 4.5) SUPERVISOR: Copy/Paste Parser (Option A: 26 columns in AGS order)
 # --------------------------------------------------------------------------
-def _cp_to_bool(token: str) -> int:
-    t = str(token).strip().lower()
-    if t in ["", "0", "neg", "negative", "none", "n", "no", "-", "–", "—"]:
+def _token_to_01(tok: str) -> int:
+    s = str(tok).strip().lower()
+    if s in ("", "0", "neg", "negative", "nt", "n/t", "na", "n/a", "-", "—"):
         return 0
-    if "hem" in t:
+    # anything that looks positive
+    if "+" in s:
         return 1
-    if "+" in t:
+    if s in ("1", "1+", "2", "2+", "3", "3+", "4", "4+", "pos", "positive", "w", "wk", "weak", "w+", "wf"):
         return 1
-    if t in ["pos", "positive", "p", "yes", "y"]:
-        return 1
-    try:
-        return 1 if float(t) > 0 else 0
-    except Exception:
-        return 0
+    # fallback: if it contains digits other than 0 treat as positive
+    for ch in s:
+        if ch.isdigit() and ch != "0":
+            return 1
+    return 0
 
-def parse_paste_grid(txt: str, rows_expected: int):
+def parse_paste_table(txt: str, expected_rows: int, id_prefix: str, id_list=None):
     """
-    Paste from Excel after PDF->Excel conversion:
-    - Accepts tab-separated rows
-    - Converts each cell to 0/1
-    - Uses LAST 26 columns if more provided
+    Expect each line to contain 26 tab-separated tokens in AGS order.
+    If more than 26 tokens exist, take the LAST 26 (common when row starts with labels).
     """
-    try:
-        raw = (txt or "").strip()
-        if not raw:
-            return None, "No data pasted."
+    rows = [r for r in str(txt).strip().splitlines() if r.strip()]
+    data = []
 
-        lines = [ln for ln in raw.splitlines() if ln.strip() != ""]
-        if not lines:
-            return None, "No valid rows detected."
+    if id_list is None:
+        id_list = [f"{id_prefix}{i+1}" for i in range(expected_rows)]
 
-        data = []
-        used = 0
-        for ln in lines:
-            if used >= rows_expected:
-                break
-            parts = ln.split("\t")
-            vals = [_cp_to_bool(p) for p in parts]
+    for i in range(min(expected_rows, len(rows))):
+        parts = rows[i].split("\t")
+        vals = [_token_to_01(p) for p in parts]
 
-            # keep last 26 columns if too many; pad if too few
-            if len(vals) > len(AGS):
-                vals = vals[-len(AGS):]
-            while len(vals) < len(AGS):
-                vals.append(0)
+        # if extra leading columns exist, keep last 26
+        if len(vals) > len(AGS):
+            vals = vals[-len(AGS):]
+        # pad to 26 if short
+        while len(vals) < len(AGS):
+            vals.append(0)
 
-            if rows_expected == 11:
-                row = {"ID": f"C{used+1}"}
-            else:
-                row = {"ID": f"S{['I','II','III'][used]}"}
+        d = {"ID": id_list[i]}
+        for j, ag in enumerate(AGS):
+            d[ag] = int(vals[j])
+        data.append(d)
 
-            for i, ag in enumerate(AGS):
-                row[ag] = int(vals[i])
+    df = pd.DataFrame(data)
+    # if not enough rows pasted, keep remaining rows from current state (safer)
+    if len(df) < expected_rows:
+        # create empty rows for missing lines (won't overwrite existing unless user wants)
+        for k in range(len(df), expected_rows):
+            d = {"ID": id_list[k], **{ag: 0 for ag in AGS}}
+            df = pd.concat([df, pd.DataFrame([d])], ignore_index=True)
 
-            data.append(row)
-            used += 1
+    return df, f"Parsed {min(expected_rows, len(rows))} row(s). Expecting {expected_rows}."
 
-        df = pd.DataFrame(data)
-        if rows_expected == 11 and len(df) != 11:
-            return df, f"Updated {len(df)} row(s). (Expected 11)"
-        if rows_expected == 3 and len(df) != 3:
-            return df, f"Updated {len(df)} row(s). (Expected 3)"
-        return df, f"Updated {used} row(s)."
-    except Exception as e:
-        return None, f"Parse error: {e}"
+def _checkbox_column_config():
+    return {
+        ag: st.column_config.CheckboxColumn(
+            ag,
+            help="Tick = Antigen Present (1). Untick = Absent (0).",
+            default=False
+        )
+        for ag in AGS
+    }
 
 # --------------------------------------------------------------------------
 # 5) SIDEBAR
@@ -486,48 +484,112 @@ if nav == "Supervisor":
             st.session_state.lot_s = ls
             st.success("Saved locally. Press **Save to GitHub** to publish.")
 
-        # ------------------------------
-        # ✅ Restored: Copy/Paste monthly grid update (Panel + Screen)
-        # ------------------------------
-        st.subheader("2) Grid Data (Copy-Paste Monthly Update)")
-        t1, t2 = st.tabs(["Panel (11)", "Screen (3)"])
+        st.write("---")
+        st.subheader("2) Monthly Grid Update (Copy/Paste + Safe Manual Edit)")
+        st.info("Option A active: Paste **26 columns** exactly in **AGS order**. "
+                "Rows should be tab-separated. If your paste includes extra leading columns, the app will take the **last 26**.")
 
-        with t1:
-            st.caption("Paste (tab-separated) from Excel after PDF→Excel conversion. Last 26 columns will be used.")
-            p_txt = st.text_area("Paste Panel Numbers", height=160, key="paste_p11")
-            if st.button("Update P11", key="btn_upd_p11"):
-                df, msg = parse_paste_grid(p_txt, 11)
-                if df is not None and not df.empty:
-                    st.session_state.panel11_df = df
-                    st.success(msg)
-                else:
-                    st.error(msg)
-            st.dataframe(st.session_state.panel11_df, use_container_width=True)
+        tab_paste, tab_edit = st.tabs(["📋 Copy/Paste Update", "✍️ Manual Edit (Safe)"])
 
-        with t2:
-            st.caption("Paste (tab-separated) from Excel after PDF→Excel conversion. Last 26 columns will be used.")
-            s_txt = st.text_area("Paste Screen Numbers", height=120, key="paste_p3")
-            if st.button("Update P3", key="btn_upd_p3"):
-                df, msg = parse_paste_grid(s_txt, 3)
-                if df is not None and not df.empty:
-                    st.session_state.screen3_df = df
-                    st.success(msg)
-                else:
-                    st.error(msg)
-            st.dataframe(st.session_state.screen3_df, use_container_width=True)
+        with tab_paste:
+            cA, cB = st.columns(2)
 
+            with cA:
+                st.markdown("### Panel 11 (Paste)")
+                p_txt = st.text_area("Paste 11 rows (tab-separated; 26 columns in AGS order)", height=170, key="p11_paste")
+                if st.button("✅ Update Panel 11 from Paste", key="upd_p11_paste"):
+                    df_new, msg = parse_paste_table(p_txt, expected_rows=11, id_prefix="C")
+                    # keep exact IDs C1..C11 (as in default)
+                    df_new["ID"] = [f"C{i+1}" for i in range(11)]
+                    st.session_state.panel11_df = df_new.copy()
+                    st.success(msg + " Panel 11 updated locally.")
+
+                st.caption("Preview (Panel 11)")
+                st.dataframe(st.session_state.panel11_df.iloc[:, :15], use_container_width=True)
+
+            with cB:
+                st.markdown("### Screen 3 (Paste)")
+                s_txt = st.text_area("Paste 3 rows (tab-separated; 26 columns in AGS order)", height=170, key="p3_paste")
+                if st.button("✅ Update Screen 3 from Paste", key="upd_p3_paste"):
+                    df_new, msg = parse_paste_table(s_txt, expected_rows=3, id_prefix="S", id_list=["SI", "SII", "SIII"])
+                    df_new["ID"] = ["SI", "SII", "SIII"]
+                    st.session_state.screen3_df = df_new.copy()
+                    st.success(msg + " Screen 3 updated locally.")
+
+                st.caption("Preview (Screen 3)")
+                st.dataframe(st.session_state.screen3_df.iloc[:, :15], use_container_width=True)
+
+            st.markdown("""
+            <div class='clinical-alert'>
+            ⚠️ Tip: لو الـPDF فيه Labels قبل الداتا، paste غالبًا هيبقى فيه أعمدة زيادة في البداية.
+            البرنامج تلقائيًا بياخد <b>آخر 26 عمود</b> ويهمل أي حاجة قبلهم.
+            </div>
+            """, unsafe_allow_html=True)
+
+        with tab_edit:
+            st.markdown("### Manual Edit (Supervisor only) — Safe mode")
+            st.markdown("""
+            <div class='clinical-info'>
+            ✅ Safe rules applied: <b>ID locked</b> + <b>No add/remove rows</b> + <b>Only 0/1 via checkboxes</b>.<br>
+            استخدم ده فقط للتصحيح اليدوي بعد الـCopy/Paste.
+            </div>
+            """, unsafe_allow_html=True)
+
+            t1, t2 = st.tabs(["Panel 11 (Edit)", "Screen 3 (Edit)"])
+
+            with t1:
+                edited_p11 = st.data_editor(
+                    st.session_state.panel11_df,
+                    use_container_width=True,
+                    num_rows="fixed",
+                    disabled=["ID"],
+                    column_config=_checkbox_column_config(),
+                    key="editor_panel11"
+                )
+                colx1, colx2 = st.columns([1, 2])
+                with colx1:
+                    if st.button("⚠️ Apply Manual Changes (Panel 11)", type="primary", key="apply_p11"):
+                        st.session_state.panel11_df = edited_p11.copy()
+                        st.success("Panel 11 updated safely (local).")
+                with colx2:
+                    st.caption("Applies only when you click Apply (prevents accidental changes).")
+
+            with t2:
+                edited_p3 = st.data_editor(
+                    st.session_state.screen3_df,
+                    use_container_width=True,
+                    num_rows="fixed",
+                    disabled=["ID"],
+                    column_config=_checkbox_column_config(),
+                    key="editor_screen3"
+                )
+                coly1, coly2 = st.columns([1, 2])
+                with coly1:
+                    if st.button("⚠️ Apply Manual Changes (Screen 3)", type="primary", key="apply_p3"):
+                        st.session_state.screen3_df = edited_p3.copy()
+                        st.success("Screen 3 updated safely (local).")
+                with coly2:
+                    st.caption("Applies only when you click Apply (prevents accidental changes).")
+
+        st.write("---")
         st.subheader("3) Publish to ALL devices (Save to GitHub)")
+        st.warning("قبل النشر: راجع اللوت + راجع الجداول بسرعة (Panel/Screen).")
+
+        confirm_pub = st.checkbox("I confirm Panel/Screen data were reviewed and are correct", key="confirm_publish")
 
         if st.button("💾 Save to GitHub (Commit)", key="save_gh"):
-            try:
-                lots_json = json.dumps({"lot_p": st.session_state.lot_p, "lot_s": st.session_state.lot_s},
-                                       ensure_ascii=False, indent=2)
-                github_upsert_file("data/p11.csv", st.session_state.panel11_df.to_csv(index=False), "Update monthly p11 panel")
-                github_upsert_file("data/p3.csv",  st.session_state.screen3_df.to_csv(index=False), "Update monthly p3 screen")
-                github_upsert_file("data/lots.json", lots_json, "Update monthly lots")
-                st.success("✅ Published to GitHub successfully.")
-            except Exception as e:
-                st.error(f"❌ Save failed: {e}")
+            if not confirm_pub:
+                st.error("Confirmation required before publishing.")
+            else:
+                try:
+                    lots_json = json.dumps({"lot_p": st.session_state.lot_p, "lot_s": st.session_state.lot_s},
+                                           ensure_ascii=False, indent=2)
+                    github_upsert_file("data/p11.csv", st.session_state.panel11_df.to_csv(index=False), "Update monthly p11 panel")
+                    github_upsert_file("data/p3.csv",  st.session_state.screen3_df.to_csv(index=False), "Update monthly p3 screen")
+                    github_upsert_file("data/lots.json", lots_json, "Update monthly lots")
+                    st.success("✅ Published to GitHub successfully.")
+                except Exception as e:
+                    st.error(f"❌ Save failed: {e}")
 
 # --------------------------------------------------------------------------
 # 7) WORKSTATION
@@ -839,17 +901,11 @@ else:
                         else:
                             st.write(f"⚠️ **Anti-{a} NOT confirmed yet**: need more discriminating cells (P:{p_cnt} / N:{n_cnt})")
 
-                # ------------------------------
-                # Patient antigen-negative confirmation reminder
-                # ------------------------------
                 if confirmed:
                     st.markdown(patient_antigen_negative_reminder(sorted(list(confirmed)), strong=True), unsafe_allow_html=True)
                 elif resolved:
                     st.markdown(patient_antigen_negative_reminder(sorted(list(resolved)), strong=False), unsafe_allow_html=True)
 
-                # ------------------------------
-                # Anti-G alert (D + C pattern)
-                # ------------------------------
                 d_present = ("D" in confirmed) or ("D" in resolved) or ("D" in needs_work)
                 c_present = ("C" in confirmed) or ("C" in resolved) or ("C" in needs_work) or ("C" in supported_bg) or ("C" in other_sig_final)
                 if d_present and c_present:
