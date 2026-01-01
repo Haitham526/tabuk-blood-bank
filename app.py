@@ -344,12 +344,10 @@ def background_auto_resolution(background_list: list, active_not_excluded: set, 
 def patient_antigen_negative_reminder(antibodies: list, strong: bool = True) -> str:
     if not antibodies:
         return ""
-
     uniq = []
     for a in antibodies:
         if a and a not in uniq:
             uniq.append(a)
-
     uniq = [a for a in uniq if a not in IGNORED_AGS]
     if not uniq:
         return ""
@@ -359,7 +357,6 @@ def patient_antigen_negative_reminder(antibodies: list, strong: bool = True) -> 
     intro = ("Confirm the patient is <b>ANTIGEN-NEGATIVE</b> for the corresponding antigen(s) to support the antibody identification."
              if strong else
              "Before you finalize/report, confirm the patient is <b>ANTIGEN-NEGATIVE</b> for the corresponding antigen(s).")
-
     bullets = "".join([f"<li>Anti-{ag} → verify patient is <b>{ag}-negative</b> (phenotype/genotype; pre-transfusion sample preferred).</li>" for ag in uniq])
 
     return f"""
@@ -372,7 +369,7 @@ def patient_antigen_negative_reminder(antibodies: list, strong: bool = True) -> 
     </div>
     """
 
-# ---------------- Anti-G alert (D + C pattern) ----------------
+# ---------------- NEW: Anti-G alert (D + C pattern) ----------------
 def anti_g_alert_html(strong: bool = False) -> str:
     box = "clinical-danger" if strong else "clinical-alert"
     return f"""
@@ -388,70 +385,67 @@ def anti_g_alert_html(strong: bool = False) -> str:
     </div>
     """
 
-# --------------------------------------------------------------------------
-# 4.5) SUPERVISOR: Copy/Paste Parser (Option A: 26 columns in AGS order)
-# --------------------------------------------------------------------------
-def _token_to_01(tok: str) -> int:
-    s = str(tok).strip().lower()
-    if s in ("", "0", "neg", "negative", "nt", "n/t", "na", "n/a", "-", "—"):
-        return 0
-    # anything that looks positive
-    if "+" in s:
-        return 1
-    if s in ("1", "1+", "2", "2+", "3", "3+", "4", "4+", "pos", "positive", "w", "wk", "weak", "w+", "wf"):
-        return 1
-    # fallback: if it contains digits other than 0 treat as positive
-    for ch in s:
-        if ch.isdigit() and ch != "0":
-            return 1
-    return 0
-
-def parse_paste_table(txt: str, expected_rows: int, id_prefix: str, id_list=None):
+# ---------------- Supervisor paste parser (restored) ----------------
+def parse_paste_grid(txt: str, limit_rows: int):
     """
-    Expect each line to contain 26 tab-separated tokens in AGS order.
-    If more than 26 tokens exist, take the LAST 26 (common when row starts with labels).
+    Accepts copy/paste from Excel (tab-separated).
+    Converts any value containing + / 1 / pos / w / y / yes into 1 else 0.
+    Keeps last 26 antigen columns if extra columns exist.
     """
-    rows = [r for r in str(txt).strip().splitlines() if r.strip()]
-    data = []
+    try:
+        rows = [r for r in txt.strip().splitlines() if r.strip()]
+        data = []
+        c = 0
+        for line in rows:
+            if c >= limit_rows:
+                break
+            parts = line.split("\t")
+            vals = []
+            for p in parts:
+                s = str(p).strip().lower()
+                v = 1 if any(x in s for x in ["+", "pos", "positive", "w", "weak", "1", "y", "yes", "true"]) else 0
+                vals.append(v)
+            if len(vals) > len(AGS):
+                vals = vals[-len(AGS):]
+            while len(vals) < len(AGS):
+                vals.append(0)
 
-    if id_list is None:
-        id_list = [f"{id_prefix}{i+1}" for i in range(expected_rows)]
+            row_id = f"C{c+1}" if limit_rows == 11 else f"S{['I','II','III'][c]}"
+            d = {"ID": row_id}
+            for i, ag in enumerate(AGS):
+                d[ag] = int(vals[i])
+            data.append(d)
+            c += 1
 
-    for i in range(min(expected_rows, len(rows))):
-        parts = rows[i].split("\t")
-        vals = [_token_to_01(p) for p in parts]
+        df = pd.DataFrame(data)
+        # Ensure correct columns
+        for ag in AGS:
+            if ag not in df.columns:
+                df[ag] = 0
+        df = df[["ID"] + AGS]
+        return df, f"Updated {c} row(s)."
+    except Exception as e:
+        return None, f"Parse error: {e}"
 
-        # if extra leading columns exist, keep last 26
-        if len(vals) > len(AGS):
-            vals = vals[-len(AGS):]
-        # pad to 26 if short
-        while len(vals) < len(AGS):
-            vals.append(0)
-
-        d = {"ID": id_list[i]}
-        for j, ag in enumerate(AGS):
-            d[ag] = int(vals[j])
-        data.append(d)
-
-    df = pd.DataFrame(data)
-    # if not enough rows pasted, keep remaining rows from current state (safer)
-    if len(df) < expected_rows:
-        # create empty rows for missing lines (won't overwrite existing unless user wants)
-        for k in range(len(df), expected_rows):
-            d = {"ID": id_list[k], **{ag: 0 for ag in AGS}}
-            df = pd.concat([df, pd.DataFrame([d])], ignore_index=True)
-
-    return df, f"Parsed {min(expected_rows, len(rows))} row(s). Expecting {expected_rows}."
-
-def _checkbox_column_config():
-    return {
-        ag: st.column_config.CheckboxColumn(
-            ag,
-            help="Tick = Antigen Present (1). Untick = Absent (0).",
-            default=False
-        )
-        for ag in AGS
-    }
+def sanitize_binary_df(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Force antigen columns to 0/1 only; keep ID as string.
+    """
+    out = df.copy()
+    if "ID" in out.columns:
+        out["ID"] = out["ID"].astype(str)
+    for ag in AGS:
+        if ag not in out.columns:
+            out[ag] = 0
+        out[ag] = pd.to_numeric(out[ag], errors="coerce").fillna(0).astype(int)
+        out[ag] = out[ag].clip(0, 1)
+    # order
+    cols = ["ID"] + AGS
+    for c in cols:
+        if c not in out.columns:
+            out[c] = 0
+    out = out[cols]
+    return out
 
 # --------------------------------------------------------------------------
 # 5) SIDEBAR
@@ -464,6 +458,7 @@ with st.sidebar:
         st.session_state.analysis_ready = False
         st.session_state.analysis_payload = None
         st.session_state.show_dat = False
+        # Keep tables/lots
         st.rerun()
 
 # --------------------------------------------------------------------------
@@ -485,111 +480,77 @@ if nav == "Supervisor":
             st.success("Saved locally. Press **Save to GitHub** to publish.")
 
         st.write("---")
-        st.subheader("2) Monthly Grid Update (Copy/Paste + Safe Manual Edit)")
-        st.info("Option A active: Paste **26 columns** exactly in **AGS order**. "
-                "Rows should be tab-separated. If your paste includes extra leading columns, the app will take the **last 26**.")
+        st.subheader("2) Panel & Screening Cell Configuration (RESTORED)")
 
-        tab_paste, tab_edit = st.tabs(["📋 Copy/Paste Update", "✍️ Manual Edit (Safe)"])
+        t1, t2, t3 = st.tabs(["A) Copy/Paste (Recommended)", "B) Manual Edit (Careful)", "C) Quick Preview"])
 
-        with tab_paste:
-            cA, cB = st.columns(2)
+        with t1:
+            st.info("✅ نفس النظام القديم: حوّل الشيت لإكسيل → ظلّل الـ 26 عمود antigen → Copy → Paste هنا.")
+            p_txt = st.text_area("Paste PANEL (11 rows)", height=170, key="paste_p11")
+            colA, colB = st.columns([1,1])
+            if colA.button("Update Panel 11 from Paste", key="btn_up_p11"):
+                df, msg = parse_paste_grid(p_txt, 11)
+                if df is None:
+                    st.error(msg)
+                else:
+                    st.session_state.panel11_df = sanitize_binary_df(df)
+                    st.success(msg)
 
-            with cA:
-                st.markdown("### Panel 11 (Paste)")
-                p_txt = st.text_area("Paste 11 rows (tab-separated; 26 columns in AGS order)", height=170, key="p11_paste")
-                if st.button("✅ Update Panel 11 from Paste", key="upd_p11_paste"):
-                    df_new, msg = parse_paste_table(p_txt, expected_rows=11, id_prefix="C")
-                    # keep exact IDs C1..C11 (as in default)
-                    df_new["ID"] = [f"C{i+1}" for i in range(11)]
-                    st.session_state.panel11_df = df_new.copy()
-                    st.success(msg + " Panel 11 updated locally.")
+            s_txt = st.text_area("Paste SCREEN (3 rows)", height=120, key="paste_p3")
+            if colB.button("Update Screen 3 from Paste", key="btn_up_p3"):
+                df, msg = parse_paste_grid(s_txt, 3)
+                if df is None:
+                    st.error(msg)
+                else:
+                    st.session_state.screen3_df = sanitize_binary_df(df)
+                    st.success(msg)
 
-                st.caption("Preview (Panel 11)")
-                st.dataframe(st.session_state.panel11_df.iloc[:, :15], use_container_width=True)
+            st.warning("⚠️ لو الـ PDF مش بيتحوّل صح: استخدم Excel (Desktop) Data ➜ From Picture أو حوّله لصورة واضحة ثم اعمل Copy من الناتج.")
 
-            with cB:
-                st.markdown("### Screen 3 (Paste)")
-                s_txt = st.text_area("Paste 3 rows (tab-separated; 26 columns in AGS order)", height=170, key="p3_paste")
-                if st.button("✅ Update Screen 3 from Paste", key="upd_p3_paste"):
-                    df_new, msg = parse_paste_table(s_txt, expected_rows=3, id_prefix="S", id_list=["SI", "SII", "SIII"])
-                    df_new["ID"] = ["SI", "SII", "SIII"]
-                    st.session_state.screen3_df = df_new.copy()
-                    st.success(msg + " Screen 3 updated locally.")
+        with t2:
+            st.warning("⚠️ Manual edit مسموح لكن بحذر شديد: القيم لازم تكون 0 أو 1 فقط.")
+            st.caption("أي قيمة غير 0/1 سيتم قصّها تلقائيًا إلى 0/1 عند الحفظ.")
 
-                st.caption("Preview (Screen 3)")
-                st.dataframe(st.session_state.screen3_df.iloc[:, :15], use_container_width=True)
+            st.markdown("**ID Panel (11 Cells)**")
+            edited_p11 = st.data_editor(
+                st.session_state.panel11_df,
+                use_container_width=True,
+                num_rows="fixed",
+                key="editor_p11"
+            )
 
-            st.markdown("""
-            <div class='clinical-alert'>
-            ⚠️ Tip: لو الـPDF فيه Labels قبل الداتا، paste غالبًا هيبقى فيه أعمدة زيادة في البداية.
-            البرنامج تلقائيًا بياخد <b>آخر 26 عمود</b> ويهمل أي حاجة قبلهم.
-            </div>
-            """, unsafe_allow_html=True)
+            st.markdown("**Screening Cells (3 Cells)**")
+            edited_p3 = st.data_editor(
+                st.session_state.screen3_df,
+                use_container_width=True,
+                num_rows="fixed",
+                key="editor_p3"
+            )
 
-        with tab_edit:
-            st.markdown("### Manual Edit (Supervisor only) — Safe mode")
-            st.markdown("""
-            <div class='clinical-info'>
-            ✅ Safe rules applied: <b>ID locked</b> + <b>No add/remove rows</b> + <b>Only 0/1 via checkboxes</b>.<br>
-            استخدم ده فقط للتصحيح اليدوي بعد الـCopy/Paste.
-            </div>
-            """, unsafe_allow_html=True)
+            if st.button("Apply Manual Edits (Sanitize 0/1)", key="apply_manual"):
+                st.session_state.panel11_df = sanitize_binary_df(edited_p11)
+                st.session_state.screen3_df = sanitize_binary_df(edited_p3)
+                st.success("✅ Applied. All antigen values sanitized to 0/1.")
 
-            t1, t2 = st.tabs(["Panel 11 (Edit)", "Screen 3 (Edit)"])
-
-            with t1:
-                edited_p11 = st.data_editor(
-                    st.session_state.panel11_df,
-                    use_container_width=True,
-                    num_rows="fixed",
-                    disabled=["ID"],
-                    column_config=_checkbox_column_config(),
-                    key="editor_panel11"
-                )
-                colx1, colx2 = st.columns([1, 2])
-                with colx1:
-                    if st.button("⚠️ Apply Manual Changes (Panel 11)", type="primary", key="apply_p11"):
-                        st.session_state.panel11_df = edited_p11.copy()
-                        st.success("Panel 11 updated safely (local).")
-                with colx2:
-                    st.caption("Applies only when you click Apply (prevents accidental changes).")
-
-            with t2:
-                edited_p3 = st.data_editor(
-                    st.session_state.screen3_df,
-                    use_container_width=True,
-                    num_rows="fixed",
-                    disabled=["ID"],
-                    column_config=_checkbox_column_config(),
-                    key="editor_screen3"
-                )
-                coly1, coly2 = st.columns([1, 2])
-                with coly1:
-                    if st.button("⚠️ Apply Manual Changes (Screen 3)", type="primary", key="apply_p3"):
-                        st.session_state.screen3_df = edited_p3.copy()
-                        st.success("Screen 3 updated safely (local).")
-                with coly2:
-                    st.caption("Applies only when you click Apply (prevents accidental changes).")
+        with t3:
+            st.markdown("**Panel snapshot**")
+            st.dataframe(st.session_state.panel11_df.iloc[:, :15], use_container_width=True)
+            st.markdown("**Screen snapshot**")
+            st.dataframe(st.session_state.screen3_df.iloc[:, :15], use_container_width=True)
 
         st.write("---")
         st.subheader("3) Publish to ALL devices (Save to GitHub)")
-        st.warning("قبل النشر: راجع اللوت + راجع الجداول بسرعة (Panel/Screen).")
-
-        confirm_pub = st.checkbox("I confirm Panel/Screen data were reviewed and are correct", key="confirm_publish")
 
         if st.button("💾 Save to GitHub (Commit)", key="save_gh"):
-            if not confirm_pub:
-                st.error("Confirmation required before publishing.")
-            else:
-                try:
-                    lots_json = json.dumps({"lot_p": st.session_state.lot_p, "lot_s": st.session_state.lot_s},
-                                           ensure_ascii=False, indent=2)
-                    github_upsert_file("data/p11.csv", st.session_state.panel11_df.to_csv(index=False), "Update monthly p11 panel")
-                    github_upsert_file("data/p3.csv",  st.session_state.screen3_df.to_csv(index=False), "Update monthly p3 screen")
-                    github_upsert_file("data/lots.json", lots_json, "Update monthly lots")
-                    st.success("✅ Published to GitHub successfully.")
-                except Exception as e:
-                    st.error(f"❌ Save failed: {e}")
+            try:
+                lots_json = json.dumps({"lot_p": st.session_state.lot_p, "lot_s": st.session_state.lot_s},
+                                       ensure_ascii=False, indent=2)
+                github_upsert_file("data/p11.csv", st.session_state.panel11_df.to_csv(index=False), "Update monthly p11 panel")
+                github_upsert_file("data/p3.csv",  st.session_state.screen3_df.to_csv(index=False), "Update monthly p3 screen")
+                github_upsert_file("data/lots.json", lots_json, "Update monthly lots")
+                st.success("✅ Published to GitHub successfully.")
+            except Exception as e:
+                st.error(f"❌ Save failed: {e}")
 
 # --------------------------------------------------------------------------
 # 7) WORKSTATION
@@ -802,9 +763,10 @@ else:
             </div>
             """, unsafe_allow_html=True)
 
-        if all_rx:
-            pass
-        else:
+        # --------------------------------------------------------------
+        # NON-PAN CASES: specificity engine
+        # --------------------------------------------------------------
+        if not all_rx:
             cells = get_cells(in_p, in_s, st.session_state.ext)
             ruled = rule_out(in_p, in_s, st.session_state.ext)
             candidates = [a for a in AGS if a not in ruled and a not in IGNORED_AGS]
@@ -812,16 +774,72 @@ else:
 
             st.subheader("Conclusion (Step 1: Rule-out / Rule-in)")
 
+            # ------------------------------
+            # FIX #1: If best None, do NOT lose already-confirmable antibodies.
+            # Fallback: detect any SINGLE specificity that meets rule-of-three on discriminating cells.
+            # ------------------------------
+            fallback_confirmed = []
+            fallback_stats = {}
             if not best:
-                st.error("No resolved specificity from current data. Proceed with Selected Cells / Enhancement.")
-                poss_sig = [a for a in candidates if a not in INSIGNIFICANT_AGS][:12]
-                poss_cold = [a for a in candidates if a in INSIGNIFICANT_AGS][:6]
-                if poss_sig or poss_cold:
-                    st.markdown("### ⚠️ Not excluded yet (Needs more work — DO NOT confirm now):")
-                    if poss_sig:
-                        st.write("**Clinically significant possibilities:** " + ", ".join([f"Anti-{x}" for x in poss_sig]))
-                    if poss_cold:
-                        st.info("Cold/Insignificant possibilities: " + ", ".join([f"Anti-{x}" for x in poss_cold]))
+                for a in candidates:
+                    full, mod, p_cnt, n_cnt = check_rule_three_only_on_discriminating(a, (a,), cells)
+                    if full or mod:
+                        fallback_confirmed.append(a)
+                        fallback_stats[a] = (full, mod, p_cnt, n_cnt)
+
+                if fallback_confirmed:
+                    st.success("Resolved (confirmed by discriminating Rule-of-Three even though pattern is complex): " +
+                               ", ".join([f"Anti-{a}" for a in fallback_confirmed]))
+                    # Still show remaining possibilities but do NOT demote confirmed ones
+                    remaining = [x for x in candidates if x not in fallback_confirmed]
+                    poss_sig = [x for x in remaining if x not in INSIGNIFICANT_AGS][:12]
+                    poss_cold = [x for x in remaining if x in INSIGNIFICANT_AGS][:6]
+                    if poss_sig or poss_cold:
+                        st.markdown("### ⚠️ Not excluded yet (Needs more work — DO NOT confirm now):")
+                        if poss_sig:
+                            st.write("**Clinically significant possibilities:** " + ", ".join([f"Anti-{x}" for x in poss_sig]))
+                        if poss_cold:
+                            st.info("Cold/Insignificant possibilities: " + ", ".join([f"Anti-{x}" for x in poss_cold]))
+
+                    st.write("---")
+                    st.subheader("Confirmation (Rule of Three) — Confirmed singles")
+                    for a in fallback_confirmed:
+                        full, mod, p_cnt, n_cnt = fallback_stats[a]
+                        if full:
+                            st.write(f"✅ **Anti-{a} CONFIRMED**: Full Rule (3+3) met on discriminating cells (P:{p_cnt} / N:{n_cnt})")
+                        else:
+                            st.write(f"✅ **Anti-{a} CONFIRMED**: Modified Rule (2+3) met on discriminating cells (P:{p_cnt} / N:{n_cnt})")
+
+                    # Patient antigen check reminder
+                    st.markdown(patient_antigen_negative_reminder(sorted(list(set(fallback_confirmed))), strong=True), unsafe_allow_html=True)
+
+                    # Conflict check (do not delete confirmed, just warn)
+                    conflicts = {}
+                    for a in fallback_confirmed:
+                        bad = []
+                        for c in cells:
+                            if c["react"] == 1 and not ph_has(c["ph"], a):
+                                bad.append(c["label"])
+                        if bad:
+                            conflicts[a] = bad
+                    if conflicts:
+                        st.markdown("<div class='clinical-alert'><b>⚠️ Data conflict alert</b><br>"
+                                    "A confirmed antibody has reactive cells that are antigen-negative. "
+                                    "Do <b>NOT</b> delete the confirmed antibody automatically; investigate for "
+                                    "<b>multiple antibodies</b> and/or <b>phenotype entry error</b>.</div>", unsafe_allow_html=True)
+                        for a, bad in conflicts.items():
+                            st.write(f"- **Anti-{a} confirmed**, but these reactive cell(s) are **{a}-negative**: " + ", ".join(bad))
+
+                else:
+                    st.error("No resolved specificity from current data. Proceed with Selected Cells / Enhancement.")
+                    poss_sig = [a for a in candidates if a not in INSIGNIFICANT_AGS][:12]
+                    poss_cold = [a for a in candidates if a in INSIGNIFICANT_AGS][:6]
+                    if poss_sig or poss_cold:
+                        st.markdown("### ⚠️ Not excluded yet (Needs more work — DO NOT confirm now):")
+                        if poss_sig:
+                            st.write("**Clinically significant possibilities:** " + ", ".join([f"Anti-{x}" for x in poss_sig]))
+                        if poss_cold:
+                            st.info("Cold/Insignificant possibilities: " + ", ".join([f"Anti-{x}" for x in poss_cold]))
 
             else:
                 sep_map = separability_map(best, cells)
@@ -901,16 +919,36 @@ else:
                         else:
                             st.write(f"⚠️ **Anti-{a} NOT confirmed yet**: need more discriminating cells (P:{p_cnt} / N:{n_cnt})")
 
+                # Patient antigen-negative confirmation reminder
                 if confirmed:
                     st.markdown(patient_antigen_negative_reminder(sorted(list(confirmed)), strong=True), unsafe_allow_html=True)
                 elif resolved:
                     st.markdown(patient_antigen_negative_reminder(sorted(list(resolved)), strong=False), unsafe_allow_html=True)
 
+                # Anti-G alert (D + C pattern)
                 d_present = ("D" in confirmed) or ("D" in resolved) or ("D" in needs_work)
                 c_present = ("C" in confirmed) or ("C" in resolved) or ("C" in needs_work) or ("C" in supported_bg) or ("C" in other_sig_final)
                 if d_present and c_present:
                     strong = ("D" in confirmed and "C" in confirmed)
                     st.markdown(anti_g_alert_html(strong=strong), unsafe_allow_html=True)
+
+                # Conflict check: confirmed antibodies vs reactive antigen-negative cells
+                if confirmed:
+                    conflicts = {}
+                    for a in confirmed:
+                        bad = []
+                        for c in cells:
+                            if c["react"] == 1 and not ph_has(c["ph"], a):
+                                bad.append(c["label"])
+                        if bad:
+                            conflicts[a] = bad
+                    if conflicts:
+                        st.markdown("<div class='clinical-alert'><b>⚠️ Data conflict alert</b><br>"
+                                    "A confirmed antibody has reactive cells that are antigen-negative. "
+                                    "Do <b>NOT</b> delete the confirmed antibody automatically; investigate for "
+                                    "<b>multiple antibodies</b> and/or <b>phenotype entry error</b>.</div>", unsafe_allow_html=True)
+                        for a, bad in conflicts.items():
+                            st.write(f"- **Anti-{a} confirmed**, but these reactive cell(s) are **{a}-negative**: " + ", ".join(bad))
 
                 st.write("---")
 
