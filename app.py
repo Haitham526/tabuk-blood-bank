@@ -141,6 +141,10 @@ if "analysis_payload" not in st.session_state:
 if "show_dat" not in st.session_state:
     st.session_state.show_dat = False
 
+# ✅ FIX: lock confirmed antibodies so they NEVER get auto-removed by new selected cells
+if "confirmed_lock" not in st.session_state:
+    st.session_state.confirmed_lock = set()
+
 # --------------------------------------------------------------------------
 # 4) HELPERS / ENGINE
 # --------------------------------------------------------------------------
@@ -258,12 +262,16 @@ def check_rule_three_only_on_discriminating(ag: str, combo: tuple, cells: list):
     for c in cells:
         ph = c["ph"]
         ag_pos = ph_has(ph, ag)
+
         if c["react"] == 1:
+            # discriminating POS: ag+ and other antibodies in combo are all absent
             if ag_pos and all(not ph_has(ph, o) for o in other):
                 p += 1
         else:
+            # NEGATIVE cells contribute to N if ag is absent (standard)
             if not ag_pos:
                 n += 1
+
     full = (p >= 3 and n >= 3)
     mod  = (p >= 2 and n >= 3)
     return full, mod, p, n
@@ -344,10 +352,12 @@ def background_auto_resolution(background_list: list, active_not_excluded: set, 
 def patient_antigen_negative_reminder(antibodies: list, strong: bool = True) -> str:
     if not antibodies:
         return ""
+
     uniq = []
     for a in antibodies:
         if a and a not in uniq:
             uniq.append(a)
+
     uniq = [a for a in uniq if a not in IGNORED_AGS]
     if not uniq:
         return ""
@@ -357,6 +367,7 @@ def patient_antigen_negative_reminder(antibodies: list, strong: bool = True) -> 
     intro = ("Confirm the patient is <b>ANTIGEN-NEGATIVE</b> for the corresponding antigen(s) to support the antibody identification."
              if strong else
              "Before you finalize/report, confirm the patient is <b>ANTIGEN-NEGATIVE</b> for the corresponding antigen(s).")
+
     bullets = "".join([f"<li>Anti-{ag} → verify patient is <b>{ag}-negative</b> (phenotype/genotype; pre-transfusion sample preferred).</li>" for ag in uniq])
 
     return f"""
@@ -369,7 +380,7 @@ def patient_antigen_negative_reminder(antibodies: list, strong: bool = True) -> 
     </div>
     """
 
-# ---------------- NEW: Anti-G alert (D + C pattern) ----------------
+# ---------------- Anti-G alert (D + C pattern) ----------------
 def anti_g_alert_html(strong: bool = False) -> str:
     box = "clinical-danger" if strong else "clinical-alert"
     return f"""
@@ -385,67 +396,73 @@ def anti_g_alert_html(strong: bool = False) -> str:
     </div>
     """
 
-# ---------------- Supervisor paste parser (restored) ----------------
-def parse_paste_grid(txt: str, limit_rows: int):
-    """
-    Accepts copy/paste from Excel (tab-separated).
-    Converts any value containing + / 1 / pos / w / y / yes into 1 else 0.
-    Keeps last 26 antigen columns if extra columns exist.
-    """
-    try:
-        rows = [r for r in txt.strip().splitlines() if r.strip()]
-        data = []
-        c = 0
-        for line in rows:
-            if c >= limit_rows:
-                break
-            parts = line.split("\t")
-            vals = []
-            for p in parts:
-                s = str(p).strip().lower()
-                v = 1 if any(x in s for x in ["+", "pos", "positive", "w", "weak", "1", "y", "yes", "true"]) else 0
-                vals.append(v)
-            if len(vals) > len(AGS):
-                vals = vals[-len(AGS):]
-            while len(vals) < len(AGS):
-                vals.append(0)
+# ✅ FIX: conflict detection for confirmed antibodies
+def confirmed_conflict_map(confirmed_set: set, cells: list):
+    conflicts = {}
+    for ab in confirmed_set:
+        bad_labels = []
+        for c in cells:
+            if c["react"] == 1:
+                if not ph_has(c["ph"], ab):
+                    bad_labels.append(c["label"])
+        if bad_labels:
+            conflicts[ab] = bad_labels
+    return conflicts
 
-            row_id = f"C{c+1}" if limit_rows == 11 else f"S{['I','II','III'][c]}"
-            d = {"ID": row_id}
-            for i, ag in enumerate(AGS):
-                d[ag] = int(vals[i])
-            data.append(d)
-            c += 1
+# --------------------------------------------------------------------------
+# 4.5) SUPERVISOR: Copy/Paste Parser (Option A: 26 columns in AGS order)
+# --------------------------------------------------------------------------
+def _token_to_01(tok: str) -> int:
+    s = str(tok).strip().lower()
+    if s in ("", "0", "neg", "negative", "nt", "n/t", "na", "n/a", "-", "—"):
+        return 0
+    if "+" in s:
+        return 1
+    if s in ("1", "1+", "2", "2+", "3", "3+", "4", "4+", "pos", "positive", "w", "wk", "weak", "w+", "wf"):
+        return 1
+    for ch in s:
+        if ch.isdigit() and ch != "0":
+            return 1
+    return 0
 
-        df = pd.DataFrame(data)
-        # Ensure correct columns
-        for ag in AGS:
-            if ag not in df.columns:
-                df[ag] = 0
-        df = df[["ID"] + AGS]
-        return df, f"Updated {c} row(s)."
-    except Exception as e:
-        return None, f"Parse error: {e}"
+def parse_paste_table(txt: str, expected_rows: int, id_prefix: str, id_list=None):
+    rows = [r for r in str(txt).strip().splitlines() if r.strip()]
+    data = []
 
-def sanitize_binary_df(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Force antigen columns to 0/1 only; keep ID as string.
-    """
-    out = df.copy()
-    if "ID" in out.columns:
-        out["ID"] = out["ID"].astype(str)
-    for ag in AGS:
-        if ag not in out.columns:
-            out[ag] = 0
-        out[ag] = pd.to_numeric(out[ag], errors="coerce").fillna(0).astype(int)
-        out[ag] = out[ag].clip(0, 1)
-    # order
-    cols = ["ID"] + AGS
-    for c in cols:
-        if c not in out.columns:
-            out[c] = 0
-    out = out[cols]
-    return out
+    if id_list is None:
+        id_list = [f"{id_prefix}{i+1}" for i in range(expected_rows)]
+
+    for i in range(min(expected_rows, len(rows))):
+        parts = rows[i].split("\t")
+        vals = [_token_to_01(p) for p in parts]
+
+        if len(vals) > len(AGS):
+            vals = vals[-len(AGS):]
+        while len(vals) < len(AGS):
+            vals.append(0)
+
+        d = {"ID": id_list[i]}
+        for j, ag in enumerate(AGS):
+            d[ag] = int(vals[j])
+        data.append(d)
+
+    df = pd.DataFrame(data)
+    if len(df) < expected_rows:
+        for k in range(len(df), expected_rows):
+            d = {"ID": id_list[k], **{ag: 0 for ag in AGS}}
+            df = pd.concat([df, pd.DataFrame([d])], ignore_index=True)
+
+    return df, f"Parsed {min(expected_rows, len(rows))} row(s). Expecting {expected_rows}."
+
+def _checkbox_column_config():
+    return {
+        ag: st.column_config.CheckboxColumn(
+            ag,
+            help="Tick = Antigen Present (1). Untick = Absent (0).",
+            default=False
+        )
+        for ag in AGS
+    }
 
 # --------------------------------------------------------------------------
 # 5) SIDEBAR
@@ -458,7 +475,7 @@ with st.sidebar:
         st.session_state.analysis_ready = False
         st.session_state.analysis_payload = None
         st.session_state.show_dat = False
-        # Keep tables/lots
+        st.session_state.confirmed_lock = set()   # ✅ FIX: clear lock on reset
         st.rerun()
 
 # --------------------------------------------------------------------------
@@ -480,77 +497,110 @@ if nav == "Supervisor":
             st.success("Saved locally. Press **Save to GitHub** to publish.")
 
         st.write("---")
-        st.subheader("2) Panel & Screening Cell Configuration (RESTORED)")
+        st.subheader("2) Monthly Grid Update (Copy/Paste + Safe Manual Edit)")
+        st.info("Option A active: Paste **26 columns** exactly in **AGS order**. "
+                "Rows should be tab-separated. If your paste includes extra leading columns, the app will take the **last 26**.")
 
-        t1, t2, t3 = st.tabs(["A) Copy/Paste (Recommended)", "B) Manual Edit (Careful)", "C) Quick Preview"])
+        tab_paste, tab_edit = st.tabs(["📋 Copy/Paste Update", "✍️ Manual Edit (Safe)"])
 
-        with t1:
-            st.info("✅ نفس النظام القديم: حوّل الشيت لإكسيل → ظلّل الـ 26 عمود antigen → Copy → Paste هنا.")
-            p_txt = st.text_area("Paste PANEL (11 rows)", height=170, key="paste_p11")
-            colA, colB = st.columns([1,1])
-            if colA.button("Update Panel 11 from Paste", key="btn_up_p11"):
-                df, msg = parse_paste_grid(p_txt, 11)
-                if df is None:
-                    st.error(msg)
-                else:
-                    st.session_state.panel11_df = sanitize_binary_df(df)
-                    st.success(msg)
+        with tab_paste:
+            cA, cB = st.columns(2)
 
-            s_txt = st.text_area("Paste SCREEN (3 rows)", height=120, key="paste_p3")
-            if colB.button("Update Screen 3 from Paste", key="btn_up_p3"):
-                df, msg = parse_paste_grid(s_txt, 3)
-                if df is None:
-                    st.error(msg)
-                else:
-                    st.session_state.screen3_df = sanitize_binary_df(df)
-                    st.success(msg)
+            with cA:
+                st.markdown("### Panel 11 (Paste)")
+                p_txt = st.text_area("Paste 11 rows (tab-separated; 26 columns in AGS order)", height=170, key="p11_paste")
+                if st.button("✅ Update Panel 11 from Paste", key="upd_p11_paste"):
+                    df_new, msg = parse_paste_table(p_txt, expected_rows=11, id_prefix="C")
+                    df_new["ID"] = [f"C{i+1}" for i in range(11)]
+                    st.session_state.panel11_df = df_new.copy()
+                    st.success(msg + " Panel 11 updated locally.")
 
-            st.warning("⚠️ لو الـ PDF مش بيتحوّل صح: استخدم Excel (Desktop) Data ➜ From Picture أو حوّله لصورة واضحة ثم اعمل Copy من الناتج.")
+                st.caption("Preview (Panel 11)")
+                st.dataframe(st.session_state.panel11_df.iloc[:, :15], use_container_width=True)
 
-        with t2:
-            st.warning("⚠️ Manual edit مسموح لكن بحذر شديد: القيم لازم تكون 0 أو 1 فقط.")
-            st.caption("أي قيمة غير 0/1 سيتم قصّها تلقائيًا إلى 0/1 عند الحفظ.")
+            with cB:
+                st.markdown("### Screen 3 (Paste)")
+                s_txt = st.text_area("Paste 3 rows (tab-separated; 26 columns in AGS order)", height=170, key="p3_paste")
+                if st.button("✅ Update Screen 3 from Paste", key="upd_p3_paste"):
+                    df_new, msg = parse_paste_table(s_txt, expected_rows=3, id_prefix="S", id_list=["SI", "SII", "SIII"])
+                    df_new["ID"] = ["SI", "SII", "SIII"]
+                    st.session_state.screen3_df = df_new.copy()
+                    st.success(msg + " Screen 3 updated locally.")
 
-            st.markdown("**ID Panel (11 Cells)**")
-            edited_p11 = st.data_editor(
-                st.session_state.panel11_df,
-                use_container_width=True,
-                num_rows="fixed",
-                key="editor_p11"
-            )
+                st.caption("Preview (Screen 3)")
+                st.dataframe(st.session_state.screen3_df.iloc[:, :15], use_container_width=True)
 
-            st.markdown("**Screening Cells (3 Cells)**")
-            edited_p3 = st.data_editor(
-                st.session_state.screen3_df,
-                use_container_width=True,
-                num_rows="fixed",
-                key="editor_p3"
-            )
+            st.markdown("""
+            <div class='clinical-alert'>
+            ⚠️ Tip: لو الـPDF فيه Labels قبل الداتا، paste غالبًا هيبقى فيه أعمدة زيادة في البداية.
+            البرنامج تلقائيًا بياخد <b>آخر 26 عمود</b> ويهمل أي حاجة قبلهم.
+            </div>
+            """, unsafe_allow_html=True)
 
-            if st.button("Apply Manual Edits (Sanitize 0/1)", key="apply_manual"):
-                st.session_state.panel11_df = sanitize_binary_df(edited_p11)
-                st.session_state.screen3_df = sanitize_binary_df(edited_p3)
-                st.success("✅ Applied. All antigen values sanitized to 0/1.")
+        with tab_edit:
+            st.markdown("### Manual Edit (Supervisor only) — Safe mode")
+            st.markdown("""
+            <div class='clinical-info'>
+            ✅ Safe rules applied: <b>ID locked</b> + <b>No add/remove rows</b> + <b>Only 0/1 via checkboxes</b>.<br>
+            استخدم ده فقط للتصحيح اليدوي بعد الـCopy/Paste.
+            </div>
+            """, unsafe_allow_html=True)
 
-        with t3:
-            st.markdown("**Panel snapshot**")
-            st.dataframe(st.session_state.panel11_df.iloc[:, :15], use_container_width=True)
-            st.markdown("**Screen snapshot**")
-            st.dataframe(st.session_state.screen3_df.iloc[:, :15], use_container_width=True)
+            t1, t2 = st.tabs(["Panel 11 (Edit)", "Screen 3 (Edit)"])
+
+            with t1:
+                edited_p11 = st.data_editor(
+                    st.session_state.panel11_df,
+                    use_container_width=True,
+                    num_rows="fixed",
+                    disabled=["ID"],
+                    column_config=_checkbox_column_config(),
+                    key="editor_panel11"
+                )
+                colx1, colx2 = st.columns([1, 2])
+                with colx1:
+                    if st.button("⚠️ Apply Manual Changes (Panel 11)", type="primary", key="apply_p11"):
+                        st.session_state.panel11_df = edited_p11.copy()
+                        st.success("Panel 11 updated safely (local).")
+                with colx2:
+                    st.caption("Applies only when you click Apply (prevents accidental changes).")
+
+            with t2:
+                edited_p3 = st.data_editor(
+                    st.session_state.screen3_df,
+                    use_container_width=True,
+                    num_rows="fixed",
+                    disabled=["ID"],
+                    column_config=_checkbox_column_config(),
+                    key="editor_screen3"
+                )
+                coly1, coly2 = st.columns([1, 2])
+                with coly1:
+                    if st.button("⚠️ Apply Manual Changes (Screen 3)", type="primary", key="apply_p3"):
+                        st.session_state.screen3_df = edited_p3.copy()
+                        st.success("Screen 3 updated safely (local).")
+                with coly2:
+                    st.caption("Applies only when you click Apply (prevents accidental changes).")
 
         st.write("---")
         st.subheader("3) Publish to ALL devices (Save to GitHub)")
+        st.warning("قبل النشر: راجع اللوت + راجع الجداول بسرعة (Panel/Screen).")
+
+        confirm_pub = st.checkbox("I confirm Panel/Screen data were reviewed and are correct", key="confirm_publish")
 
         if st.button("💾 Save to GitHub (Commit)", key="save_gh"):
-            try:
-                lots_json = json.dumps({"lot_p": st.session_state.lot_p, "lot_s": st.session_state.lot_s},
-                                       ensure_ascii=False, indent=2)
-                github_upsert_file("data/p11.csv", st.session_state.panel11_df.to_csv(index=False), "Update monthly p11 panel")
-                github_upsert_file("data/p3.csv",  st.session_state.screen3_df.to_csv(index=False), "Update monthly p3 screen")
-                github_upsert_file("data/lots.json", lots_json, "Update monthly lots")
-                st.success("✅ Published to GitHub successfully.")
-            except Exception as e:
-                st.error(f"❌ Save failed: {e}")
+            if not confirm_pub:
+                st.error("Confirmation required before publishing.")
+            else:
+                try:
+                    lots_json = json.dumps({"lot_p": st.session_state.lot_p, "lot_s": st.session_state.lot_s},
+                                           ensure_ascii=False, indent=2)
+                    github_upsert_file("data/p11.csv", st.session_state.panel11_df.to_csv(index=False), "Update monthly p11 panel")
+                    github_upsert_file("data/p3.csv",  st.session_state.screen3_df.to_csv(index=False), "Update monthly p3 screen")
+                    github_upsert_file("data/lots.json", lots_json, "Update monthly lots")
+                    st.success("✅ Published to GitHub successfully.")
+                except Exception as e:
+                    st.error(f"❌ Save failed: {e}")
 
 # --------------------------------------------------------------------------
 # 7) WORKSTATION
@@ -763,100 +813,26 @@ else:
             </div>
             """, unsafe_allow_html=True)
 
-        # --------------------------------------------------------------
-        # NON-PAN CASES: specificity engine
-        # --------------------------------------------------------------
-        if not all_rx:
+        if all_rx:
+            pass
+        else:
             cells = get_cells(in_p, in_s, st.session_state.ext)
             ruled = rule_out(in_p, in_s, st.session_state.ext)
             candidates = [a for a in AGS if a not in ruled and a not in IGNORED_AGS]
-            best = find_best_combo(candidates, cells, max_size=3)
 
             st.subheader("Conclusion (Step 1: Rule-out / Rule-in)")
 
-            # ------------------------------
-            # FIX #1: If best None, do NOT lose already-confirmable antibodies.
-            # Fallback: detect any SINGLE specificity that meets rule-of-three on discriminating cells.
-            # ------------------------------
-            fallback_confirmed = []
-            fallback_stats = {}
-            if not best:
-                for a in candidates:
-                    full, mod, p_cnt, n_cnt = check_rule_three_only_on_discriminating(a, (a,), cells)
-                    if full or mod:
-                        fallback_confirmed.append(a)
-                        fallback_stats[a] = (full, mod, p_cnt, n_cnt)
+            # ✅ FIX: If we already have a confirmed antibody, do NOT rebuild best combo from scratch.
+            if st.session_state.confirmed_lock:
+                confirmed_locked = sorted(list(st.session_state.confirmed_lock))
+                st.success("Resolved (LOCKED confirmed): " + ", ".join([f"Anti-{a}" for a in confirmed_locked]))
 
-                if fallback_confirmed:
-                    st.success("Resolved (confirmed by discriminating Rule-of-Three even though pattern is complex): " +
-                               ", ".join([f"Anti-{a}" for a in fallback_confirmed]))
-                    # Still show remaining possibilities but do NOT demote confirmed ones
-                    remaining = [x for x in candidates if x not in fallback_confirmed]
-                    poss_sig = [x for x in remaining if x not in INSIGNIFICANT_AGS][:12]
-                    poss_cold = [x for x in remaining if x in INSIGNIFICANT_AGS][:6]
-                    if poss_sig or poss_cold:
-                        st.markdown("### ⚠️ Not excluded yet (Needs more work — DO NOT confirm now):")
-                        if poss_sig:
-                            st.write("**Clinically significant possibilities:** " + ", ".join([f"Anti-{x}" for x in poss_sig]))
-                        if poss_cold:
-                            st.info("Cold/Insignificant possibilities: " + ", ".join([f"Anti-{x}" for x in poss_cold]))
-
-                    st.write("---")
-                    st.subheader("Confirmation (Rule of Three) — Confirmed singles")
-                    for a in fallback_confirmed:
-                        full, mod, p_cnt, n_cnt = fallback_stats[a]
-                        if full:
-                            st.write(f"✅ **Anti-{a} CONFIRMED**: Full Rule (3+3) met on discriminating cells (P:{p_cnt} / N:{n_cnt})")
-                        else:
-                            st.write(f"✅ **Anti-{a} CONFIRMED**: Modified Rule (2+3) met on discriminating cells (P:{p_cnt} / N:{n_cnt})")
-
-                    # Patient antigen check reminder
-                    st.markdown(patient_antigen_negative_reminder(sorted(list(set(fallback_confirmed))), strong=True), unsafe_allow_html=True)
-
-                    # Conflict check (do not delete confirmed, just warn)
-                    conflicts = {}
-                    for a in fallback_confirmed:
-                        bad = []
-                        for c in cells:
-                            if c["react"] == 1 and not ph_has(c["ph"], a):
-                                bad.append(c["label"])
-                        if bad:
-                            conflicts[a] = bad
-                    if conflicts:
-                        st.markdown("<div class='clinical-alert'><b>⚠️ Data conflict alert</b><br>"
-                                    "A confirmed antibody has reactive cells that are antigen-negative. "
-                                    "Do <b>NOT</b> delete the confirmed antibody automatically; investigate for "
-                                    "<b>multiple antibodies</b> and/or <b>phenotype entry error</b>.</div>", unsafe_allow_html=True)
-                        for a, bad in conflicts.items():
-                            st.write(f"- **Anti-{a} confirmed**, but these reactive cell(s) are **{a}-negative**: " + ", ".join(bad))
-
-                else:
-                    st.error("No resolved specificity from current data. Proceed with Selected Cells / Enhancement.")
-                    poss_sig = [a for a in candidates if a not in INSIGNIFICANT_AGS][:12]
-                    poss_cold = [a for a in candidates if a in INSIGNIFICANT_AGS][:6]
-                    if poss_sig or poss_cold:
-                        st.markdown("### ⚠️ Not excluded yet (Needs more work — DO NOT confirm now):")
-                        if poss_sig:
-                            st.write("**Clinically significant possibilities:** " + ", ".join([f"Anti-{x}" for x in poss_sig]))
-                        if poss_cold:
-                            st.info("Cold/Insignificant possibilities: " + ", ".join([f"Anti-{x}" for x in poss_cold]))
-
-            else:
-                sep_map = separability_map(best, cells)
-                resolved = [a for a in best if sep_map.get(a, False)]
-                needs_work = [a for a in best if not sep_map.get(a, False)]
-
-                if resolved:
-                    st.success("Resolved (pattern explained & separable): " + ", ".join([f"Anti-{a}" for a in resolved]))
-                if needs_work:
-                    st.warning("Pattern suggests these, but NOT separable yet (DO NOT confirm): " +
-                               ", ".join([f"Anti-{a}" for a in needs_work]))
-
-                remaining_other = [a for a in candidates if a not in best]
+                # background possibilities = candidates excluding confirmed
+                remaining_other = [a for a in candidates if a not in st.session_state.confirmed_lock]
                 other_sig = [a for a in remaining_other if a not in INSIGNIFICANT_AGS]
                 other_cold = [a for a in remaining_other if a in INSIGNIFICANT_AGS]
 
-                active_not_excluded = set(resolved + needs_work + other_sig + other_cold)
+                active_not_excluded = set(confirmed_locked + other_sig + other_cold)
 
                 auto_ruled_out, supported_bg, inconclusive_bg, no_disc_bg = background_auto_resolution(
                     background_list=other_sig + other_cold,
@@ -893,86 +869,40 @@ else:
                                    ", ".join([f"Anti-{x}" for x in no_disc_bg]))
 
                 st.write("---")
-                st.subheader("Confirmation (Rule of Three) — Resolved & Separable only")
+                st.subheader("Confirmation (Rule of Three) — Confirmed singles")
 
-                confirmation = {}
-                confirmed = set()
-                needs_more_for_confirmation = set()
+                # keep showing patient antigen-negative reminder for locked confirmed
+                st.markdown(patient_antigen_negative_reminder(confirmed_locked, strong=True), unsafe_allow_html=True)
 
-                if not resolved:
-                    st.info("No antibody is separable yet → DO NOT apply Rule of Three. Add discriminating selected cells.")
-                else:
-                    for a in resolved:
-                        full, mod, p_cnt, n_cnt = check_rule_three_only_on_discriminating(a, best, cells)
-                        confirmation[a] = (full, mod, p_cnt, n_cnt)
-                        if full or mod:
-                            confirmed.add(a)
-                        else:
-                            needs_more_for_confirmation.add(a)
-
-                    for a in resolved:
-                        full, mod, p_cnt, n_cnt = confirmation[a]
-                        if full:
-                            st.write(f"✅ **Anti-{a} CONFIRMED**: Full Rule (3+3) met on discriminating cells (P:{p_cnt} / N:{n_cnt})")
-                        elif mod:
-                            st.write(f"✅ **Anti-{a} CONFIRMED**: Modified Rule (2+3) met on discriminating cells (P:{p_cnt} / N:{n_cnt})")
-                        else:
-                            st.write(f"⚠️ **Anti-{a} NOT confirmed yet**: need more discriminating cells (P:{p_cnt} / N:{n_cnt})")
-
-                # Patient antigen-negative confirmation reminder
-                if confirmed:
-                    st.markdown(patient_antigen_negative_reminder(sorted(list(confirmed)), strong=True), unsafe_allow_html=True)
-                elif resolved:
-                    st.markdown(patient_antigen_negative_reminder(sorted(list(resolved)), strong=False), unsafe_allow_html=True)
-
-                # Anti-G alert (D + C pattern)
-                d_present = ("D" in confirmed) or ("D" in resolved) or ("D" in needs_work)
-                c_present = ("C" in confirmed) or ("C" in resolved) or ("C" in needs_work) or ("C" in supported_bg) or ("C" in other_sig_final)
+                # ✅ Restore Anti-G note when D and C are present (locked)
+                d_present = ("D" in st.session_state.confirmed_lock)
+                c_present = ("C" in st.session_state.confirmed_lock)
                 if d_present and c_present:
-                    strong = ("D" in confirmed and "C" in confirmed)
-                    st.markdown(anti_g_alert_html(strong=strong), unsafe_allow_html=True)
+                    st.markdown(anti_g_alert_html(strong=True), unsafe_allow_html=True)
 
-                # Conflict check: confirmed antibodies vs reactive antigen-negative cells
-                if confirmed:
-                    conflicts = {}
-                    for a in confirmed:
-                        bad = []
-                        for c in cells:
-                            if c["react"] == 1 and not ph_has(c["ph"], a):
-                                bad.append(c["label"])
-                        if bad:
-                            conflicts[a] = bad
-                    if conflicts:
-                        st.markdown("<div class='clinical-alert'><b>⚠️ Data conflict alert</b><br>"
-                                    "A confirmed antibody has reactive cells that are antigen-negative. "
-                                    "Do <b>NOT</b> delete the confirmed antibody automatically; investigate for "
-                                    "<b>multiple antibodies</b> and/or <b>phenotype entry error</b>.</div>", unsafe_allow_html=True)
-                        for a, bad in conflicts.items():
-                            st.write(f"- **Anti-{a} confirmed**, but these reactive cell(s) are **{a}-negative**: " + ", ".join(bad))
+                # ✅ Conflict alert: confirmed antibody has reactive cells that are antigen-negative
+                conflicts = confirmed_conflict_map(st.session_state.confirmed_lock, cells)
+                if conflicts:
+                    st.markdown("""
+                    <div class='clinical-alert'>
+                    ⚠️ <b>Data conflict alert</b><br>
+                    A confirmed antibody has reactive cells that are antigen-negative.
+                    <b>Do NOT delete the confirmed antibody automatically</b>; investigate multiple antibodies and/or phenotype entry error.
+                    </div>
+                    """, unsafe_allow_html=True)
+                    for ab, labs in conflicts.items():
+                        st.write(f"- **Anti-{ab} confirmed**, but these reactive cell(s) are **{ab}-negative**: " + ", ".join(labs))
 
                 st.write("---")
-
                 targets_needing_selected = list(dict.fromkeys(
-                    needs_work +
-                    list(needs_more_for_confirmation) +
-                    list(supported_bg.keys()) +
-                    other_sig_final
+                    list(supported_bg.keys()) + other_sig_final
                 ))
 
                 if targets_needing_selected:
                     st.markdown("### 🧪 Selected Cells (Only if needed to resolve interference / exclude / confirm)")
-
                     for a in targets_needing_selected:
-                        active_set_now = set(resolved + needs_work + other_sig_final + list(supported_bg.keys()))
-
-                        if a in needs_work:
-                            st.warning(f"Anti-{a}: **Interference / not separable** → need {a}+ cells NEGATIVE for other active suspects.")
-                        elif a in other_sig_final:
-                            st.warning(f"Anti-{a}: **Clinically significant background NOT excluded** → need discriminating cells to exclude/confirm.")
-                        elif a in supported_bg:
-                            st.info(f"Anti-{a}: **Suggested by discriminating POSITIVE cell(s)** → requires confirmation (rule-of-three / additional discriminating cells).")
-                        else:
-                            st.info(f"Anti-{a}: **Not confirmed yet** → need more discriminating cells.")
+                        active_set_now = set(list(st.session_state.confirmed_lock) + other_sig_final + list(supported_bg.keys()))
+                        st.warning(f"Anti-{a}: need discriminating cells to exclude/confirm (especially after locking confirmed antibodies).")
 
                         sugg = suggest_selected_cells(a, list(active_set_now))
                         if sugg:
@@ -984,9 +914,144 @@ else:
                     enz = enzyme_hint_if_needed(targets_needing_selected)
                     if enz:
                         st.info("💡 " + enz)
-
                 else:
-                    st.success("No Selected Cells needed: all resolved antibodies are confirmed AND no clinically significant background remains unexcluded.")
+                    st.success("No Selected Cells needed: confirmed antibody is locked AND no clinically significant background remains unexcluded.")
+
+            else:
+                best = find_best_combo(candidates, cells, max_size=3)
+
+                if not best:
+                    st.error("No resolved specificity from current data. Proceed with Selected Cells / Enhancement.")
+                    poss_sig = [a for a in candidates if a not in INSIGNIFICANT_AGS][:12]
+                    poss_cold = [a for a in candidates if a in INSIGNIFICANT_AGS][:6]
+                    if poss_sig or poss_cold:
+                        st.markdown("### ⚠️ Not excluded yet (Needs more work — DO NOT confirm now):")
+                        if poss_sig:
+                            st.write("**Clinically significant possibilities:** " + ", ".join([f"Anti-{x}" for x in poss_sig]))
+                        if poss_cold:
+                            st.info("Cold/Insignificant possibilities: " + ", ".join([f"Anti-{x}" for x in poss_cold]))
+                else:
+                    sep_map = separability_map(best, cells)
+                    resolved_raw = [a for a in best if sep_map.get(a, False)]
+                    needs_work = [a for a in best if not sep_map.get(a, False)]
+
+                    # ✅ FIX: never treat insignificant as "resolved/confirmable" if significant exists
+                    resolved_sig = [a for a in resolved_raw if a not in INSIGNIFICANT_AGS]
+                    resolved_cold = [a for a in resolved_raw if a in INSIGNIFICANT_AGS]
+
+                    if resolved_sig:
+                        st.success("Resolved (pattern explained & separable): " + ", ".join([f"Anti-{a}" for a in resolved_sig]))
+                    if needs_work:
+                        st.warning("Pattern suggests these, but NOT separable yet (DO NOT confirm): " +
+                                   ", ".join([f"Anti-{a}" for a in needs_work]))
+                    if resolved_cold and not resolved_sig:
+                        st.info("Cold/Insignificant (separable, but do NOT auto-confirm): " + ", ".join([f"Anti-{a}" for a in resolved_cold]))
+
+                    remaining_other = [a for a in candidates if a not in best]
+                    other_sig = [a for a in remaining_other if a not in INSIGNIFICANT_AGS]
+                    other_cold = [a for a in remaining_other if a in INSIGNIFICANT_AGS]
+
+                    active_not_excluded = set(resolved_sig + needs_work + other_sig + other_cold + resolved_cold)
+
+                    auto_ruled_out, supported_bg, inconclusive_bg, no_disc_bg = background_auto_resolution(
+                        background_list=other_sig + other_cold + resolved_cold,   # cold stays background unless alone
+                        active_not_excluded=active_not_excluded,
+                        cells=cells
+                    )
+
+                    other_sig_final = [a for a in other_sig if a not in auto_ruled_out]
+                    other_cold_final = [a for a in other_cold if a not in auto_ruled_out]
+
+                    if auto_ruled_out:
+                        st.markdown("### ✅ Auto Rule-out (from available discriminating cells):")
+                        for ag, labs in auto_ruled_out.items():
+                            st.write(f"- **Anti-{ag} ruled out** (discriminating cell(s) NEGATIVE): " + ", ".join(labs))
+
+                    if supported_bg:
+                        st.markdown("### ⚠️ Background antibodies suggested by discriminating cells (NOT confirmed yet):")
+                        for ag, labs in supported_bg.items():
+                            st.write(f"- **Anti-{ag} suspected** (discriminating cell(s) POSITIVE): " + ", ".join(labs))
+
+                    if inconclusive_bg:
+                        st.markdown("### ⚠️ Inconclusive background (mixed discriminating results):")
+                        for ag, labs in inconclusive_bg.items():
+                            st.write(f"- **Anti-{ag} inconclusive** (mixed results): " + ", ".join(labs))
+
+                    if other_sig_final or other_cold_final or no_disc_bg:
+                        st.markdown("### ⚠️ Not excluded yet (background possibilities):")
+                        if other_sig_final:
+                            st.write("**Clinically significant:** " + ", ".join([f"Anti-{x}" for x in other_sig_final]))
+                        if other_cold_final:
+                            st.info("Cold/Insignificant: " + ", ".join([f"Anti-{x}" for x in other_cold_final]))
+                        if no_disc_bg:
+                            st.warning("No discriminating cells available in current panel/screen for: " +
+                                       ", ".join([f"Anti-{x}" for x in no_disc_bg]))
+
+                    st.write("---")
+                    st.subheader("Confirmation (Rule of Three) — Confirmed singles")
+
+                    confirmed = set()
+                    if not resolved_sig:
+                        st.info("No clinically significant antibody is separable yet → DO NOT apply Rule of Three. Add discriminating selected cells.")
+                    else:
+                        for a in resolved_sig:
+                            full, mod, p_cnt, n_cnt = check_rule_three_only_on_discriminating(a, best, cells)
+                            if full:
+                                st.write(f"✅ **Anti-{a} CONFIRMED**: Full Rule (3+3) met on discriminating cells (P:{p_cnt} / N:{n_cnt})")
+                                confirmed.add(a)
+                            elif mod:
+                                st.write(f"✅ **Anti-{a} CONFIRMED**: Modified Rule (2+3) met on discriminating cells (P:{p_cnt} / N:{n_cnt})")
+                                confirmed.add(a)
+                            else:
+                                st.write(f"⚠️ **Anti-{a} NOT confirmed yet**: need more discriminating cells (P:{p_cnt} / N:{n_cnt})")
+
+                    if confirmed:
+                        # ✅ FIX: lock confirmed so it cannot be removed by later selected cells
+                        st.session_state.confirmed_lock = set(confirmed)
+                        st.markdown(patient_antigen_negative_reminder(sorted(list(confirmed)), strong=True), unsafe_allow_html=True)
+                    elif resolved_sig:
+                        st.markdown(patient_antigen_negative_reminder(sorted(list(resolved_sig)), strong=False), unsafe_allow_html=True)
+
+                    # ✅ Restore Anti-G note when D and C are present
+                    d_present = ("D" in confirmed) or ("D" in resolved_sig) or ("D" in needs_work)
+                    c_present = ("C" in confirmed) or ("C" in resolved_sig) or ("C" in needs_work) or ("C" in supported_bg) or ("C" in other_sig_final)
+                    if d_present and c_present:
+                        strong = ("D" in confirmed and "C" in confirmed)
+                        st.markdown(anti_g_alert_html(strong=strong), unsafe_allow_html=True)
+
+                    st.write("---")
+
+                    targets_needing_selected = list(dict.fromkeys(
+                        needs_work +
+                        list(supported_bg.keys()) +
+                        other_sig_final
+                    ))
+
+                    if targets_needing_selected:
+                        st.markdown("### 🧪 Selected Cells (Only if needed to resolve interference / exclude / confirm)")
+                        for a in targets_needing_selected:
+                            active_set_now = set(resolved_sig + needs_work + other_sig_final + list(supported_bg.keys()))
+                            if a in needs_work:
+                                st.warning(f"Anti-{a}: **Interference / not separable** → need {a}+ cells NEGATIVE for other active suspects.")
+                            elif a in other_sig_final:
+                                st.warning(f"Anti-{a}: **Clinically significant background NOT excluded** → need discriminating cells to exclude/confirm.")
+                            elif a in supported_bg:
+                                st.info(f"Anti-{a}: **Suggested by discriminating POSITIVE cell(s)** → requires confirmation (rule-of-three / additional discriminating cells).")
+                            else:
+                                st.info(f"Anti-{a}: **Not confirmed yet** → need more discriminating cells.")
+
+                            sugg = suggest_selected_cells(a, list(active_set_now))
+                            if sugg:
+                                for lab, note in sugg[:12]:
+                                    st.write(f"- {lab}  <span class='cell-hint'>{note}</span>", unsafe_allow_html=True)
+                            else:
+                                st.write("- No suitable discriminating cell in current inventory → use another lot / external selected cells.")
+
+                        enz = enzyme_hint_if_needed(targets_needing_selected)
+                        if enz:
+                            st.info("💡 " + enz)
+                    else:
+                        st.success("No Selected Cells needed: all resolved antibodies are confirmed AND no clinically significant background remains unexcluded.")
 
     with st.expander("➕ Add Selected Cell (From Library)"):
         ex_id = st.text_input("ID", key="ex_id")
