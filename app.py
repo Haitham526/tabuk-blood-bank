@@ -1,105 +1,25 @@
 import streamlit as st
 import pandas as pd
-from datetime import date, datetime, timedelta, timezone
+from datetime import date
 import json
 import base64
 import requests
 from pathlib import Path
 from itertools import combinations
-import secrets
-import re
 
-# ============================================================
-# 0) CONFIG: Supabase + GitHub (Streamlit Secrets)
-# ============================================================
-
-def _cfg():
-    # Supabase
-    sb_url = st.secrets.get("SUPABASE_URL", "").strip()
-    sb_anon = st.secrets.get("SUPABASE_ANON_KEY", "").strip()
-    sb_service = st.secrets.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()  # used ONLY for privileged ops (create user / invites admin)
-    # GitHub
-    gh_token = st.secrets.get("GITHUB_TOKEN", None)
-    gh_repo = st.secrets.get("GITHUB_REPO", None)   # e.g. "Haitham526/tabuk-blood-bank"
-    gh_branch = st.secrets.get("GITHUB_BRANCH", "main")
-
-    return {
-        "SUPABASE_URL": sb_url,
-        "SUPABASE_ANON_KEY": sb_anon,
-        "SUPABASE_SERVICE_ROLE_KEY": sb_service,
-        "GITHUB_TOKEN": gh_token,
-        "GITHUB_REPO": gh_repo,
-        "GITHUB_BRANCH": gh_branch,
-    }
-
-CFG = _cfg()
-
-# ============================================================
-# 1) HTTP helpers (no extra packages)
-# ============================================================
-
-def _sb_headers(anon_jwt: str | None = None, service: bool = False):
-    headers = {
-        "Content-Type": "application/json",
-        "apikey": CFG["SUPABASE_ANON_KEY"],
-        "Authorization": f"Bearer {CFG['SUPABASE_ANON_KEY']}",
-    }
-    if anon_jwt:
-        headers["Authorization"] = f"Bearer {anon_jwt}"
-    if service:
-        # Service role bypasses RLS. Use carefully.
-        headers["apikey"] = CFG["SUPABASE_SERVICE_ROLE_KEY"]
-        headers["Authorization"] = f"Bearer {CFG['SUPABASE_SERVICE_ROLE_KEY']}"
-    return headers
-
-def _sb_rest(path: str):
-    return f"{CFG['SUPABASE_URL'].rstrip('/')}/rest/v1/{path.lstrip('/')}"
-
-def _sb_auth(path: str):
-    return f"{CFG['SUPABASE_URL'].rstrip('/')}/auth/v1/{path.lstrip('/')}"
-
-def sb_rest_get(table: str, params: dict, jwt: str | None = None, service: bool = False):
-    url = _sb_rest(table)
-    r = requests.get(url, headers=_sb_headers(jwt, service=service), params=params, timeout=30)
-    return r
-
-def sb_rest_post(table: str, payload: dict | list, jwt: str | None = None, service: bool = False):
-    url = _sb_rest(table)
-    r = requests.post(url, headers=_sb_headers(jwt, service=service), json=payload, timeout=30)
-    return r
-
-def sb_rest_patch(table: str, params: dict, payload: dict, jwt: str | None = None, service: bool = False):
-    url = _sb_rest(table)
-    r = requests.patch(url, headers=_sb_headers(jwt, service=service), params=params, json=payload, timeout=30)
-    return r
-
-def sb_auth_sign_in(email: str, password: str):
-    url = _sb_auth("token?grant_type=password")
-    payload = {"email": email, "password": password}
-    r = requests.post(url, headers=_sb_headers(None, service=False), json=payload, timeout=30)
-    return r
-
-def sb_auth_sign_up(email: str, password: str):
-    # requires Service Role for admin-created users OR allow signups in Supabase settings
-    # We will use SERVICE ROLE for controlled registration via invite codes.
-    url = _sb_auth("admin/users")
-    payload = {"email": email, "password": password, "email_confirm": True}
-    r = requests.post(url, headers=_sb_headers(None, service=True), json=payload, timeout=30)
-    return r
-
-def sb_auth_get_user(jwt: str):
-    url = _sb_auth("user")
-    r = requests.get(url, headers=_sb_headers(jwt, service=False), timeout=30)
-    return r
-
-# ============================================================
-# 2) GitHub Save Engine (for Panel/Screen/Lots shared to all devices)
-# ============================================================
+# --------------------------------------------------------------------------
+# 0) GitHub Save Engine (uses Streamlit Secrets)
+# --------------------------------------------------------------------------
+def _gh_get_cfg():
+    token = st.secrets.get("GITHUB_TOKEN", None)
+    repo  = st.secrets.get("GITHUB_REPO", None)  # e.g. "Haitham526/tabuk-blood-bank"
+    branch = st.secrets.get("GITHUB_BRANCH", "main")
+    return token, repo, branch
 
 def github_upsert_file(path_in_repo: str, content_text: str, commit_message: str):
-    token, repo, branch = CFG["GITHUB_TOKEN"], CFG["GITHUB_REPO"], CFG["GITHUB_BRANCH"]
+    token, repo, branch = _gh_get_cfg()
     if not token or not repo:
-        raise RuntimeError("Missing GitHub Secrets: GITHUB_TOKEN / GITHUB_REPO")
+        raise RuntimeError("Missing Streamlit Secrets: GITHUB_TOKEN / GITHUB_REPO")
 
     api = f"https://api.github.com/repos/{repo}/contents/{path_in_repo}"
     headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github+json"}
@@ -141,353 +61,44 @@ def load_json_if_exists(local_path: str, default_obj: dict) -> dict:
             return default_obj
     return default_obj
 
-# ============================================================
-# 3) PAGE SETUP + UI THEME (Deep Blue, clean)
-# ============================================================
-
-st.set_page_config(page_title="H-AXIS", layout="wide", page_icon="🩸")
+# --------------------------------------------------------------------------
+# 1) PAGE SETUP & CSS
+# --------------------------------------------------------------------------
+st.set_page_config(page_title="MCH Tabuk - Serology Expert", layout="wide", page_icon="🩸")
 
 st.markdown("""
 <style>
-/* --- global --- */
-:root{
-  --hx-deep:#0B1F3A;
-  --hx-deep2:#0A2A4F;
-  --hx-mid:#0E3A6A;
-  --hx-soft:#EAF2FF;
-  --hx-line:#CFE0FF;
-  --hx-text:#0B1220;
-  --hx-muted:#5B6B82;
-  --hx-card:#FFFFFF;
-}
-
-html, body, [class*="css"]  { font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial; }
-div.block-container { padding-top: 1.2rem; padding-bottom: 3.8rem; }
-
-/* --- header card --- */
-.hx-hero {
-  background: linear-gradient(120deg, #EAF2FF 0%, #D9ECFF 45%, #CFE7FF 100%);
-  border: 1px solid var(--hx-line);
-  border-radius: 16px;
-  padding: 18px 22px;
-  box-shadow: 0 10px 22px rgba(11,31,58,0.10);
-  margin-bottom: 16px;
-}
-.hx-title { font-size: 30px; font-weight: 800; letter-spacing: 0.2px; color: var(--hx-deep); }
-.hx-sub { margin-top: 2px; font-size: 14px; color: var(--hx-muted); font-weight: 600; }
-.hx-mini { margin-top: 8px; font-size: 12px; color: var(--hx-muted); }
-
-/* --- pills --- */
-.hx-pill{
-  display:inline-block; padding: 6px 10px; border-radius: 999px;
-  border: 1px solid var(--hx-line);
-  background: rgba(255,255,255,0.65);
-  font-size: 12px; font-weight: 700; color: var(--hx-deep2);
-}
-
-/* --- cards --- */
-.hx-card{
-  background: var(--hx-card);
-  border: 1px solid var(--hx-line);
-  border-radius: 14px;
-  padding: 14px 14px;
-  box-shadow: 0 8px 16px rgba(11,31,58,0.06);
-}
-
-/* --- alerts (professional, not ugly) --- */
-.hx-alert{
-  border-radius: 12px; padding: 12px 14px; border:1px solid var(--hx-line);
-  background: #F6FAFF; color: var(--hx-text);
-}
-.hx-warn{
-  border-radius: 12px; padding: 12px 14px; border:1px solid #FFD7A8;
-  background: #FFF8EF; color: #3A2A10;
-}
-.hx-danger{
-  border-radius: 12px; padding: 12px 14px; border:1px solid #FFC1C7;
-  background: #FFF3F5; color: #3A0B13;
-}
-.hx-ok{
-  border-radius: 12px; padding: 12px 14px; border:1px solid #BFE8D1;
-  background: #F2FFF7; color: #073018;
-}
-
-/* --- signature --- */
-.hx-sign {
-  position: fixed; right: 16px; bottom: 10px; z-index: 9999;
-  background: rgba(11,31,58,0.92);
-  border: 1px solid rgba(255,255,255,0.16);
-  padding: 10px 14px; border-radius: 14px;
-  box-shadow: 0 10px 24px rgba(0,0,0,0.18);
-  max-width: 320px;
-}
-.hx-sign .n { color:#FFFFFF; font-weight: 800; font-size: 13px; letter-spacing: 0.2px; }
-.hx-sign .t { color:#D6E6FF; font-weight: 600; font-size: 11px; margin-top: 2px; line-height: 1.25; }
-
-/* make dataframe wider */
-div[data-testid="stDataEditor"] table { width: 100% !important; }
-
-/* buttons slightly nicer */
-.stButton button, .stDownloadButton button {
-  border-radius: 12px !important;
-  padding: 10px 14px !important;
-}
+    .hospital-logo { color: #8B0000; text-align: center; border-bottom: 5px solid #8B0000; padding-bottom: 5px; font-family: 'Arial'; }
+    .lot-bar {
+        display: flex; justify-content: space-around; background-color: #f1f8e9;
+        border: 1px solid #81c784; padding: 8px; border-radius: 5px; margin-bottom: 20px; font-weight: bold; color: #1b5e20;
+    }
+    .clinical-alert { background-color: #fff3cd; border: 2px solid #ffca2c; padding: 12px; color: #000; font-weight: 600; margin: 8px 0; border-radius: 6px;}
+    .clinical-danger { background-color: #f8d7da; border: 2px solid #dc3545; padding: 12px; color: #000; font-weight: 700; margin: 8px 0; border-radius: 6px;}
+    .clinical-info { background-color: #cff4fc; border: 2px solid #0dcaf0; padding: 12px; color: #000; font-weight: 600; margin: 8px 0; border-radius: 6px;}
+    .cell-hint { font-size: 0.9em; color: #155724; background: #d4edda; padding: 2px 6px; border-radius: 4px; }
+    .dr-signature {
+        position: fixed; bottom: 10px; right: 15px;
+        background: rgba(255,255,255,0.95);
+        padding: 8px 15px; border: 2px solid #8B0000; border-radius: 8px; z-index:99; box-shadow: 2px 2px 5px rgba(0,0,0,0.1);
+        text-align: center; font-family: 'Georgia', serif;
+    }
+    .dr-name { color: #8B0000; font-size: 15px; font-weight: bold; display: block;}
+    .dr-title { color: #333; font-size: 11px; }
+    div[data-testid="stDataEditor"] table { width: 100% !important; }
 </style>
 """, unsafe_allow_html=True)
 
-def hero(user_role: str | None = None, hospital_code: str | None = None):
-    role_txt = f"{user_role.upper()}" if user_role else "SECURE ACCESS"
-    hc = hospital_code if hospital_code else "—"
-    st.markdown(f"""
-    <div class="hx-hero">
-      <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px;">
-        <div>
-          <div class="hx-title">H-AXIS</div>
-          <div class="hx-sub">Antibody Identification & Serology Decision Support</div>
-          <div class="hx-mini"><span class="hx-pill">Role: {role_txt}</span>&nbsp;&nbsp;<span class="hx-pill">Hospital: {hc}</span></div>
-        </div>
-        <div style="text-align:right;">
-          <div class="hx-mini" style="font-weight:700; color:var(--hx-deep2);">Secure access: Staff ID + Password</div>
-          <div class="hx-mini">First-time registration uses an Invite Code</div>
-        </div>
-      </div>
-    </div>
-    """, unsafe_allow_html=True)
-
 st.markdown("""
-<div class="hx-sign">
-  <div class="n">Dr. Haitham Ismail</div>
-  <div class="t">Clinical Hematology/Oncology &<br>BM Transplantation & Transfusion Medicine Consultant</div>
+<div class='dr-signature no-print'>
+    <span class='dr-name'>Dr. Haitham Ismail</span>
+    <span class='dr-title'>Clinical Hematology/Oncology &<br>BM Transplantation & Transfusion Medicine Consultant</span>
 </div>
 """, unsafe_allow_html=True)
 
-# ============================================================
-# 4) DATABASE MODEL (expects these tables)
-# ============================================================
-# public.hospitals:    code(text PK), name(text), is_active(bool)
-# public.users_profile: id(bigint), user_id(uuid), hospital_code(text), role(text), staff_id(text), created_at(timestamptz)
-# public.invites:      id(uuid), code(text), hospital_code(text), role(text), created_by(uuid),
-#                      created_at(timestamptz), expires_at(timestamptz), used_at(timestamptz),
-#                      used_by(uuid), is_active(bool), staff_id(text nullable)
-
-def _staff_email(staff_id: str) -> str:
-    # internal mapping; user never sees email
-    staff_id = staff_id.strip()
-    return f"{staff_id}@bb.local"
-
-def _valid_staff_id(s: str) -> bool:
-    s = (s or "").strip()
-    # allow digits + optional hyphen; adjust if you want strict digits only
-    return bool(re.fullmatch(r"[0-9]{4,20}", s))
-
-def _now_utc():
-    return datetime.now(timezone.utc)
-
-def _invite_code():
-    # readable, non-ambiguous
-    alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
-    return "".join(secrets.choice(alphabet) for _ in range(8))
-
-# ============================================================
-# 5) AUTH STATE
-# ============================================================
-
-def auth_clear():
-    for k in ["jwt", "user", "profile", "role", "hospital_code", "staff_id"]:
-        if k in st.session_state:
-            del st.session_state[k]
-    st.rerun()
-
-def auth_set(jwt: str, user_obj: dict, profile: dict):
-    st.session_state.jwt = jwt
-    st.session_state.user = user_obj
-    st.session_state.profile = profile
-    st.session_state.role = profile.get("role", "staff")
-    st.session_state.hospital_code = profile.get("hospital_code", "")
-    st.session_state.staff_id = profile.get("staff_id", "")
-    st.rerun()
-
-def is_logged_in() -> bool:
-    return "jwt" in st.session_state and "user" in st.session_state and "profile" in st.session_state
-
-def require_supabase_ready():
-    missing = []
-    if not CFG["SUPABASE_URL"]:
-        missing.append("SUPABASE_URL")
-    if not CFG["SUPABASE_ANON_KEY"]:
-        missing.append("SUPABASE_ANON_KEY")
-    if not CFG["SUPABASE_SERVICE_ROLE_KEY"]:
-        missing.append("SUPABASE_SERVICE_ROLE_KEY")
-    if missing:
-        st.error("Supabase secrets missing: " + ", ".join(missing))
-        st.stop()
-
-require_supabase_ready()
-
-# ============================================================
-# 6) LOAD PROFILE BY user_id
-# ============================================================
-
-def fetch_profile_by_user_id(user_id: str, jwt: str | None = None, service: bool = False) -> dict | None:
-    # Prefer service role to avoid RLS pain during app development.
-    # If you later want strict RLS, switch service=False and ensure policies.
-    params = {"select": "*", "user_id": f"eq.{user_id}", "limit": "1"}
-    r = sb_rest_get("users_profile", params=params, jwt=jwt, service=service)
-    if r.status_code != 200:
-        return None
-    rows = r.json()
-    if not rows:
-        return None
-    return rows[0]
-
-def fetch_hospital_name(code: str) -> str:
-    if not code:
-        return ""
-    params = {"select": "name", "code": f"eq.{code}", "limit": "1"}
-    r = sb_rest_get("hospitals", params=params, jwt=None, service=True)
-    if r.status_code == 200 and r.json():
-        return r.json()[0].get("name", "")
-    return ""
-
-# ============================================================
-# 7) INVITES
-# ============================================================
-
-def create_invite(hospital_code: str, role: str, created_by_user_id: str, expires_hours: int = 168, staff_id: str | None = None):
-    code = _invite_code()
-    now = _now_utc()
-    exp = now + timedelta(hours=int(expires_hours))
-    payload = {
-        "id": str(secrets.token_hex(16)),
-        "code": code,
-        "hospital_code": hospital_code,
-        "role": role,
-        "created_by": created_by_user_id,
-        "created_at": now.isoformat(),
-        "expires_at": exp.isoformat(),
-        "used_at": None,
-        "used_by": None,
-        "is_active": True,
-        "staff_id": staff_id if staff_id else None,
-    }
-    r = sb_rest_post("invites", payload, jwt=None, service=True)
-    if r.status_code not in (201, 200):
-        raise RuntimeError(f"Invite create failed: {r.status_code} {r.text}")
-    return code
-
-def validate_invite(code: str):
-    code = (code or "").strip().upper()
-    params = {"select": "*", "code": f"eq.{code}", "limit": "1"}
-    r = sb_rest_get("invites", params=params, jwt=None, service=True)
-    if r.status_code != 200 or not r.json():
-        return None, "Invite code not found."
-    inv = r.json()[0]
-    if not inv.get("is_active", False):
-        return None, "Invite is not active."
-    if inv.get("used_at") is not None:
-        return None, "Invite already used."
-    exp = inv.get("expires_at")
-    if exp:
-        try:
-            exp_dt = datetime.fromisoformat(exp.replace("Z", "+00:00"))
-            if _now_utc() > exp_dt:
-                return None, "Invite expired."
-        except Exception:
-            pass
-    return inv, None
-
-def consume_invite(invite_id: str, used_by: str):
-    now = _now_utc().isoformat()
-    params = {"id": f"eq.{invite_id}"}
-    payload = {"used_at": now, "used_by": used_by, "is_active": False}
-    r = sb_rest_patch("invites", params=params, payload=payload, jwt=None, service=True)
-    if r.status_code not in (200, 204):
-        raise RuntimeError(f"Invite consume failed: {r.status_code} {r.text}")
-
-# ============================================================
-# 8) USER CREATION (First-time registration via Invite)
-# ============================================================
-
-def register_with_invite(inv_code: str, staff_id: str, password: str):
-    inv, err = validate_invite(inv_code)
-    if err:
-        return None, err
-
-    staff_id = staff_id.strip()
-    if inv.get("staff_id"):
-        # optional binding: invite can be locked to a specific staff_id
-        if inv["staff_id"] != staff_id:
-            return None, "This invite is locked to a different Staff ID."
-
-    email = _staff_email(staff_id)
-
-    # 1) Create auth user (service role)
-    r = sb_auth_sign_up(email=email, password=password)
-    if r.status_code not in (200, 201):
-        # If user already exists, show clean message
-        if "already registered" in r.text.lower() or "duplicate" in r.text.lower():
-            return None, "This Staff ID is already registered. Use Sign in."
-        return None, f"Registration failed: {r.status_code}"
-
-    user_obj = r.json()
-    user_id = user_obj.get("id") or user_obj.get("user", {}).get("id")
-    if not user_id:
-        # some responses wrap differently
-        return None, "Registration failed (no user id returned)."
-
-    # 2) Insert users_profile
-    payload = {
-        "user_id": user_id,
-        "hospital_code": inv["hospital_code"],
-        "role": inv["role"],
-        "staff_id": staff_id,
-        "created_at": _now_utc().isoformat(),
-    }
-    rr = sb_rest_post("users_profile", payload, jwt=None, service=True)
-    if rr.status_code not in (201, 200):
-        return None, f"Profile creation failed: {rr.status_code}"
-
-    # 3) Consume invite
-    try:
-        consume_invite(invite_id=inv["id"], used_by=user_id)
-    except Exception:
-        pass
-
-    return {"user_id": user_id, "hospital_code": inv["hospital_code"], "role": inv["role"], "staff_id": staff_id}, None
-
-# ============================================================
-# 9) SIGN IN
-# ============================================================
-
-def sign_in_staff(staff_id: str, password: str):
-    staff_id = staff_id.strip()
-    email = _staff_email(staff_id)
-    r = sb_auth_sign_in(email=email, password=password)
-    if r.status_code != 200:
-        return None, "Invalid Staff ID or password."
-
-    token = r.json().get("access_token")
-    if not token:
-        return None, "Login failed (no token)."
-
-    # get user
-    u = sb_auth_get_user(token)
-    if u.status_code != 200:
-        return None, "Login failed (user fetch)."
-    user_obj = u.json()
-    user_id = user_obj.get("id")
-
-    # fetch profile (service role to be robust)
-    prof = fetch_profile_by_user_id(user_id, jwt=None, service=True)
-    if not prof:
-        return None, "Profile not found. Contact admin."
-
-    return {"jwt": token, "user": user_obj, "profile": prof}, None
-
-# ============================================================
-# 10) SER0LOGY ENGINE CONSTANTS (your original logic preserved)
-# ============================================================
-
+# --------------------------------------------------------------------------
+# 2) CONSTANTS
+# --------------------------------------------------------------------------
 AGS = ["D","C","E","c","e","Cw","K","k","Kpa","Kpb","Jsa","Jsb","Fya","Fyb","Jka","Jkb","Lea","Leb","P1","M","N","S","s","Lua","Lub","Xga"]
 DOSAGE = ["C","c","E","e","Fya","Fyb","Jka","Jkb","M","N","S","s"]
 PAIRS = {'C':'c','c':'C','E':'e','e':'E','Fya':'Fyb','Fyb':'Fya','Jka':'Jkb','Jkb':'Jka','M':'N','N':'M','S':'s','s':'S'}
@@ -499,10 +110,9 @@ ENZYME_DESTROYED = ["Fya","Fyb","M","N","S","s"]
 GRADES = ["0", "+1", "+2", "+3", "+4", "Hemolysis"]
 YN3 = ["Not Done", "Negative", "Positive"]
 
-# ============================================================
-# 11) LOCAL STATE (Panel/Screen/Lots)
-# ============================================================
-
+# --------------------------------------------------------------------------
+# 3) STATE
+# --------------------------------------------------------------------------
 default_panel11_df = pd.DataFrame([{"ID": f"C{i+1}", **{a:0 for a in AGS}} for i in range(11)])
 default_screen3_df = pd.DataFrame([{"ID": f"S{i}", **{a:0 for a in AGS}} for i in ["I","II","III"]])
 
@@ -523,6 +133,7 @@ if "lot_s" not in st.session_state:
 if "ext" not in st.session_state:
     st.session_state.ext = []
 
+# analysis persistence
 if "analysis_ready" not in st.session_state:
     st.session_state.analysis_ready = False
 if "analysis_payload" not in st.session_state:
@@ -530,13 +141,9 @@ if "analysis_payload" not in st.session_state:
 if "show_dat" not in st.session_state:
     st.session_state.show_dat = False
 
-if "confirmed_lock" not in st.session_state:
-    st.session_state.confirmed_lock = set()
-
-# ============================================================
-# 12) ENGINE HELPERS (your original logic preserved)
-# ============================================================
-
+# --------------------------------------------------------------------------
+# 4) HELPERS / ENGINE
+# --------------------------------------------------------------------------
 def normalize_grade(val) -> int:
     s = str(val).lower().strip()
     if s in ["0", "neg", "negative", "none"]:
@@ -549,7 +156,7 @@ def is_homozygous(ph, ag: str) -> bool:
     pair = PAIRS.get(ag)
     if not pair:
         return True
-    return (int(ph.get(ag,0))==1 and int(ph.get(pair,0))==0)
+    return (ph.get(ag,0)==1 and ph.get(pair,0)==0)
 
 def ph_has(ph, ag: str) -> bool:
     try:
@@ -651,14 +258,12 @@ def check_rule_three_only_on_discriminating(ag: str, combo: tuple, cells: list):
     for c in cells:
         ph = c["ph"]
         ag_pos = ph_has(ph, ag)
-
         if c["react"] == 1:
             if ag_pos and all(not ph_has(ph, o) for o in other):
                 p += 1
         else:
             if not ag_pos:
                 n += 1
-
     full = (p >= 3 and n >= 3)
     mod  = (p >= 2 and n >= 3)
     return full, mod, p, n
@@ -735,22 +340,25 @@ def background_auto_resolution(background_list: list, active_not_excluded: set, 
 
     return auto_ruled_out, supported, inconclusive, no_disc
 
+# ---------------- Patient antigen-negative check reminder ----------------
 def patient_antigen_negative_reminder(antibodies: list, strong: bool = True) -> str:
     if not antibodies:
         return ""
+
     uniq = []
     for a in antibodies:
         if a and a not in uniq:
             uniq.append(a)
+
     uniq = [a for a in uniq if a not in IGNORED_AGS]
     if not uniq:
         return ""
 
-    title = "Final confirmation step (Patient antigen check)" if strong else "Before final reporting (Patient antigen check)"
-    box_class = "hx-danger" if strong else "hx-warn"
-    intro = ("Confirm the patient is ANTIGEN-NEGATIVE for the corresponding antigen(s) to support the antibody identification."
+    title = "✅ Final confirmation step (Patient antigen check)" if strong else "⚠️ Before final reporting (Patient antigen check)"
+    box_class = "clinical-danger" if strong else "clinical-alert"
+    intro = ("Confirm the patient is <b>ANTIGEN-NEGATIVE</b> for the corresponding antigen(s) to support the antibody identification."
              if strong else
-             "Before you finalize/report, confirm the patient is ANTIGEN-NEGATIVE for the corresponding antigen(s).")
+             "Before you finalize/report, confirm the patient is <b>ANTIGEN-NEGATIVE</b> for the corresponding antigen(s).")
 
     bullets = "".join([f"<li>Anti-{ag} → verify patient is <b>{ag}-negative</b> (phenotype/genotype; pre-transfusion sample preferred).</li>" for ag in uniq])
 
@@ -764,420 +372,246 @@ def patient_antigen_negative_reminder(antibodies: list, strong: bool = True) -> 
     </div>
     """
 
+# ---------------- Anti-G alert (D + C pattern) ----------------
 def anti_g_alert_html(strong: bool = False) -> str:
-    box = "hx-danger" if strong else "hx-warn"
+    box = "clinical-danger" if strong else "clinical-alert"
     return f"""
     <div class='{box}'>
-      <b>Consider Anti-G (D + C pattern)</b><br>
+      ⚠️ <b>Consider Anti-G (D + C pattern)</b><br>
       Anti-G may mimic <b>Anti-D + Anti-C</b>. If clinically relevant (especially pregnancy / RhIG decision), do not label as true Anti-D until Anti-G is excluded.<br>
       <b>Suggested next steps (per SOP/reference lab):</b>
       <ol style="margin-top:6px;">
         <li>Assess if this impacts management (e.g., RhIG eligibility).</li>
-        <li>Perform differential workup using appropriate adsorption/elution strategy if available, or refer to reference lab.</li>
+        <li>Perform differential workup using appropriate adsorption/elution strategy (D+ C− and D− C+ cells) if available, or refer to reference lab.</li>
         <li>Use pre-transfusion sample when possible.</li>
       </ol>
     </div>
     """
 
-def confirmed_conflict_map(confirmed_set: set, cells: list):
-    conflicts = {}
-    for ab in confirmed_set:
-        bad_labels = []
-        for c in cells:
-            if c["react"] == 1:
-                if not ph_has(c["ph"], ab):
-                    bad_labels.append(c["label"])
-        if bad_labels:
-            conflicts[ab] = bad_labels
-    return conflicts
-
-# ============================================================
-# 13) SUPERVISOR PASTE/EDIT helpers (your original preserved)
-# ============================================================
-
+# --------------------------------------------------------------------------
+# 4.5) SUPERVISOR: Copy/Paste Parser (Option A: 26 columns in AGS order)
+# --------------------------------------------------------------------------
 def _token_to_01(tok: str) -> int:
     s = str(tok).strip().lower()
     if s in ("", "0", "neg", "negative", "nt", "n/t", "na", "n/a", "-", "—"):
         return 0
+    # anything that looks positive
     if "+" in s:
         return 1
     if s in ("1", "1+", "2", "2+", "3", "3+", "4", "4+", "pos", "positive", "w", "wk", "weak", "w+", "wf"):
         return 1
+    # fallback: if it contains digits other than 0 treat as positive
     for ch in s:
         if ch.isdigit() and ch != "0":
             return 1
     return 0
 
 def parse_paste_table(txt: str, expected_rows: int, id_prefix: str, id_list=None):
+    """
+    Expect each line to contain 26 tab-separated tokens in AGS order.
+    If more than 26 tokens exist, take the LAST 26 (common when row starts with labels).
+    """
     rows = [r for r in str(txt).strip().splitlines() if r.strip()]
     data = []
+
     if id_list is None:
         id_list = [f"{id_prefix}{i+1}" for i in range(expected_rows)]
+
     for i in range(min(expected_rows, len(rows))):
         parts = rows[i].split("\t")
         vals = [_token_to_01(p) for p in parts]
+
+        # if extra leading columns exist, keep last 26
         if len(vals) > len(AGS):
             vals = vals[-len(AGS):]
+        # pad to 26 if short
         while len(vals) < len(AGS):
             vals.append(0)
+
         d = {"ID": id_list[i]}
         for j, ag in enumerate(AGS):
             d[ag] = int(vals[j])
         data.append(d)
 
     df = pd.DataFrame(data)
+    # if not enough rows pasted, keep remaining rows from current state (safer)
     if len(df) < expected_rows:
+        # create empty rows for missing lines (won't overwrite existing unless user wants)
         for k in range(len(df), expected_rows):
             d = {"ID": id_list[k], **{ag: 0 for ag in AGS}}
             df = pd.concat([df, pd.DataFrame([d])], ignore_index=True)
+
     return df, f"Parsed {min(expected_rows, len(rows))} row(s). Expecting {expected_rows}."
 
 def _checkbox_column_config():
     return {
         ag: st.column_config.CheckboxColumn(
-            ag, help="Tick = Antigen Present (1). Untick = Absent (0).", default=False
+            ag,
+            help="Tick = Antigen Present (1). Untick = Absent (0).",
+            default=False
         )
         for ag in AGS
     }
 
-# ============================================================
-# 14) AUTH UI (Login / Register)
-# ============================================================
+# --------------------------------------------------------------------------
+# 5) SIDEBAR
+# --------------------------------------------------------------------------
+with st.sidebar:
+    st.image("https://cdn-icons-png.flaticon.com/512/2966/2966327.png", width=60)
+    nav = st.radio("Menu", ["Workstation", "Supervisor"], key="nav_menu")
+    if st.button("RESET DATA", key="btn_reset"):
+        st.session_state.ext = []
+        st.session_state.analysis_ready = False
+        st.session_state.analysis_payload = None
+        st.session_state.show_dat = False
+        st.rerun()
 
-def ui_auth():
-    hero(None, None)
+# --------------------------------------------------------------------------
+# 6) SUPERVISOR
+# --------------------------------------------------------------------------
+if nav == "Supervisor":
+    st.title("Config")
 
-    st.markdown('<div class="hx-card">', unsafe_allow_html=True)
-    tabs = st.tabs(["Sign in", "First-time registration (Invite Code)"])
+    if st.text_input("Password", type="password", key="sup_pass") == "admin123":
 
-    with tabs[0]:
-        c1, c2 = st.columns([1, 1])
-        staff_id = c1.text_input("Staff ID", placeholder="e.g., 51599657", key="login_staff")
-        password = c2.text_input("Password", type="password", key="login_pwd")
+        st.subheader("1) Lot Setup")
+        c1, c2 = st.columns(2)
+        lp = c1.text_input("ID Panel Lot#", value=st.session_state.lot_p, key="lot_p_in")
+        ls = c2.text_input("Screen Panel Lot#", value=st.session_state.lot_s, key="lot_s_in")
 
-        if st.button("Sign in", type="primary", use_container_width=True):
-            if not _valid_staff_id(staff_id):
-                st.error("Invalid Staff ID format.")
-            elif not password or len(password) < 6:
-                st.error("Password must be at least 6 characters.")
-            else:
-                res, err = sign_in_staff(staff_id, password)
-                if err:
-                    st.error(err)
-                else:
-                    auth_set(res["jwt"], res["user"], res["profile"])
+        if st.button("Save Lots (Local)", key="save_lots_local"):
+            st.session_state.lot_p = lp
+            st.session_state.lot_s = ls
+            st.success("Saved locally. Press **Save to GitHub** to publish.")
 
-    with tabs[1]:
-        c1, c2 = st.columns([1, 1])
-        inv = c1.text_input("Invite Code", placeholder="8 characters", key="reg_inv").strip().upper()
-        staff_id = c2.text_input("Staff ID", placeholder="Your staff ID", key="reg_staff")
-
-        p1, p2 = st.columns([1, 1])
-        pwd = p1.text_input("Create Password", type="password", key="reg_pwd1")
-        pwd2 = p2.text_input("Confirm Password", type="password", key="reg_pwd2")
-
-        if st.button("Register", type="primary", use_container_width=True):
-            if not inv or len(inv) < 6:
-                st.error("Enter a valid Invite Code.")
-            elif not _valid_staff_id(staff_id):
-                st.error("Invalid Staff ID format.")
-            elif not pwd or len(pwd) < 6:
-                st.error("Password must be at least 6 characters.")
-            elif pwd != pwd2:
-                st.error("Passwords do not match.")
-            else:
-                out, err = register_with_invite(inv, staff_id, pwd)
-                if err:
-                    st.error(err)
-                else:
-                    st.success("Registered successfully. Please sign in now.")
-    st.markdown("</div>", unsafe_allow_html=True)
-
-# ============================================================
-# 15) ADMIN / SUPERVISOR UI (Invite generator + Hospitals + Users)
-# ============================================================
-
-def ui_admin_supervisor_panel():
-    role = st.session_state.role
-    hospital_code = st.session_state.hospital_code
-    hero(role, hospital_code)
-
-    # top actions
-    top = st.columns([1.2, 1, 1, 1])
-    top[0].markdown(f"<div class='hx-alert'><b>Signed in</b><br>Staff ID: <b>{st.session_state.staff_id}</b><br>Role: <b>{role.upper()}</b></div>", unsafe_allow_html=True)
-    if top[3].button("Logout", use_container_width=True):
-        auth_clear()
-
-    # Admin can manage hospitals + supervisors
-    if role == "admin":
-        st.markdown("<div class='hx-card'>", unsafe_allow_html=True)
-        st.subheader("Admin Console")
-
-        t1, t2, t3 = st.tabs(["Hospitals", "Create Supervisor Invite", "Create Staff Invite (Any Hospital)"])
-
-        with t1:
-            st.caption("Add or review hospitals. (Table: public.hospitals)")
-            c1, c2 = st.columns([1, 1])
-            new_code = c1.text_input("Hospital Code", placeholder="e.g., MCHTABUK")
-            new_name = c2.text_input("Hospital Name", placeholder="Maternity & Children Hospital - Tabuk")
-            if st.button("Add hospital", type="primary"):
-                if not new_code or not re.fullmatch(r"[A-Z0-9_]{3,32}", new_code.strip().upper()):
-                    st.error("Hospital code must be A-Z, 0-9, underscore (3-32 chars).")
-                else:
-                    payload = {"code": new_code.strip().upper(), "name": new_name.strip(), "is_active": True}
-                    r = sb_rest_post("hospitals", payload, jwt=None, service=True)
-                    if r.status_code in (200, 201):
-                        st.success("Hospital added.")
-                    else:
-                        st.error(f"Failed: {r.status_code}")
-
-            # list
-            rr = sb_rest_get("hospitals", params={"select": "code,name,is_active", "order": "code.asc"}, jwt=None, service=True)
-            if rr.status_code == 200:
-                st.dataframe(pd.DataFrame(rr.json()), use_container_width=True, hide_index=True)
-
-        with t2:
-            st.caption("Generate an Invite Code for a Supervisor (first-time registration).")
-            hospitals = sb_rest_get("hospitals", params={"select":"code,name", "order":"code.asc"}, jwt=None, service=True)
-            options = []
-            if hospitals.status_code == 200:
-                for h in hospitals.json():
-                    options.append(f"{h['code']} — {h.get('name','')}")
-            pick = st.selectbox("Target hospital", options=options if options else ["(no hospitals)"])
-            exp_h = st.selectbox("Expires in", [24, 72, 168, 336], index=2, format_func=lambda x: f"{x} hours")
-            if st.button("Generate Supervisor Invite", type="primary"):
-                if "(no hospitals)" in pick:
-                    st.error("Add a hospital first.")
-                else:
-                    hcode = pick.split("—")[0].strip()
-                    try:
-                        code = create_invite(hospital_code=hcode, role="supervisor",
-                                             created_by_user_id=st.session_state.user["id"],
-                                             expires_hours=int(exp_h))
-                        st.success(f"Invite Code: {code}")
-                        st.info("Send this code to the Supervisor to register (Invite Code + Staff ID + Password).")
-                    except Exception as e:
-                        st.error(str(e))
-
-        with t3:
-            st.caption("Generate Staff invite for any hospital (Admin override).")
-            hospitals = sb_rest_get("hospitals", params={"select":"code,name", "order":"code.asc"}, jwt=None, service=True)
-            options = []
-            if hospitals.status_code == 200:
-                for h in hospitals.json():
-                    options.append(f"{h['code']} — {h.get('name','')}")
-            pick2 = st.selectbox("Hospital", options=options if options else ["(no hospitals)"], key="adm_staff_inv_h")
-            lock_staff = st.text_input("Lock to specific Staff ID (optional)", placeholder="leave empty to allow any", key="adm_lock_staff")
-            exp_h2 = st.selectbox("Expires in ", [24, 72, 168, 336], index=2, format_func=lambda x: f"{x} hours", key="adm_staff_exp")
-            if st.button("Generate Staff Invite", type="primary"):
-                if "(no hospitals)" in pick2:
-                    st.error("Add a hospital first.")
-                else:
-                    hcode = pick2.split("—")[0].strip()
-                    try:
-                        code = create_invite(hospital_code=hcode, role="staff",
-                                             created_by_user_id=st.session_state.user["id"],
-                                             expires_hours=int(exp_h2),
-                                             staff_id=(lock_staff.strip() if lock_staff.strip() else None))
-                        st.success(f"Invite Code: {code}")
-                    except Exception as e:
-                        st.error(str(e))
-
-        st.markdown("</div>", unsafe_allow_html=True)
-
-    # Supervisor can create staff invites for their hospital
-    if role in ("admin", "supervisor"):
-        st.markdown("<div class='hx-card'>", unsafe_allow_html=True)
-        st.subheader("Invite Generator")
-
-        st.caption("Generate Invite Codes for first-time registration.")
-
-        c1, c2, c3 = st.columns([1, 1, 1])
-        inv_role = "staff" if role == "supervisor" else c1.selectbox("Role", ["staff", "supervisor"], index=0)
-        exp = c2.selectbox("Expires in", [24, 72, 168, 336], index=2, format_func=lambda x: f"{x} hours")
-        lock_staff = c3.text_input("Lock to Staff ID (optional)", placeholder="optional")
-
-        target_hospital = hospital_code
-        if role == "admin":
-            hospitals = sb_rest_get("hospitals", params={"select":"code,name","order":"code.asc"}, jwt=None, service=True)
-            options = []
-            if hospitals.status_code == 200:
-                for h in hospitals.json():
-                    options.append(f"{h['code']} — {h.get('name','')}")
-            pick = st.selectbox("Target hospital", options=options if options else ["(no hospitals)"])
-            if "(no hospitals)" not in pick:
-                target_hospital = pick.split("—")[0].strip()
-
-        if st.button("Generate Invite Code", type="primary"):
-            try:
-                code = create_invite(hospital_code=target_hospital, role=inv_role,
-                                     created_by_user_id=st.session_state.user["id"],
-                                     expires_hours=int(exp),
-                                     staff_id=(lock_staff.strip() if lock_staff.strip() else None))
-                st.success(f"Invite Code: {code}")
-            except Exception as e:
-                st.error(str(e))
-
-        # Show active invites for this hospital (admin can see all by filtering with hospital)
         st.write("---")
-        st.caption("Active invites (latest 50)")
-        params = {"select":"code,role,hospital_code,created_at,expires_at,is_active,used_at,staff_id", "order":"created_at.desc", "limit":"50"}
-        if role != "admin":
-            params["hospital_code"] = f"eq.{hospital_code}"
-        r = sb_rest_get("invites", params=params, jwt=None, service=True)
-        if r.status_code == 200:
-            df = pd.DataFrame(r.json())
-            st.dataframe(df, use_container_width=True, hide_index=True)
+        st.subheader("2) Monthly Grid Update (Copy/Paste + Safe Manual Edit)")
+        st.info("Option A active: Paste **26 columns** exactly in **AGS order**. "
+                "Rows should be tab-separated. If your paste includes extra leading columns, the app will take the **last 26**.")
 
-        st.markdown("</div>", unsafe_allow_html=True)
+        tab_paste, tab_edit = st.tabs(["📋 Copy/Paste Update", "✍️ Manual Edit (Safe)"])
 
-# ============================================================
-# 16) APP SIDEBAR NAV (Role-based)
-# ============================================================
+        with tab_paste:
+            cA, cB = st.columns(2)
 
-def sidebar_nav():
-    role = st.session_state.role
-    items = ["Workstation"]
-    if role in ("admin", "supervisor"):
-        items += ["Supervisor Panel Setup"]
-    if role in ("admin", "supervisor"):
-        items += ["Admin/Supervisor Console"]
-    return st.sidebar.radio("Navigation", items)
+            with cA:
+                st.markdown("### Panel 11 (Paste)")
+                p_txt = st.text_area("Paste 11 rows (tab-separated; 26 columns in AGS order)", height=170, key="p11_paste")
+                if st.button("✅ Update Panel 11 from Paste", key="upd_p11_paste"):
+                    df_new, msg = parse_paste_table(p_txt, expected_rows=11, id_prefix="C")
+                    # keep exact IDs C1..C11 (as in default)
+                    df_new["ID"] = [f"C{i+1}" for i in range(11)]
+                    st.session_state.panel11_df = df_new.copy()
+                    st.success(msg + " Panel 11 updated locally.")
 
-# ============================================================
-# 17) SUPERVISOR PANEL (your existing GitHub publish logic)
-# ============================================================
+                st.caption("Preview (Panel 11)")
+                st.dataframe(st.session_state.panel11_df.iloc[:, :15], use_container_width=True)
 
-def ui_supervisor_panel():
-    role = st.session_state.role
-    hospital_code = st.session_state.hospital_code
-    hero(role, hospital_code)
+            with cB:
+                st.markdown("### Screen 3 (Paste)")
+                s_txt = st.text_area("Paste 3 rows (tab-separated; 26 columns in AGS order)", height=170, key="p3_paste")
+                if st.button("✅ Update Screen 3 from Paste", key="upd_p3_paste"):
+                    df_new, msg = parse_paste_table(s_txt, expected_rows=3, id_prefix="S", id_list=["SI", "SII", "SIII"])
+                    df_new["ID"] = ["SI", "SII", "SIII"]
+                    st.session_state.screen3_df = df_new.copy()
+                    st.success(msg + " Screen 3 updated locally.")
 
-    st.markdown("<div class='hx-card'>", unsafe_allow_html=True)
-    st.subheader("Panel Configuration (Supervisor)")
+                st.caption("Preview (Screen 3)")
+                st.dataframe(st.session_state.screen3_df.iloc[:, :15], use_container_width=True)
 
-    c1, c2, c3 = st.columns([1.2, 1.2, 1])
-    c1.write(f"**Hospital:** {hospital_code}  \n**Role:** {role.upper()}")
-    if c3.button("Logout", use_container_width=True):
-        auth_clear()
+            st.markdown("""
+            <div class='clinical-alert'>
+            ⚠️ Tip: لو الـPDF فيه Labels قبل الداتا، paste غالبًا هيبقى فيه أعمدة زيادة في البداية.
+            البرنامج تلقائيًا بياخد <b>آخر 26 عمود</b> ويهمل أي حاجة قبلهم.
+            </div>
+            """, unsafe_allow_html=True)
 
-    st.write("---")
-    st.markdown("<div class='hx-alert'><b>Lot Setup</b><br>Update lots locally then publish to GitHub to sync all devices.</div>", unsafe_allow_html=True)
+        with tab_edit:
+            st.markdown("### Manual Edit (Supervisor only) — Safe mode")
+            st.markdown("""
+            <div class='clinical-info'>
+            ✅ Safe rules applied: <b>ID locked</b> + <b>No add/remove rows</b> + <b>Only 0/1 via checkboxes</b>.<br>
+            استخدم ده فقط للتصحيح اليدوي بعد الـCopy/Paste.
+            </div>
+            """, unsafe_allow_html=True)
 
-    cA, cB = st.columns(2)
-    lp = cA.text_input("ID Panel Lot#", value=st.session_state.lot_p, key="lot_p_in")
-    ls = cB.text_input("Screen Panel Lot#", value=st.session_state.lot_s, key="lot_s_in")
+            t1, t2 = st.tabs(["Panel 11 (Edit)", "Screen 3 (Edit)"])
 
-    if st.button("Save Lots (Local)"):
-        st.session_state.lot_p = lp
-        st.session_state.lot_s = ls
-        st.success("Saved locally. Publish to GitHub to sync all devices.")
+            with t1:
+                edited_p11 = st.data_editor(
+                    st.session_state.panel11_df,
+                    use_container_width=True,
+                    num_rows="fixed",
+                    disabled=["ID"],
+                    column_config=_checkbox_column_config(),
+                    key="editor_panel11"
+                )
+                colx1, colx2 = st.columns([1, 2])
+                with colx1:
+                    if st.button("⚠️ Apply Manual Changes (Panel 11)", type="primary", key="apply_p11"):
+                        st.session_state.panel11_df = edited_p11.copy()
+                        st.success("Panel 11 updated safely (local).")
+                with colx2:
+                    st.caption("Applies only when you click Apply (prevents accidental changes).")
 
-    st.write("---")
-    st.subheader("Monthly Grid Update")
-    st.caption("Paste 26 columns in AGS order. If there are extra columns, the app takes the LAST 26.")
+            with t2:
+                edited_p3 = st.data_editor(
+                    st.session_state.screen3_df,
+                    use_container_width=True,
+                    num_rows="fixed",
+                    disabled=["ID"],
+                    column_config=_checkbox_column_config(),
+                    key="editor_screen3"
+                )
+                coly1, coly2 = st.columns([1, 2])
+                with coly1:
+                    if st.button("⚠️ Apply Manual Changes (Screen 3)", type="primary", key="apply_p3"):
+                        st.session_state.screen3_df = edited_p3.copy()
+                        st.success("Screen 3 updated safely (local).")
+                with coly2:
+                    st.caption("Applies only when you click Apply (prevents accidental changes).")
 
-    tab_paste, tab_edit = st.tabs(["Copy/Paste Update", "Manual Edit (Safe)"])
+        st.write("---")
+        st.subheader("3) Publish to ALL devices (Save to GitHub)")
+        st.warning("قبل النشر: راجع اللوت + راجع الجداول بسرعة (Panel/Screen).")
 
-    with tab_paste:
-        cA, cB = st.columns(2)
+        confirm_pub = st.checkbox("I confirm Panel/Screen data were reviewed and are correct", key="confirm_publish")
 
-        with cA:
-            st.markdown("**Panel 11 (Paste)**")
-            p_txt = st.text_area("Paste 11 rows (tab-separated)", height=170, key="p11_paste")
-            if st.button("Update Panel 11 from Paste", type="primary"):
-                df_new, msg = parse_paste_table(p_txt, expected_rows=11, id_prefix="C")
-                df_new["ID"] = [f"C{i+1}" for i in range(11)]
-                st.session_state.panel11_df = df_new.copy()
-                st.success(msg + " Panel 11 updated locally.")
-            st.dataframe(st.session_state.panel11_df.iloc[:, :15], use_container_width=True)
+        if st.button("💾 Save to GitHub (Commit)", key="save_gh"):
+            if not confirm_pub:
+                st.error("Confirmation required before publishing.")
+            else:
+                try:
+                    lots_json = json.dumps({"lot_p": st.session_state.lot_p, "lot_s": st.session_state.lot_s},
+                                           ensure_ascii=False, indent=2)
+                    github_upsert_file("data/p11.csv", st.session_state.panel11_df.to_csv(index=False), "Update monthly p11 panel")
+                    github_upsert_file("data/p3.csv",  st.session_state.screen3_df.to_csv(index=False), "Update monthly p3 screen")
+                    github_upsert_file("data/lots.json", lots_json, "Update monthly lots")
+                    st.success("✅ Published to GitHub successfully.")
+                except Exception as e:
+                    st.error(f"❌ Save failed: {e}")
 
-        with cB:
-            st.markdown("**Screen 3 (Paste)**")
-            s_txt = st.text_area("Paste 3 rows (tab-separated)", height=170, key="p3_paste")
-            if st.button("Update Screen 3 from Paste", type="primary"):
-                df_new, msg = parse_paste_table(s_txt, expected_rows=3, id_prefix="S", id_list=["SI","SII","SIII"])
-                df_new["ID"] = ["SI","SII","SIII"]
-                st.session_state.screen3_df = df_new.copy()
-                st.success(msg + " Screen 3 updated locally.")
-            st.dataframe(st.session_state.screen3_df.iloc[:, :15], use_container_width=True)
+# --------------------------------------------------------------------------
+# 7) WORKSTATION
+# --------------------------------------------------------------------------
+else:
+    st.markdown("""
+    <div class='hospital-logo'>
+        <h2>Maternity & Children Hospital - Tabuk</h2>
+        <h4 style='color:#555'>Blood Bank Serology Unit</h4>
+    </div>
+    """, unsafe_allow_html=True)
 
-    with tab_edit:
-        st.markdown("<div class='hx-alert'><b>Safe rules:</b> ID locked • Fixed rows • 0/1 only via checkboxes.</div>", unsafe_allow_html=True)
-
-        t1, t2 = st.tabs(["Panel 11 (Edit)", "Screen 3 (Edit)"])
-
-        with t1:
-            edited_p11 = st.data_editor(
-                st.session_state.panel11_df,
-                use_container_width=True,
-                num_rows="fixed",
-                disabled=["ID"],
-                column_config=_checkbox_column_config(),
-                key="editor_panel11"
-            )
-            if st.button("Apply Manual Changes (Panel 11)", type="primary"):
-                st.session_state.panel11_df = edited_p11.copy()
-                st.success("Panel 11 updated safely (local).")
-
-        with t2:
-            edited_p3 = st.data_editor(
-                st.session_state.screen3_df,
-                use_container_width=True,
-                num_rows="fixed",
-                disabled=["ID"],
-                column_config=_checkbox_column_config(),
-                key="editor_screen3"
-            )
-            if st.button("Apply Manual Changes (Screen 3)", type="primary"):
-                st.session_state.screen3_df = edited_p3.copy()
-                st.success("Screen 3 updated safely (local).")
-
-    st.write("---")
-    st.subheader("Publish to ALL devices (Save to GitHub)")
-    confirm_pub = st.checkbox("I confirm Panel/Screen data were reviewed and are correct", key="confirm_publish")
-
-    if st.button("Save to GitHub (Commit)", type="primary"):
-        if not confirm_pub:
-            st.error("Confirmation required before publishing.")
-        else:
-            try:
-                lots_json = json.dumps({"lot_p": st.session_state.lot_p, "lot_s": st.session_state.lot_s}, ensure_ascii=False, indent=2)
-                github_upsert_file("data/p11.csv", st.session_state.panel11_df.to_csv(index=False), "Update monthly p11 panel")
-                github_upsert_file("data/p3.csv",  st.session_state.screen3_df.to_csv(index=False), "Update monthly p3 screen")
-                github_upsert_file("data/lots.json", lots_json, "Update monthly lots")
-                st.success("Published to GitHub successfully.")
-            except Exception as e:
-                st.error(f"Save failed: {e}")
-
-    st.markdown("</div>", unsafe_allow_html=True)
-
-# ============================================================
-# 18) WORKSTATION UI (your original, with small visual cleanup)
-# ============================================================
-
-def ui_workstation():
-    role = st.session_state.role
-    hospital_code = st.session_state.hospital_code
-    hero(role, hospital_code)
-
-    top = st.columns([1.2, 1, 1, 1])
-    top[0].markdown(f"<div class='hx-alert'><b>User</b><br>Staff ID: <b>{st.session_state.staff_id}</b><br>Role: <b>{role.upper()}</b></div>", unsafe_allow_html=True)
-    if top[3].button("Logout", use_container_width=True):
-        auth_clear()
-
-    lp_txt = st.session_state.lot_p if st.session_state.lot_p else "REQUIRED"
-    ls_txt = st.session_state.lot_s if st.session_state.lot_s else "REQUIRED"
-    st.markdown(f"<div class='hx-card'><span class='hx-pill'>ID Panel Lot: {lp_txt}</span> &nbsp; <span class='hx-pill'>Screen Lot: {ls_txt}</span></div>", unsafe_allow_html=True)
-
-    st.write("")
-    st.markdown("<div class='hx-card'>", unsafe_allow_html=True)
+    lp_txt = st.session_state.lot_p if st.session_state.lot_p else "⚠️ REQUIRED"
+    ls_txt = st.session_state.lot_s if st.session_state.lot_s else "⚠️ REQUIRED"
+    st.markdown(f"<div class='lot-bar'><span>ID Panel Lot: {lp_txt}</span> | <span>Screen Lot: {ls_txt}</span></div>",
+                unsafe_allow_html=True)
 
     top1, top2, top3, top4 = st.columns(4)
-    _ = top1.text_input("Patient Name", key="pt_name")
+    _ = top1.text_input("Name", key="pt_name")
     _ = top2.text_input("MRN", key="pt_mrn")
-    _ = top3.text_input("Technologist", key="tech_nm")
-    _ = top4.date_input("Run Date", value=date.today(), key="run_dt")
+    _ = top3.text_input("Tech", key="tech_nm")
+    _ = top4.date_input("Date", value=date.today(), key="run_dt")
 
     with st.form("main_form", clear_on_submit=False):
         st.write("### Reaction Entry")
@@ -1188,18 +622,24 @@ def ui_workstation():
             ac_res = st.radio("Auto Control (AC)", ["Negative", "Positive"], key="rx_ac")
 
             recent_tx = st.checkbox("Recent transfusion (≤ 4 weeks)?", value=False, key="recent_tx")
+
             if recent_tx:
                 st.markdown("""
-                <div class='hx-danger'>
-                <b>RECENT TRANSFUSION FLAGGED</b><br>
-                Consider <b>DHTR</b> / anamnestic alloantibody response if clinically compatible.
+                <div class='clinical-danger'>
+                🩸 <b>RECENT TRANSFUSION FLAGGED</b><br>
+                ⚠️ Consider <b>Delayed Hemolytic Transfusion Reaction (DHTR)</b> / anamnestic alloantibody response if compatible with clinical picture.<br>
+                <ul>
+                  <li>Review Hb trend, hemolysis markers (bilirubin/LDH/haptoglobin), DAT as indicated.</li>
+                  <li>Compare pre- vs post-transfusion samples if available.</li>
+                  <li>Escalate early if new alloantibody suspected.</li>
+                </ul>
                 </div>
                 """, unsafe_allow_html=True)
 
             st.write("Screening")
-            s_I   = st.selectbox("Screen I", GRADES, key="rx_sI")
-            s_II  = st.selectbox("Screen II", GRADES, key="rx_sII")
-            s_III = st.selectbox("Screen III", GRADES, key="rx_sIII")
+            s_I   = st.selectbox("Scn I", GRADES, key="rx_sI")
+            s_II  = st.selectbox("Scn II", GRADES, key="rx_sII")
+            s_III = st.selectbox("Scn III", GRADES, key="rx_sIII")
 
         with R:
             st.write("Panel Reactions")
@@ -1218,11 +658,11 @@ def ui_workstation():
                 p10 = st.selectbox("10", GRADES, key="rx_p10")
                 p11 = st.selectbox("11", GRADES, key="rx_p11")
 
-        run_btn = st.form_submit_button("Run Analysis", use_container_width=True)
+        run_btn = st.form_submit_button("🚀 Run Analysis", use_container_width=True)
 
     if run_btn:
         if not st.session_state.lot_p or not st.session_state.lot_s:
-            st.error("Lots are not configured by Supervisor.")
+            st.error("⛔ Lots not configured by Supervisor.")
             st.session_state.analysis_ready = False
             st.session_state.analysis_payload = None
             st.session_state.show_dat = False
@@ -1236,6 +676,7 @@ def ui_workstation():
                 "recent_tx": recent_tx,
             }
             st.session_state.analysis_ready = True
+
             ac_negative = (ac_res == "Negative")
             all_rx = all_reactive_pattern(in_p, in_s)
             st.session_state.show_dat = bool(all_rx and (not ac_negative))
@@ -1249,37 +690,48 @@ def ui_workstation():
         ac_negative = (ac_res == "Negative")
         all_rx = all_reactive_pattern(in_p, in_s)
 
+        # --------------------------------------------------------------
         # PAN-REACTIVE LOGIC
+        # --------------------------------------------------------------
         if all_rx and ac_negative:
             tx_note = ""
             if recent_tx:
-                tx_note = "<li><b>Recent transfusion ≤ 4 weeks</b>: consider DHTR/anamnestic response; compare pre/post samples and review hemolysis markers.</li>"
+                tx_note = """
+                <li style="color:#7a0000;"><b>Recent transfusion ≤ 4 weeks</b>: strongly consider <b>DHTR</b> / anamnestic alloantibody response if clinically compatible; compare pre/post samples and review hemolysis markers.</li>
+                """
 
             st.markdown(f"""
-            <div class='hx-danger'>
-            <b>Pan-reactive pattern with NEGATIVE autocontrol</b><br>
-            Most consistent with:
+            <div class='clinical-danger'>
+            ⚠️ <b>Pan-reactive pattern with NEGATIVE autocontrol</b><br>
+            <b>Most consistent with:</b>
             <ul>
-              <li><b>Alloantibody to a High-Incidence Antigen</b></li>
-              <li><b>OR multiple alloantibodies</b> not separable with current cells</li>
+              <li><b>Alloantibody to a High-Incidence (High-Frequency) Antigen</b></li>
+              <li><b>OR multiple alloantibodies</b> not separable with the current cells</li>
             </ul>
-            Action / Workflow:
+            <b>Action / Workflow (priority):</b>
             <ol>
-              <li><b>Stop</b> routine single-specificity interpretation.</li>
-              <li>Immediate referral to <b>Physician / Reference Lab</b>.</li>
-              <li>Request <b>extended phenotype / genotype</b>.</li>
-              <li>Initiate <b>rare compatible unit search</b>.</li>
-              <li>Use additional panels/different lots + selected cells if separation needed.</li>
+              <li><b>STOP</b> routine single-specificity interpretation (rule-out/rule-in is not valid here).</li>
+              <li>Immediate referral to <b>Blood Bank Physician / Reference Lab</b>.</li>
+              <li>Request <b>patient extended phenotype / genotype</b> (pre-transfusion if available).</li>
+              <li>Start <b>rare compatible unit search</b> (regional/national resources).</li>
+              <li><b>First-degree relatives donors</b>: consider typing/testing as potential compatible donors when clinically appropriate.</li>
+              <li>Use <b>additional panels / different lots</b> + <b>selected cells</b> to separate multiple alloantibodies if suspected.</li>
               {tx_note}
             </ol>
             </div>
             """, unsafe_allow_html=True)
 
+            st.markdown("""
+            <div class='clinical-info'>
+            🔎 <b>Note:</b> Routine specificity engine is intentionally paused for this pattern.
+            </div>
+            """, unsafe_allow_html=True)
+
         elif all_rx and (not ac_negative):
             st.markdown("""
-            <div class='hx-danger'>
-            <b>Pan-reactive pattern with POSITIVE autocontrol</b><br>
-            Requires <b>Monospecific DAT</b> pathway before any alloantibody claims.
+            <div class='clinical-danger'>
+            ⚠️ <b>Pan-reactive pattern with POSITIVE autocontrol</b><br>
+            Requires <b>Monospecific DAT</b> pathway (IgG / C3d / Control) before any alloantibody claims.
             </div>
             """, unsafe_allow_html=True)
 
@@ -1290,41 +742,52 @@ def ui_workstation():
             dat_ctl = c3.selectbox("DAT Control", YN3, key="dat_ctl")
 
             if dat_ctl == "Positive":
-                st.markdown("<div class='hx-danger'><b>DAT Control is POSITIVE</b> → invalid run / control failure. Repeat DAT.</div>", unsafe_allow_html=True)
+                st.markdown("""
+                <div class='clinical-danger'>
+                ⛔ <b>DAT Control is POSITIVE</b> → invalid run / control failure.<br>
+                Repeat DAT before interpretation.
+                </div>
+                """, unsafe_allow_html=True)
             elif dat_igg == "Not Done" or dat_c3d == "Not Done":
-                st.markdown("<div class='hx-warn'>Please perform <b>Monospecific DAT (IgG & C3d)</b> to proceed.</div>", unsafe_allow_html=True)
+                st.markdown("""
+                <div class='clinical-alert'>
+                ⚠️ Please perform <b>Monospecific DAT (IgG & C3d)</b> to proceed.
+                </div>
+                """, unsafe_allow_html=True)
             else:
                 if dat_igg == "Positive":
                     ads = "Auto-adsorption (ONLY if NOT recently transfused)" if not recent_tx else "Allo-adsorption (recent transfusion → avoid auto-adsorption)"
                     st.markdown(f"""
-                    <div class='hx-alert'>
-                    <b>DAT IgG POSITIVE</b> (C3d: {dat_c3d}) → consistent with <b>Warm Autoantibody / WAIHA</b>.<br><br>
-                    Workflow:
+                    <div class='clinical-info'>
+                    ✅ <b>DAT IgG POSITIVE</b> (C3d: {dat_c3d}) → consistent with <b>Warm Autoantibody / WAIHA</b>.<br><br>
+                    <b>Recommended Workflow:</b>
                     <ol>
-                      <li>Consider eluate when indicated.</li>
-                      <li>Perform adsorption: <b>{ads}</b>.</li>
-                      <li>Patient phenotype/genotype (pre-transfusion preferred).</li>
+                      <li>Consider <b>eluate</b> when indicated.</li>
+                      <li>Perform <b>adsorption</b>: <b>{ads}</b> to unmask alloantibodies.</li>
+                      <li>Patient <b>phenotype/genotype</b> (pre-transfusion preferred).</li>
                       <li>Transfuse per policy (antigen-matched / least-incompatible as appropriate).</li>
                     </ol>
                     </div>
                     """, unsafe_allow_html=True)
+
                 elif dat_igg == "Negative" and dat_c3d == "Positive":
                     st.markdown("""
-                    <div class='hx-alert'>
-                    <b>DAT IgG NEGATIVE + C3d POSITIVE</b> → complement-mediated process (e.g., cold autoantibody).<br><br>
-                    Actions:
+                    <div class='clinical-info'>
+                    ✅ <b>DAT IgG NEGATIVE + C3d POSITIVE</b> → complement-mediated process (e.g., cold autoantibody).<br><br>
+                    <b>Recommended Workflow:</b>
                     <ol>
-                      <li>Evaluate cold interference per SOP.</li>
+                      <li>Evaluate cold interference (pre-warm / thermal amplitude) per SOP.</li>
                       <li>Repeat as needed at 37°C.</li>
                       <li>Refer if clinically significant transfusion requirement.</li>
                     </ol>
                     </div>
                     """, unsafe_allow_html=True)
+
                 else:
                     st.markdown("""
-                    <div class='hx-warn'>
-                    <b>AC POSITIVE but DAT IgG & C3d NEGATIVE</b> → consider interference/technique issue (rouleaux/cold/reagent effects).<br><br>
-                    Actions:
+                    <div class='clinical-alert'>
+                    ⚠️ <b>AC POSITIVE but DAT IgG & C3d NEGATIVE</b> → consider in-vitro interference/technique issue (rouleaux, cold at RT, reagent effects).<br><br>
+                    <b>Recommended Actions:</b>
                     <ol>
                       <li>Repeat with proper technique; saline replacement if rouleaux suspected.</li>
                       <li>Pre-warm/37°C repeat if cold suspected.</li>
@@ -1333,22 +796,49 @@ def ui_workstation():
                     </div>
                     """, unsafe_allow_html=True)
 
-        if not all_rx:
+            st.markdown("""
+            <div class='clinical-info'>
+            🔎 <b>Note:</b> Routine specificity engine remains paused in pan-reactive cases until DAT pathway is addressed.
+            </div>
+            """, unsafe_allow_html=True)
+
+        if all_rx:
+            pass
+        else:
             cells = get_cells(in_p, in_s, st.session_state.ext)
             ruled = rule_out(in_p, in_s, st.session_state.ext)
             candidates = [a for a in AGS if a not in ruled and a not in IGNORED_AGS]
+            best = find_best_combo(candidates, cells, max_size=3)
 
-            st.write("---")
-            st.subheader("Conclusion")
+            st.subheader("Conclusion (Step 1: Rule-out / Rule-in)")
 
-            if st.session_state.confirmed_lock:
-                confirmed_locked = sorted(list(st.session_state.confirmed_lock))
-                st.markdown(f"<div class='hx-ok'><b>Resolved (LOCKED confirmed):</b> {', '.join([f'Anti-{a}' for a in confirmed_locked])}</div>", unsafe_allow_html=True)
+            if not best:
+                st.error("No resolved specificity from current data. Proceed with Selected Cells / Enhancement.")
+                poss_sig = [a for a in candidates if a not in INSIGNIFICANT_AGS][:12]
+                poss_cold = [a for a in candidates if a in INSIGNIFICANT_AGS][:6]
+                if poss_sig or poss_cold:
+                    st.markdown("### ⚠️ Not excluded yet (Needs more work — DO NOT confirm now):")
+                    if poss_sig:
+                        st.write("**Clinically significant possibilities:** " + ", ".join([f"Anti-{x}" for x in poss_sig]))
+                    if poss_cold:
+                        st.info("Cold/Insignificant possibilities: " + ", ".join([f"Anti-{x}" for x in poss_cold]))
 
-                remaining_other = [a for a in candidates if a not in st.session_state.confirmed_lock]
+            else:
+                sep_map = separability_map(best, cells)
+                resolved = [a for a in best if sep_map.get(a, False)]
+                needs_work = [a for a in best if not sep_map.get(a, False)]
+
+                if resolved:
+                    st.success("Resolved (pattern explained & separable): " + ", ".join([f"Anti-{a}" for a in resolved]))
+                if needs_work:
+                    st.warning("Pattern suggests these, but NOT separable yet (DO NOT confirm): " +
+                               ", ".join([f"Anti-{a}" for a in needs_work]))
+
+                remaining_other = [a for a in candidates if a not in best]
                 other_sig = [a for a in remaining_other if a not in INSIGNIFICANT_AGS]
                 other_cold = [a for a in remaining_other if a in INSIGNIFICANT_AGS]
-                active_not_excluded = set(confirmed_locked + other_sig + other_cold)
+
+                active_not_excluded = set(resolved + needs_work + other_sig + other_cold)
 
                 auto_ruled_out, supported_bg, inconclusive_bg, no_disc_bg = background_auto_resolution(
                     background_list=other_sig + other_cold,
@@ -1360,142 +850,107 @@ def ui_workstation():
                 other_cold_final = [a for a in other_cold if a not in auto_ruled_out]
 
                 if auto_ruled_out:
-                    st.markdown("### Auto Rule-out")
+                    st.markdown("### ✅ Auto Rule-out (from available discriminating cells):")
                     for ag, labs in auto_ruled_out.items():
-                        st.write(f"- **Anti-{ag} ruled out**: " + ", ".join(labs))
+                        st.write(f"- **Anti-{ag} ruled out** (discriminating cell(s) NEGATIVE): " + ", ".join(labs))
 
                 if supported_bg:
-                    st.markdown("### Background antibodies suggested (not confirmed)")
+                    st.markdown("### ⚠️ Background antibodies suggested by discriminating cells (NOT confirmed yet):")
                     for ag, labs in supported_bg.items():
-                        st.write(f"- **Anti-{ag} suspected**: " + ", ".join(labs))
+                        st.write(f"- **Anti-{ag} suspected** (discriminating cell(s) POSITIVE): " + ", ".join(labs))
 
                 if inconclusive_bg:
-                    st.markdown("### Inconclusive background")
+                    st.markdown("### ⚠️ Inconclusive background (mixed discriminating results):")
                     for ag, labs in inconclusive_bg.items():
-                        st.write(f"- **Anti-{ag} inconclusive**: " + ", ".join(labs))
+                        st.write(f"- **Anti-{ag} inconclusive** (mixed results): " + ", ".join(labs))
 
                 if other_sig_final or other_cold_final or no_disc_bg:
-                    st.markdown("### Not excluded yet")
+                    st.markdown("### ⚠️ Not excluded yet (background possibilities):")
                     if other_sig_final:
                         st.write("**Clinically significant:** " + ", ".join([f"Anti-{x}" for x in other_sig_final]))
                     if other_cold_final:
-                        st.write("**Cold/Insignificant:** " + ", ".join([f"Anti-{x}" for x in other_cold_final]))
+                        st.info("Cold/Insignificant: " + ", ".join([f"Anti-{x}" for x in other_cold_final]))
                     if no_disc_bg:
-                        st.warning("No discriminating cells available for: " + ", ".join([f"Anti-{x}" for x in no_disc_bg]))
+                        st.warning("No discriminating cells available in current panel/screen for: " +
+                                   ", ".join([f"Anti-{x}" for x in no_disc_bg]))
 
-                st.markdown(patient_antigen_negative_reminder(confirmed_locked, strong=True), unsafe_allow_html=True)
+                st.write("---")
+                st.subheader("Confirmation (Rule of Three) — Resolved & Separable only")
 
-                d_present = ("D" in st.session_state.confirmed_lock)
-                c_present = ("C" in st.session_state.confirmed_lock)
+                confirmation = {}
+                confirmed = set()
+                needs_more_for_confirmation = set()
+
+                if not resolved:
+                    st.info("No antibody is separable yet → DO NOT apply Rule of Three. Add discriminating selected cells.")
+                else:
+                    for a in resolved:
+                        full, mod, p_cnt, n_cnt = check_rule_three_only_on_discriminating(a, best, cells)
+                        confirmation[a] = (full, mod, p_cnt, n_cnt)
+                        if full or mod:
+                            confirmed.add(a)
+                        else:
+                            needs_more_for_confirmation.add(a)
+
+                    for a in resolved:
+                        full, mod, p_cnt, n_cnt = confirmation[a]
+                        if full:
+                            st.write(f"✅ **Anti-{a} CONFIRMED**: Full Rule (3+3) met on discriminating cells (P:{p_cnt} / N:{n_cnt})")
+                        elif mod:
+                            st.write(f"✅ **Anti-{a} CONFIRMED**: Modified Rule (2+3) met on discriminating cells (P:{p_cnt} / N:{n_cnt})")
+                        else:
+                            st.write(f"⚠️ **Anti-{a} NOT confirmed yet**: need more discriminating cells (P:{p_cnt} / N:{n_cnt})")
+
+                if confirmed:
+                    st.markdown(patient_antigen_negative_reminder(sorted(list(confirmed)), strong=True), unsafe_allow_html=True)
+                elif resolved:
+                    st.markdown(patient_antigen_negative_reminder(sorted(list(resolved)), strong=False), unsafe_allow_html=True)
+
+                d_present = ("D" in confirmed) or ("D" in resolved) or ("D" in needs_work)
+                c_present = ("C" in confirmed) or ("C" in resolved) or ("C" in needs_work) or ("C" in supported_bg) or ("C" in other_sig_final)
                 if d_present and c_present:
-                    st.markdown(anti_g_alert_html(strong=True), unsafe_allow_html=True)
+                    strong = ("D" in confirmed and "C" in confirmed)
+                    st.markdown(anti_g_alert_html(strong=strong), unsafe_allow_html=True)
 
-                conflicts = confirmed_conflict_map(st.session_state.confirmed_lock, cells)
-                if conflicts:
-                    st.markdown("<div class='hx-warn'><b>Data conflict alert</b><br>A confirmed antibody has reactive cells that are antigen-negative. Investigate multiple antibodies and/or phenotype entry error.</div>", unsafe_allow_html=True)
-                    for ab, labs in conflicts.items():
-                        st.write(f"- **Anti-{ab} confirmed**, but reactive cells are **{ab}-negative**: " + ", ".join(labs))
+                st.write("---")
 
-                targets_needing_selected = list(dict.fromkeys(list(supported_bg.keys()) + other_sig_final))
+                targets_needing_selected = list(dict.fromkeys(
+                    needs_work +
+                    list(needs_more_for_confirmation) +
+                    list(supported_bg.keys()) +
+                    other_sig_final
+                ))
+
                 if targets_needing_selected:
-                    st.write("---")
-                    st.subheader("Selected Cells (if needed)")
+                    st.markdown("### 🧪 Selected Cells (Only if needed to resolve interference / exclude / confirm)")
+
                     for a in targets_needing_selected:
-                        active_set_now = set(list(st.session_state.confirmed_lock) + other_sig_final + list(supported_bg.keys()))
+                        active_set_now = set(resolved + needs_work + other_sig_final + list(supported_bg.keys()))
+
+                        if a in needs_work:
+                            st.warning(f"Anti-{a}: **Interference / not separable** → need {a}+ cells NEGATIVE for other active suspects.")
+                        elif a in other_sig_final:
+                            st.warning(f"Anti-{a}: **Clinically significant background NOT excluded** → need discriminating cells to exclude/confirm.")
+                        elif a in supported_bg:
+                            st.info(f"Anti-{a}: **Suggested by discriminating POSITIVE cell(s)** → requires confirmation (rule-of-three / additional discriminating cells).")
+                        else:
+                            st.info(f"Anti-{a}: **Not confirmed yet** → need more discriminating cells.")
+
                         sugg = suggest_selected_cells(a, list(active_set_now))
                         if sugg:
-                            st.write(f"**Anti-{a}** — suggested cells:")
                             for lab, note in sugg[:12]:
-                                st.write(f"- {lab} ({note})")
+                                st.write(f"- {lab}  <span class='cell-hint'>{note}</span>", unsafe_allow_html=True)
                         else:
-                            st.write(f"**Anti-{a}** — no suitable discriminating cell in current inventory.")
+                            st.write("- No suitable discriminating cell in current inventory → use another lot / external selected cells.")
+
                     enz = enzyme_hint_if_needed(targets_needing_selected)
                     if enz:
-                        st.info(enz)
+                        st.info("💡 " + enz)
 
-            else:
-                best = find_best_combo(candidates, cells, max_size=3)
-                if not best:
-                    st.markdown("<div class='hx-warn'><b>No resolved specificity from current data.</b> Use selected cells / another lot.</div>", unsafe_allow_html=True)
                 else:
-                    sep_map = separability_map(best, cells)
-                    resolved_raw = [a for a in best if sep_map.get(a, False)]
-                    needs_work = [a for a in best if not sep_map.get(a, False)]
+                    st.success("No Selected Cells needed: all resolved antibodies are confirmed AND no clinically significant background remains unexcluded.")
 
-                    resolved_sig = [a for a in resolved_raw if a not in INSIGNIFICANT_AGS]
-                    resolved_cold = [a for a in resolved_raw if a in INSIGNIFICANT_AGS]
-
-                    if resolved_sig:
-                        st.markdown("<div class='hx-ok'><b>Resolved (separable):</b> " + ", ".join([f"Anti-{a}" for a in resolved_sig]) + "</div>", unsafe_allow_html=True)
-                    if needs_work:
-                        st.markdown("<div class='hx-warn'><b>Suggested but NOT separable yet:</b> " + ", ".join([f"Anti-{a}" for a in needs_work]) + "</div>", unsafe_allow_html=True)
-                    if resolved_cold and not resolved_sig:
-                        st.markdown("<div class='hx-alert'><b>Cold/Insignificant:</b> " + ", ".join([f"Anti-{a}" for a in resolved_cold]) + "</div>", unsafe_allow_html=True)
-
-                    remaining_other = [a for a in candidates if a not in best]
-                    other_sig = [a for a in remaining_other if a not in INSIGNIFICANT_AGS]
-                    other_cold = [a for a in remaining_other if a in INSIGNIFICANT_AGS]
-                    active_not_excluded = set(resolved_sig + needs_work + other_sig + other_cold + resolved_cold)
-
-                    auto_ruled_out, supported_bg, inconclusive_bg, no_disc_bg = background_auto_resolution(
-                        background_list=other_sig + other_cold + resolved_cold,
-                        active_not_excluded=active_not_excluded,
-                        cells=cells
-                    )
-
-                    other_sig_final = [a for a in other_sig if a not in auto_ruled_out]
-                    other_cold_final = [a for a in other_cold if a not in auto_ruled_out]
-
-                    st.write("---")
-                    st.subheader("Confirmation (Rule of Three)")
-
-                    confirmed = set()
-                    if not resolved_sig:
-                        st.info("No clinically significant antibody is separable yet → do not apply rule-of-three. Add discriminating selected cells.")
-                    else:
-                        for a in resolved_sig:
-                            full, mod, p_cnt, n_cnt = check_rule_three_only_on_discriminating(a, best, cells)
-                            if full:
-                                st.write(f"✅ Anti-{a} CONFIRMED (3+3) on discriminating cells (P:{p_cnt} / N:{n_cnt})")
-                                confirmed.add(a)
-                            elif mod:
-                                st.write(f"✅ Anti-{a} CONFIRMED (2+3) on discriminating cells (P:{p_cnt} / N:{n_cnt})")
-                                confirmed.add(a)
-                            else:
-                                st.write(f"⚠️ Anti-{a} NOT confirmed yet (P:{p_cnt} / N:{n_cnt})")
-
-                    if confirmed:
-                        st.session_state.confirmed_lock = set(confirmed)
-                        st.markdown(patient_antigen_negative_reminder(sorted(list(confirmed)), strong=True), unsafe_allow_html=True)
-                    elif resolved_sig:
-                        st.markdown(patient_antigen_negative_reminder(sorted(list(resolved_sig)), strong=False), unsafe_allow_html=True)
-
-                    d_present = ("D" in confirmed) or ("D" in resolved_sig) or ("D" in needs_work)
-                    c_present = ("C" in confirmed) or ("C" in resolved_sig) or ("C" in needs_work) or ("C" in supported_bg) or ("C" in other_sig_final)
-                    if d_present and c_present:
-                        strong = ("D" in confirmed and "C" in confirmed)
-                        st.markdown(anti_g_alert_html(strong=strong), unsafe_allow_html=True)
-
-                    targets_needing_selected = list(dict.fromkeys(needs_work + list(supported_bg.keys()) + other_sig_final))
-                    if targets_needing_selected:
-                        st.write("---")
-                        st.subheader("Selected Cells (if needed)")
-                        for a in targets_needing_selected:
-                            active_set_now = set(resolved_sig + needs_work + other_sig_final + list(supported_bg.keys()))
-                            sugg = suggest_selected_cells(a, list(active_set_now))
-                            if sugg:
-                                st.write(f"**Anti-{a}** — suggested cells:")
-                                for lab, note in sugg[:12]:
-                                    st.write(f"- {lab} ({note})")
-                            else:
-                                st.write(f"**Anti-{a}** — no suitable discriminating cell in current inventory.")
-                        enz = enzyme_hint_if_needed(targets_needing_selected)
-                        if enz:
-                            st.info(enz)
-
-    st.markdown("</div>", unsafe_allow_html=True)
-
-    with st.expander("Add Selected Cell (From Library)"):
+    with st.expander("➕ Add Selected Cell (From Library)"):
         ex_id = st.text_input("ID", key="ex_id")
         ex_res = st.selectbox("Reaction", GRADES, key="ex_res")
         ag_cols = st.columns(6)
@@ -1503,33 +958,9 @@ def ui_workstation():
         for i, ag in enumerate(AGS):
             new_ph[ag] = 1 if ag_cols[i%6].checkbox(ag, key=f"ex_{ag}") else 0
 
-        if st.button("Confirm Add"):
+        if st.button("Confirm Add", key="btn_add_ex"):
             st.session_state.ext.append({"id": ex_id.strip() if ex_id else "", "res": normalize_grade(ex_res), "ph": new_ph})
-            st.success("Added. Re-run analysis.")
+            st.success("Added! Re-run Analysis.")
 
     if st.session_state.ext:
-        st.dataframe(pd.DataFrame(st.session_state.ext)[["id","res"]], use_container_width=True, hide_index=True)
-
-# ============================================================
-# 19) MAIN ROUTER
-# ============================================================
-
-with st.sidebar:
-    st.markdown("### H-AXIS")
-    st.caption("Secure • Role-based • Multi-hospital")
-    if is_logged_in():
-        st.write(f"**Role:** {st.session_state.role.upper()}")
-        st.write(f"**Hospital:** {st.session_state.hospital_code}")
-    st.write("---")
-
-if not is_logged_in():
-    ui_auth()
-else:
-    nav = sidebar_nav()
-
-    if nav == "Admin/Supervisor Console":
-        ui_admin_supervisor_panel()
-    elif nav == "Supervisor Panel Setup":
-        ui_supervisor_panel()
-    else:
-        ui_workstation()
+        st.table(pd.DataFrame(st.session_state.ext)[["id","res"]])
