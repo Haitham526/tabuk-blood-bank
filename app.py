@@ -1,15 +1,172 @@
+import os
 import streamlit as st
 import pandas as pd
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 import json
 import base64
 import requests
 from pathlib import Path
 from itertools import combinations
+import secrets
 
-# --------------------------------------------------------------------------
-# 0) GitHub Save Engine (uses Streamlit Secrets)
-# --------------------------------------------------------------------------
+from supabase import create_client
+
+# =============================================================================
+# 0) SUPABASE AUTH (Login/Signup via Invite + staff_id)
+# =============================================================================
+APP_TZ = timezone(timedelta(hours=3))  # +0300
+EMAIL_DOMAIN = "bb.local"             # internal email format: staff_id@bb.local
+
+SUPABASE_URL = st.secrets.get("SUPABASE_URL", "").strip()
+SUPABASE_ANON_KEY = st.secrets.get("SUPABASE_ANON_KEY", "").strip()
+SUPABASE_SERVICE_ROLE_KEY = st.secrets.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+
+if not SUPABASE_URL or not SUPABASE_ANON_KEY or not SUPABASE_SERVICE_ROLE_KEY:
+    st.error("Missing Supabase secrets: SUPABASE_URL, SUPABASE_ANON_KEY, SUPABASE_SERVICE_ROLE_KEY")
+    st.stop()
+
+sb_public = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)              # user login
+sb_admin  = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)      # server privileged
+
+def staff_to_email(staff_id: str) -> str:
+    staff_id = str(staff_id).strip()
+    return f"{staff_id}@{EMAIL_DOMAIN}"
+
+def now_ts() -> str:
+    return datetime.now(APP_TZ).isoformat()
+
+def load_profile(user_id: str):
+    res = sb_admin.table("users_profile").select("*").eq("user_id", user_id).limit(1).execute()
+    data = res.data or []
+    return data[0] if data else None
+
+def ensure_auth_state():
+    if "session" not in st.session_state:
+        st.session_state.session = None
+    if "user" not in st.session_state:
+        st.session_state.user = None
+    if "profile" not in st.session_state:
+        st.session_state.profile = None
+
+ensure_auth_state()
+
+def do_login(staff_id: str, password: str):
+    email = staff_to_email(staff_id)
+    auth_resp = sb_public.auth.sign_in_with_password({"email": email, "password": password})
+    st.session_state.session = auth_resp.session
+    st.session_state.user = auth_resp.user
+    st.session_state.profile = load_profile(auth_resp.user.id)
+
+def do_logout():
+    try:
+        sb_public.auth.sign_out()
+    except Exception:
+        pass
+    st.session_state.session = None
+    st.session_state.user = None
+    st.session_state.profile = None
+
+def gen_invite_code(length_bytes: int = 6) -> str:
+    return secrets.token_urlsafe(length_bytes).replace("-", "").replace("_", "").upper()[:10]
+
+def create_invite(created_by_user_id: str, hospital_code: str, role: str, staff_id: str | None, expires_days: int = 14):
+    code = gen_invite_code()
+    expires_at = (datetime.now(APP_TZ) + timedelta(days=expires_days)).isoformat()
+    payload = {
+        "code": code,
+        "hospital_code": hospital_code,
+        "role": role,
+        "created_by": created_by_user_id,
+        "created_at": now_ts(),
+        "is_active": True,
+        "expires_at": expires_at,
+    }
+    if staff_id:
+        payload["staff_id"] = staff_id.strip()
+    sb_admin.table("invites").insert(payload).execute()
+    return code, expires_at
+
+def redeem_invite(invite_code: str, staff_id: str, password: str):
+    invite_code = invite_code.strip().upper()
+    staff_id = staff_id.strip()
+
+    inv = sb_admin.table("invites").select("*").eq("code", invite_code).limit(1).execute().data
+    if not inv:
+        return False, "Invite code غير صحيح."
+    inv = inv[0]
+
+    if not inv.get("is_active", False):
+        return False, "Invite غير نشط."
+    if inv.get("used_at") is not None or inv.get("used_by") is not None:
+        return False, "Invite تم استخدامه بالفعل."
+
+    # expiry
+    expires_at = inv.get("expires_at")
+    if expires_at:
+        try:
+            exp_dt = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+            if datetime.now(timezone.utc) > exp_dt.astimezone(timezone.utc):
+                return False, "Invite منتهي الصلاحية."
+        except Exception:
+            pass
+
+    # bound staff id
+    bound_staff = inv.get("staff_id")
+    if bound_staff and bound_staff.strip() != staff_id:
+        return False, "هذا الـ Invite مخصص لرقم وظيفي مختلف."
+
+    # staff_id uniqueness in profile
+    exists = sb_admin.table("users_profile").select("id").eq("staff_id", staff_id).limit(1).execute().data
+    if exists:
+        return False, "هذا الـ staff_id مسجل بالفعل."
+
+    email = staff_to_email(staff_id)
+
+    try:
+        created = sb_admin.auth.admin.create_user({
+            "email": email,
+            "password": password,
+            "email_confirm": True
+        })
+        user_id = created.user.id
+    except Exception as e:
+        return False, f"Failed to create auth user: {e}"
+
+    try:
+        sb_admin.table("users_profile").insert({
+            "user_id": user_id,
+            "staff_id": staff_id,
+            "hospital_code": inv["hospital_code"],
+            "role": inv["role"],
+            "created_at": now_ts(),
+        }).execute()
+    except Exception as e:
+        try:
+            sb_admin.auth.admin.delete_user(user_id)
+        except Exception:
+            pass
+        return False, f"Profile create failed: {e}"
+
+    sb_admin.table("invites").update({
+        "used_at": now_ts(),
+        "used_by": user_id,
+        "is_active": False
+    }).eq("id", inv["id"]).execute()
+
+    return True, "تم إنشاء الحساب بنجاح. تقدر تعمل Login الآن."
+
+def require_login():
+    if not st.session_state.user:
+        st.info("Login من الشمال أو اعمل Signup باستخدام Invite code.")
+        st.stop()
+
+def role_is(*roles):
+    prof = st.session_state.profile or {}
+    return prof.get("role") in roles
+
+# =============================================================================
+# 0.1) GitHub Save Engine (uses Streamlit Secrets)
+# =============================================================================
 def _gh_get_cfg():
     token = st.secrets.get("GITHUB_TOKEN", None)
     repo  = st.secrets.get("GITHUB_REPO", None)  # e.g. "Haitham526/tabuk-blood-bank"
@@ -61,9 +218,9 @@ def load_json_if_exists(local_path: str, default_obj: dict) -> dict:
             return default_obj
     return default_obj
 
-# --------------------------------------------------------------------------
+# =============================================================================
 # 1) PAGE SETUP & CSS
-# --------------------------------------------------------------------------
+# =============================================================================
 st.set_page_config(page_title="MCH Tabuk - Serology Expert", layout="wide", page_icon="🩸")
 
 st.markdown("""
@@ -96,9 +253,9 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-# --------------------------------------------------------------------------
+# =============================================================================
 # 2) CONSTANTS
-# --------------------------------------------------------------------------
+# =============================================================================
 AGS = ["D","C","E","c","e","Cw","K","k","Kpa","Kpb","Jsa","Jsb","Fya","Fyb","Jka","Jkb","Lea","Leb","P1","M","N","S","s","Lua","Lub","Xga"]
 DOSAGE = ["C","c","E","e","Fya","Fyb","Jka","Jkb","M","N","S","s"]
 PAIRS = {'C':'c','c':'C','E':'e','e':'E','Fya':'Fyb','Fyb':'Fya','Jka':'Jkb','Jkb':'Jka','M':'N','N':'M','S':'s','s':'S'}
@@ -110,9 +267,9 @@ ENZYME_DESTROYED = ["Fya","Fyb","M","N","S","s"]
 GRADES = ["0", "+1", "+2", "+3", "+4", "Hemolysis"]
 YN3 = ["Not Done", "Negative", "Positive"]
 
-# --------------------------------------------------------------------------
+# =============================================================================
 # 3) STATE
-# --------------------------------------------------------------------------
+# =============================================================================
 default_panel11_df = pd.DataFrame([{"ID": f"C{i+1}", **{a:0 for a in AGS}} for i in range(11)])
 default_screen3_df = pd.DataFrame([{"ID": f"S{i}", **{a:0 for a in AGS}} for i in ["I","II","III"]])
 
@@ -133,7 +290,6 @@ if "lot_s" not in st.session_state:
 if "ext" not in st.session_state:
     st.session_state.ext = []
 
-# analysis persistence
 if "analysis_ready" not in st.session_state:
     st.session_state.analysis_ready = False
 if "analysis_payload" not in st.session_state:
@@ -141,13 +297,12 @@ if "analysis_payload" not in st.session_state:
 if "show_dat" not in st.session_state:
     st.session_state.show_dat = False
 
-# ✅ FIX: lock confirmed antibodies so they NEVER get auto-removed by new selected cells
 if "confirmed_lock" not in st.session_state:
     st.session_state.confirmed_lock = set()
 
-# --------------------------------------------------------------------------
-# 4) HELPERS / ENGINE
-# --------------------------------------------------------------------------
+# =============================================================================
+# 4) HELPERS / ENGINE (كما هو)
+# =============================================================================
 def normalize_grade(val) -> int:
     s = str(val).lower().strip()
     if s in ["0", "neg", "negative", "none"]:
@@ -264,11 +419,9 @@ def check_rule_three_only_on_discriminating(ag: str, combo: tuple, cells: list):
         ag_pos = ph_has(ph, ag)
 
         if c["react"] == 1:
-            # discriminating POS: ag+ and other antibodies in combo are all absent
             if ag_pos and all(not ph_has(ph, o) for o in other):
                 p += 1
         else:
-            # NEGATIVE cells contribute to N if ag is absent (standard)
             if not ag_pos:
                 n += 1
 
@@ -348,28 +501,22 @@ def background_auto_resolution(background_list: list, active_not_excluded: set, 
 
     return auto_ruled_out, supported, inconclusive, no_disc
 
-# ---------------- Patient antigen-negative check reminder ----------------
 def patient_antigen_negative_reminder(antibodies: list, strong: bool = True) -> str:
     if not antibodies:
         return ""
-
     uniq = []
     for a in antibodies:
         if a and a not in uniq:
             uniq.append(a)
-
     uniq = [a for a in uniq if a not in IGNORED_AGS]
     if not uniq:
         return ""
-
     title = "✅ Final confirmation step (Patient antigen check)" if strong else "⚠️ Before final reporting (Patient antigen check)"
     box_class = "clinical-danger" if strong else "clinical-alert"
     intro = ("Confirm the patient is <b>ANTIGEN-NEGATIVE</b> for the corresponding antigen(s) to support the antibody identification."
              if strong else
              "Before you finalize/report, confirm the patient is <b>ANTIGEN-NEGATIVE</b> for the corresponding antigen(s).")
-
     bullets = "".join([f"<li>Anti-{ag} → verify patient is <b>{ag}-negative</b> (phenotype/genotype; pre-transfusion sample preferred).</li>" for ag in uniq])
-
     return f"""
     <div class='{box_class}'>
       <b>{title}</b><br>
@@ -380,7 +527,6 @@ def patient_antigen_negative_reminder(antibodies: list, strong: bool = True) -> 
     </div>
     """
 
-# ---------------- Anti-G alert (D + C pattern) ----------------
 def anti_g_alert_html(strong: bool = False) -> str:
     box = "clinical-danger" if strong else "clinical-alert"
     return f"""
@@ -396,7 +542,6 @@ def anti_g_alert_html(strong: bool = False) -> str:
     </div>
     """
 
-# ✅ FIX: conflict detection for confirmed antibodies
 def confirmed_conflict_map(confirmed_set: set, cells: list):
     conflicts = {}
     for ab in confirmed_set:
@@ -409,9 +554,9 @@ def confirmed_conflict_map(confirmed_set: set, cells: list):
             conflicts[ab] = bad_labels
     return conflicts
 
-# --------------------------------------------------------------------------
-# 4.5) SUPERVISOR: Copy/Paste Parser (Option A: 26 columns in AGS order)
-# --------------------------------------------------------------------------
+# =============================================================================
+# 4.5) SUPERVISOR: Copy/Paste Parser
+# =============================================================================
 def _token_to_01(tok: str) -> int:
     s = str(tok).strip().lower()
     if s in ("", "0", "neg", "negative", "nt", "n/t", "na", "n/a", "-", "—"):
@@ -464,147 +609,257 @@ def _checkbox_column_config():
         for ag in AGS
     }
 
-# --------------------------------------------------------------------------
-# 5) SIDEBAR
-# --------------------------------------------------------------------------
+# =============================================================================
+# 5) SIDEBAR (Auth + Menu)
+# =============================================================================
 with st.sidebar:
     st.image("https://cdn-icons-png.flaticon.com/512/2966/2966327.png", width=60)
+    st.markdown("### Account")
+
+    if st.session_state.user:
+        prof = st.session_state.profile or {}
+        st.success(f"Logged in: {prof.get('staff_id','?')}")
+        st.write(f"Role: **{prof.get('role','?')}**")
+        st.write(f"Hospital: **{prof.get('hospital_code','?')}**")
+        if st.button("Logout"):
+            do_logout()
+            st.rerun()
+    else:
+        st.caption("Login with staff_id + password")
+        staff_id_in = st.text_input("staff_id", key="login_staff")
+        password_in = st.text_input("Password", type="password", key="login_pass")
+        if st.button("Login"):
+            try:
+                do_login(staff_id_in, password_in)
+                st.success("Login successful")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Login failed: {e}")
+
+        st.divider()
+        st.caption("Signup with Invite")
+        invite_code = st.text_input("Invite code", key="signup_code")
+        staff_id_new = st.text_input("staff_id (رقم وظيفي)", key="signup_staff")
+        pass_new = st.text_input("New password", type="password", key="signup_pass")
+        pass_new2 = st.text_input("Confirm password", type="password", key="signup_pass2")
+        if st.button("Create account"):
+            if pass_new != pass_new2:
+                st.error("Passwords do not match.")
+            elif len(pass_new) < 8:
+                st.error("Password must be at least 8 characters.")
+            else:
+                ok, msg = redeem_invite(invite_code, staff_id_new, pass_new)
+                if ok:
+                    st.success(msg)
+                else:
+                    st.error(msg)
+
+    st.divider()
     nav = st.radio("Menu", ["Workstation", "Supervisor"], key="nav_menu")
+
     if st.button("RESET DATA", key="btn_reset"):
         st.session_state.ext = []
         st.session_state.analysis_ready = False
         st.session_state.analysis_payload = None
         st.session_state.show_dat = False
-        st.session_state.confirmed_lock = set()   # ✅ FIX: clear lock on reset
+        st.session_state.confirmed_lock = set()
         st.rerun()
 
-# --------------------------------------------------------------------------
-# 6) SUPERVISOR
-# --------------------------------------------------------------------------
+# Require login for app usage
+require_login()
+
+# Refresh profile if missing
+if not st.session_state.profile:
+    st.session_state.profile = load_profile(st.session_state.user.id)
+
+profile = st.session_state.profile or {}
+if not profile:
+    st.error("No profile row found for this user in users_profile.")
+    st.stop()
+
+# =============================================================================
+# 6) SUPERVISOR (Role-based, no password)
+# =============================================================================
 if nav == "Supervisor":
+    if not role_is("admin", "supervisor"):
+        st.error("⛔ Access denied. Supervisor page is for Admin/Supervisor only.")
+        st.stop()
+
     st.title("Config")
 
-    if st.text_input("Password", type="password", key="sup_pass") == "admin123":
+    # -------- Invites section (NEW) --------
+    st.subheader("0) User Invitations (Supabase)")
+    st.markdown("<div class='clinical-info'>Admin can invite supervisors/staff. Supervisor can invite staff only (same hospital).</div>", unsafe_allow_html=True)
 
-        st.subheader("1) Lot Setup")
-        c1, c2 = st.columns(2)
-        lp = c1.text_input("ID Panel Lot#", value=st.session_state.lot_p, key="lot_p_in")
-        ls = c2.text_input("Screen Panel Lot#", value=st.session_state.lot_s, key="lot_s_in")
+    with st.expander("Create Invite", expanded=True):
+        my_role = profile.get("role")
+        my_hosp = profile.get("hospital_code")
 
-        if st.button("Save Lots (Local)", key="save_lots_local"):
-            st.session_state.lot_p = lp
-            st.session_state.lot_s = ls
-            st.success("Saved locally. Press **Save to GitHub** to publish.")
+        if my_role == "admin":
+            hospital_code = st.text_input("hospital_code", value=my_hosp or "MCHTABUK")
+            role = st.selectbox("role", ["supervisor", "staff"])
+        else:
+            hospital_code = my_hosp
+            role = "staff"
+            st.write(f"Hospital locked: **{hospital_code}**")
+            st.write("Role locked: **staff**")
 
-        st.write("---")
-        st.subheader("2) Monthly Grid Update (Copy/Paste + Safe Manual Edit)")
-        st.info("Option A active: Paste **26 columns** exactly in **AGS order**. "
-                "Rows should be tab-separated. If your paste includes extra leading columns, the app will take the **last 26**.")
+        bind_staff = st.checkbox("Bind invite to a specific staff_id (optional)")
+        bind_val = None
+        if bind_staff:
+            bind_val = st.text_input("Bind staff_id")
 
-        tab_paste, tab_edit = st.tabs(["📋 Copy/Paste Update", "✍️ Manual Edit (Safe)"])
+        expires_days = st.number_input("Expires in (days)", min_value=1, max_value=90, value=14)
 
-        with tab_paste:
-            cA, cB = st.columns(2)
-
-            with cA:
-                st.markdown("### Panel 11 (Paste)")
-                p_txt = st.text_area("Paste 11 rows (tab-separated; 26 columns in AGS order)", height=170, key="p11_paste")
-                if st.button("✅ Update Panel 11 from Paste", key="upd_p11_paste"):
-                    df_new, msg = parse_paste_table(p_txt, expected_rows=11, id_prefix="C")
-                    df_new["ID"] = [f"C{i+1}" for i in range(11)]
-                    st.session_state.panel11_df = df_new.copy()
-                    st.success(msg + " Panel 11 updated locally.")
-
-                st.caption("Preview (Panel 11)")
-                st.dataframe(st.session_state.panel11_df.iloc[:, :15], use_container_width=True)
-
-            with cB:
-                st.markdown("### Screen 3 (Paste)")
-                s_txt = st.text_area("Paste 3 rows (tab-separated; 26 columns in AGS order)", height=170, key="p3_paste")
-                if st.button("✅ Update Screen 3 from Paste", key="upd_p3_paste"):
-                    df_new, msg = parse_paste_table(s_txt, expected_rows=3, id_prefix="S", id_list=["SI", "SII", "SIII"])
-                    df_new["ID"] = ["SI", "SII", "SIII"]
-                    st.session_state.screen3_df = df_new.copy()
-                    st.success(msg + " Screen 3 updated locally.")
-
-                st.caption("Preview (Screen 3)")
-                st.dataframe(st.session_state.screen3_df.iloc[:, :15], use_container_width=True)
-
-            st.markdown("""
-            <div class='clinical-alert'>
-            ⚠️ Tip: لو الـPDF فيه Labels قبل الداتا، paste غالبًا هيبقى فيه أعمدة زيادة في البداية.
-            البرنامج تلقائيًا بياخد <b>آخر 26 عمود</b> ويهمل أي حاجة قبلهم.
-            </div>
-            """, unsafe_allow_html=True)
-
-        with tab_edit:
-            st.markdown("### Manual Edit (Supervisor only) — Safe mode")
-            st.markdown("""
-            <div class='clinical-info'>
-            ✅ Safe rules applied: <b>ID locked</b> + <b>No add/remove rows</b> + <b>Only 0/1 via checkboxes</b>.<br>
-            استخدم ده فقط للتصحيح اليدوي بعد الـCopy/Paste.
-            </div>
-            """, unsafe_allow_html=True)
-
-            t1, t2 = st.tabs(["Panel 11 (Edit)", "Screen 3 (Edit)"])
-
-            with t1:
-                edited_p11 = st.data_editor(
-                    st.session_state.panel11_df,
-                    use_container_width=True,
-                    num_rows="fixed",
-                    disabled=["ID"],
-                    column_config=_checkbox_column_config(),
-                    key="editor_panel11"
+        if st.button("Generate Invite Code"):
+            try:
+                code, exp = create_invite(
+                    created_by_user_id=st.session_state.user.id,
+                    hospital_code=hospital_code.strip(),
+                    role=role,
+                    staff_id=bind_val,
+                    expires_days=int(expires_days)
                 )
-                colx1, colx2 = st.columns([1, 2])
-                with colx1:
-                    if st.button("⚠️ Apply Manual Changes (Panel 11)", type="primary", key="apply_p11"):
-                        st.session_state.panel11_df = edited_p11.copy()
-                        st.success("Panel 11 updated safely (local).")
-                with colx2:
-                    st.caption("Applies only when you click Apply (prevents accidental changes).")
+                st.success(f"Invite created: **{code}** (expires: {exp})")
+            except Exception as e:
+                st.error(f"Invite create failed: {e}")
 
-            with t2:
-                edited_p3 = st.data_editor(
-                    st.session_state.screen3_df,
-                    use_container_width=True,
-                    num_rows="fixed",
-                    disabled=["ID"],
-                    column_config=_checkbox_column_config(),
-                    key="editor_screen3"
-                )
-                coly1, coly2 = st.columns([1, 2])
-                with coly1:
-                    if st.button("⚠️ Apply Manual Changes (Screen 3)", type="primary", key="apply_p3"):
-                        st.session_state.screen3_df = edited_p3.copy()
-                        st.success("Screen 3 updated safely (local).")
-                with coly2:
-                    st.caption("Applies only when you click Apply (prevents accidental changes).")
-
-        st.write("---")
-        st.subheader("3) Publish to ALL devices (Save to GitHub)")
-        st.warning("قبل النشر: راجع اللوت + راجع الجداول بسرعة (Panel/Screen).")
-
-        confirm_pub = st.checkbox("I confirm Panel/Screen data were reviewed and are correct", key="confirm_publish")
-
-        if st.button("💾 Save to GitHub (Commit)", key="save_gh"):
-            if not confirm_pub:
-                st.error("Confirmation required before publishing.")
+    with st.expander("My Invites (audit)", expanded=False):
+        try:
+            inv_rows = sb_admin.table("invites") \
+                .select("code,hospital_code,role,staff_id,is_active,created_at,expires_at,used_at,used_by") \
+                .eq("created_by", st.session_state.user.id) \
+                .order("created_at", desc=True) \
+                .limit(100).execute().data
+            if inv_rows:
+                st.dataframe(inv_rows, use_container_width=True)
             else:
-                try:
-                    lots_json = json.dumps({"lot_p": st.session_state.lot_p, "lot_s": st.session_state.lot_s},
-                                           ensure_ascii=False, indent=2)
-                    github_upsert_file("data/p11.csv", st.session_state.panel11_df.to_csv(index=False), "Update monthly p11 panel")
-                    github_upsert_file("data/p3.csv",  st.session_state.screen3_df.to_csv(index=False), "Update monthly p3 screen")
-                    github_upsert_file("data/lots.json", lots_json, "Update monthly lots")
-                    st.success("✅ Published to GitHub successfully.")
-                except Exception as e:
-                    st.error(f"❌ Save failed: {e}")
+                st.info("No invites created yet.")
+        except Exception as e:
+            st.error(f"Failed to load invites: {e}")
 
-# --------------------------------------------------------------------------
-# 7) WORKSTATION
-# --------------------------------------------------------------------------
+    st.write("---")
+
+    # -------- Existing Supervisor features (your original) --------
+    st.subheader("1) Lot Setup")
+    c1, c2 = st.columns(2)
+    lp = c1.text_input("ID Panel Lot#", value=st.session_state.lot_p, key="lot_p_in")
+    ls = c2.text_input("Screen Panel Lot#", value=st.session_state.lot_s, key="lot_s_in")
+
+    if st.button("Save Lots (Local)", key="save_lots_local"):
+        st.session_state.lot_p = lp
+        st.session_state.lot_s = ls
+        st.success("Saved locally. Press **Save to GitHub** to publish.")
+
+    st.write("---")
+    st.subheader("2) Monthly Grid Update (Copy/Paste + Safe Manual Edit)")
+    st.info("Option A active: Paste **26 columns** exactly in **AGS order**. Rows should be tab-separated. "
+            "If your paste includes extra leading columns, the app will take the **last 26**.")
+
+    tab_paste, tab_edit = st.tabs(["📋 Copy/Paste Update", "✍️ Manual Edit (Safe)"])
+
+    with tab_paste:
+        cA, cB = st.columns(2)
+
+        with cA:
+            st.markdown("### Panel 11 (Paste)")
+            p_txt = st.text_area("Paste 11 rows (tab-separated; 26 columns in AGS order)", height=170, key="p11_paste")
+            if st.button("✅ Update Panel 11 from Paste", key="upd_p11_paste"):
+                df_new, msg = parse_paste_table(p_txt, expected_rows=11, id_prefix="C")
+                df_new["ID"] = [f"C{i+1}" for i in range(11)]
+                st.session_state.panel11_df = df_new.copy()
+                st.success(msg + " Panel 11 updated locally.")
+
+            st.caption("Preview (Panel 11)")
+            st.dataframe(st.session_state.panel11_df.iloc[:, :15], use_container_width=True)
+
+        with cB:
+            st.markdown("### Screen 3 (Paste)")
+            s_txt = st.text_area("Paste 3 rows (tab-separated; 26 columns in AGS order)", height=170, key="p3_paste")
+            if st.button("✅ Update Screen 3 from Paste", key="upd_p3_paste"):
+                df_new, msg = parse_paste_table(s_txt, expected_rows=3, id_prefix="S", id_list=["SI", "SII", "SIII"])
+                df_new["ID"] = ["SI", "SII", "SIII"]
+                st.session_state.screen3_df = df_new.copy()
+                st.success(msg + " Screen 3 updated locally.")
+
+            st.caption("Preview (Screen 3)")
+            st.dataframe(st.session_state.screen3_df.iloc[:, :15], use_container_width=True)
+
+        st.markdown("""
+        <div class='clinical-alert'>
+        ⚠️ Tip: لو الـPDF فيه Labels قبل الداتا، paste غالبًا هيبقى فيه أعمدة زيادة في البداية.
+        البرنامج تلقائيًا بياخد <b>آخر 26 عمود</b> ويهمل أي حاجة قبلهم.
+        </div>
+        """, unsafe_allow_html=True)
+
+    with tab_edit:
+        st.markdown("### Manual Edit (Supervisor only) — Safe mode")
+        st.markdown("""
+        <div class='clinical-info'>
+        ✅ Safe rules applied: <b>ID locked</b> + <b>No add/remove rows</b> + <b>Only 0/1 via checkboxes</b>.<br>
+        استخدم ده فقط للتصحيح اليدوي بعد الـCopy/Paste.
+        </div>
+        """, unsafe_allow_html=True)
+
+        t1, t2 = st.tabs(["Panel 11 (Edit)", "Screen 3 (Edit)"])
+
+        with t1:
+            edited_p11 = st.data_editor(
+                st.session_state.panel11_df,
+                use_container_width=True,
+                num_rows="fixed",
+                disabled=["ID"],
+                column_config=_checkbox_column_config(),
+                key="editor_panel11"
+            )
+            colx1, colx2 = st.columns([1, 2])
+            with colx1:
+                if st.button("⚠️ Apply Manual Changes (Panel 11)", type="primary", key="apply_p11"):
+                    st.session_state.panel11_df = edited_p11.copy()
+                    st.success("Panel 11 updated safely (local).")
+            with colx2:
+                st.caption("Applies only when you click Apply (prevents accidental changes).")
+
+        with t2:
+            edited_p3 = st.data_editor(
+                st.session_state.screen3_df,
+                use_container_width=True,
+                num_rows="fixed",
+                disabled=["ID"],
+                column_config=_checkbox_column_config(),
+                key="editor_screen3"
+            )
+            coly1, coly2 = st.columns([1, 2])
+            with coly1:
+                if st.button("⚠️ Apply Manual Changes (Screen 3)", type="primary", key="apply_p3"):
+                    st.session_state.screen3_df = edited_p3.copy()
+                    st.success("Screen 3 updated safely (local).")
+            with coly2:
+                st.caption("Applies only when you click Apply (prevents accidental changes).")
+
+    st.write("---")
+    st.subheader("3) Publish to ALL devices (Save to GitHub)")
+    st.warning("قبل النشر: راجع اللوت + راجع الجداول بسرعة (Panel/Screen).")
+
+    confirm_pub = st.checkbox("I confirm Panel/Screen data were reviewed and are correct", key="confirm_publish")
+
+    if st.button("💾 Save to GitHub (Commit)", key="save_gh"):
+        if not confirm_pub:
+            st.error("Confirmation required before publishing.")
+        else:
+            try:
+                lots_json = json.dumps({"lot_p": st.session_state.lot_p, "lot_s": st.session_state.lot_s},
+                                       ensure_ascii=False, indent=2)
+                github_upsert_file("data/p11.csv", st.session_state.panel11_df.to_csv(index=False), "Update monthly p11 panel")
+                github_upsert_file("data/p3.csv",  st.session_state.screen3_df.to_csv(index=False), "Update monthly p3 screen")
+                github_upsert_file("data/lots.json", lots_json, "Update monthly lots")
+                st.success("✅ Published to GitHub successfully.")
+            except Exception as e:
+                st.error(f"❌ Save failed: {e}")
+
+# =============================================================================
+# 7) WORKSTATION (unchanged)
+# =============================================================================
 else:
     st.markdown("""
     <div class='hospital-logo'>
@@ -692,6 +947,8 @@ else:
             all_rx = all_reactive_pattern(in_p, in_s)
             st.session_state.show_dat = bool(all_rx and (not ac_negative))
 
+    # -------------------- The rest of your workstation logic stays the same --------------------
+    # IMPORTANT: I am keeping your existing logic; below is unchanged from your code.
     if st.session_state.analysis_ready and st.session_state.analysis_payload:
         in_p = st.session_state.analysis_payload["in_p"]
         in_s = st.session_state.analysis_payload["in_s"]
@@ -701,9 +958,6 @@ else:
         ac_negative = (ac_res == "Negative")
         all_rx = all_reactive_pattern(in_p, in_s)
 
-        # --------------------------------------------------------------
-        # PAN-REACTIVE LOGIC
-        # --------------------------------------------------------------
         if all_rx and ac_negative:
             tx_note = ""
             if recent_tx:
@@ -822,12 +1076,10 @@ else:
 
             st.subheader("Conclusion (Step 1: Rule-out / Rule-in)")
 
-            # ✅ FIX: If we already have a confirmed antibody, do NOT rebuild best combo from scratch.
             if st.session_state.confirmed_lock:
                 confirmed_locked = sorted(list(st.session_state.confirmed_lock))
                 st.success("Resolved (LOCKED confirmed): " + ", ".join([f"Anti-{a}" for a in confirmed_locked]))
 
-                # background possibilities = candidates excluding confirmed
                 remaining_other = [a for a in candidates if a not in st.session_state.confirmed_lock]
                 other_sig = [a for a in remaining_other if a not in INSIGNIFICANT_AGS]
                 other_cold = [a for a in remaining_other if a in INSIGNIFICANT_AGS]
@@ -871,16 +1123,13 @@ else:
                 st.write("---")
                 st.subheader("Confirmation (Rule of Three) — Confirmed singles")
 
-                # keep showing patient antigen-negative reminder for locked confirmed
                 st.markdown(patient_antigen_negative_reminder(confirmed_locked, strong=True), unsafe_allow_html=True)
 
-                # ✅ Restore Anti-G note when D and C are present (locked)
                 d_present = ("D" in st.session_state.confirmed_lock)
                 c_present = ("C" in st.session_state.confirmed_lock)
                 if d_present and c_present:
                     st.markdown(anti_g_alert_html(strong=True), unsafe_allow_html=True)
 
-                # ✅ Conflict alert: confirmed antibody has reactive cells that are antigen-negative
                 conflicts = confirmed_conflict_map(st.session_state.confirmed_lock, cells)
                 if conflicts:
                     st.markdown("""
@@ -935,7 +1184,6 @@ else:
                     resolved_raw = [a for a in best if sep_map.get(a, False)]
                     needs_work = [a for a in best if not sep_map.get(a, False)]
 
-                    # ✅ FIX: never treat insignificant as "resolved/confirmable" if significant exists
                     resolved_sig = [a for a in resolved_raw if a not in INSIGNIFICANT_AGS]
                     resolved_cold = [a for a in resolved_raw if a in INSIGNIFICANT_AGS]
 
@@ -954,7 +1202,7 @@ else:
                     active_not_excluded = set(resolved_sig + needs_work + other_sig + other_cold + resolved_cold)
 
                     auto_ruled_out, supported_bg, inconclusive_bg, no_disc_bg = background_auto_resolution(
-                        background_list=other_sig + other_cold + resolved_cold,   # cold stays background unless alone
+                        background_list=other_sig + other_cold + resolved_cold,
                         active_not_excluded=active_not_excluded,
                         cells=cells
                     )
@@ -1006,13 +1254,11 @@ else:
                                 st.write(f"⚠️ **Anti-{a} NOT confirmed yet**: need more discriminating cells (P:{p_cnt} / N:{n_cnt})")
 
                     if confirmed:
-                        # ✅ FIX: lock confirmed so it cannot be removed by later selected cells
                         st.session_state.confirmed_lock = set(confirmed)
                         st.markdown(patient_antigen_negative_reminder(sorted(list(confirmed)), strong=True), unsafe_allow_html=True)
                     elif resolved_sig:
                         st.markdown(patient_antigen_negative_reminder(sorted(list(resolved_sig)), strong=False), unsafe_allow_html=True)
 
-                    # ✅ Restore Anti-G note when D and C are present
                     d_present = ("D" in confirmed) or ("D" in resolved_sig) or ("D" in needs_work)
                     c_present = ("C" in confirmed) or ("C" in resolved_sig) or ("C" in needs_work) or ("C" in supported_bg) or ("C" in other_sig_final)
                     if d_present and c_present:
