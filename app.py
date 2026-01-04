@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-from datetime import date
+from datetime import date, datetime
 import json
 import base64
 import requests
@@ -60,6 +60,137 @@ def load_json_if_exists(local_path: str, default_obj: dict) -> dict:
         except Exception:
             return default_obj
     return default_obj
+
+# --------------------------------------------------------------------------
+# 0.1) LOCAL HISTORY ENGINE (Simple internal storage: data/cases.csv)
+# --------------------------------------------------------------------------
+CASES_PATH = "data/cases.csv"
+HISTORY_MAX_ROWS = 20000  # you can raise it later if you want
+
+HISTORY_COLUMNS = [
+    "case_id", "saved_at",
+    "mrn", "name", "tech",
+    "run_dt",
+    "lot_p", "lot_s",
+    "ac_res", "recent_tx",
+    "all_rx",
+    "dat_igg", "dat_c3d", "dat_ctl",
+    "conclusion_short",
+    "summary_json"
+]
+
+def _safe_str(x):
+    return "" if x is None else str(x).strip()
+
+def _ensure_data_folder():
+    Path("data").mkdir(exist_ok=True)
+
+def load_cases_df() -> pd.DataFrame:
+    _ensure_data_folder()
+    default = pd.DataFrame(columns=HISTORY_COLUMNS)
+    df = load_csv_if_exists(CASES_PATH, default)
+    # Ensure all expected columns exist (backward compatible)
+    for col in HISTORY_COLUMNS:
+        if col not in df.columns:
+            df[col] = ""
+    return df[HISTORY_COLUMNS]
+
+def save_cases_df(df: pd.DataFrame):
+    _ensure_data_folder()
+    df.to_csv(CASES_PATH, index=False)
+
+def append_case_record(rec: dict):
+    df = load_cases_df()
+    df2 = pd.concat([df, pd.DataFrame([rec])], ignore_index=True)
+
+    # Keep only latest HISTORY_MAX_ROWS rows
+    try:
+        df2["saved_at"] = df2["saved_at"].astype(str)
+        df2 = df2.sort_values("saved_at", ascending=False).head(HISTORY_MAX_ROWS)
+        df2 = df2.sort_values("saved_at", ascending=False)
+    except Exception:
+        pass
+
+    save_cases_df(df2)
+
+def find_case_history(df: pd.DataFrame, mrn: str = "", name: str = "") -> pd.DataFrame:
+    mrn = _safe_str(mrn)
+    name = _safe_str(name).lower()
+
+    out = df.iloc[0:0]
+    if mrn:
+        out = df[df["mrn"].astype(str) == mrn]
+    elif name:
+        out = df[df["name"].astype(str).str.lower().str.contains(name, na=False)]
+
+    try:
+        out = out.sort_values("saved_at", ascending=False)
+    except Exception:
+        pass
+    return out
+
+def _now_ts():
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+def build_case_record(
+    pt_name: str,
+    pt_mrn: str,
+    tech: str,
+    run_dt: date,
+    lot_p: str,
+    lot_s: str,
+    ac_res: str,
+    recent_tx: bool,
+    in_p: dict,
+    in_s: dict,
+    ext: list,
+    all_rx: bool,
+    dat_igg: str = "",
+    dat_c3d: str = "",
+    dat_ctl: str = "",
+    conclusion_short: str = "",
+    details: dict = None
+) -> dict:
+    saved_at = _now_ts()
+    run_dt_str = str(run_dt)
+
+    mrn = _safe_str(pt_mrn)
+    name = _safe_str(pt_name)
+    tech = _safe_str(tech)
+
+    case_id = f"{mrn}_{saved_at}".replace(" ", "_").replace(":", "-")
+
+    payload = {
+        "patient": {"name": name, "mrn": mrn},
+        "tech": tech,
+        "run_dt": run_dt_str,
+        "saved_at": saved_at,
+        "lots": {"panel": lot_p, "screen": lot_s},
+        "inputs": {"panel_reactions": in_p, "screen_reactions": in_s, "AC": ac_res, "recent_tx": bool(recent_tx)},
+        "all_rx": bool(all_rx),
+        "dat": {"igg": dat_igg, "c3d": dat_c3d, "control": dat_ctl},
+        "selected_cells": ext,
+        "interpretation": details or {}
+    }
+
+    return {
+        "case_id": case_id,
+        "saved_at": saved_at,
+        "mrn": mrn,
+        "name": name,
+        "tech": tech,
+        "run_dt": run_dt_str,
+        "lot_p": lot_p,
+        "lot_s": lot_s,
+        "ac_res": ac_res,
+        "recent_tx": bool(recent_tx),
+        "all_rx": bool(all_rx),
+        "dat_igg": dat_igg,
+        "dat_c3d": dat_c3d,
+        "dat_ctl": dat_ctl,
+        "conclusion_short": _safe_str(conclusion_short),
+        "summary_json": json.dumps(payload, ensure_ascii=False)
+    }
 
 # --------------------------------------------------------------------------
 # 1) PAGE SETUP & CSS
@@ -613,6 +744,36 @@ else:
     _ = top3.text_input("Tech", key="tech_nm")
     _ = top4.date_input("Date", value=date.today(), key="run_dt")
 
+    # ---------------------------
+    # HISTORY LOOKUP (NEW)
+    # ---------------------------
+    cases_df = load_cases_df()
+    hist = find_case_history(cases_df, mrn=st.session_state.get("pt_mrn",""), name=st.session_state.get("pt_name",""))
+
+    if len(hist) > 0:
+        st.markdown(f"""
+        <div class='clinical-alert'>
+        🧾 <b>History Found</b> — This patient has <b>{len(hist)}</b> previous record(s).  
+        Please review before interpretation.
+        </div>
+        """, unsafe_allow_html=True)
+
+        with st.expander("📚 Open Patient History"):
+            show_cols = ["saved_at","run_dt","tech","conclusion_short","ac_res","recent_tx","all_rx"]
+            st.dataframe(hist[show_cols], use_container_width=True)
+
+            idx_list = list(range(len(hist)))
+            pick = st.selectbox(
+                "Select a previous run",
+                idx_list,
+                format_func=lambda i: f"{hist.iloc[i]['saved_at']} | {hist.iloc[i]['conclusion_short']}"
+            )
+            if st.button("Open selected run details", key="btn_open_hist"):
+                try:
+                    st.json(json.loads(hist.iloc[pick]["summary_json"]))
+                except Exception:
+                    st.error("Could not open this record (corrupted JSON).")
+
     with st.form("main_form", clear_on_submit=False):
         st.write("### Reaction Entry")
         L, R = st.columns([1, 2.5])
@@ -727,6 +888,30 @@ else:
             </div>
             """, unsafe_allow_html=True)
 
+            # -------- SAVE TO HISTORY (PAN AC NEG) --------
+            if st.button("💾 Save Case to History", key="save_case_pan_acneg"):
+                rec = build_case_record(
+                    pt_name=st.session_state.get("pt_name",""),
+                    pt_mrn=st.session_state.get("pt_mrn",""),
+                    tech=st.session_state.get("tech_nm",""),
+                    run_dt=st.session_state.get("run_dt", date.today()),
+                    lot_p=st.session_state.lot_p,
+                    lot_s=st.session_state.lot_s,
+                    ac_res=ac_res,
+                    recent_tx=recent_tx,
+                    in_p=in_p,
+                    in_s=in_s,
+                    ext=st.session_state.ext,
+                    all_rx=all_rx,
+                    dat_igg="",
+                    dat_c3d="",
+                    dat_ctl="",
+                    conclusion_short="Pan-reactive + AC Negative (High-incidence / multiple allo suspected)",
+                    details={"pattern": "pan_reactive_ac_negative"}
+                )
+                append_case_record(rec)
+                st.success("Saved ✅ (History updated)")
+
         elif all_rx and (not ac_negative):
             st.markdown("""
             <div class='clinical-danger'>
@@ -802,6 +987,30 @@ else:
             </div>
             """, unsafe_allow_html=True)
 
+            # -------- SAVE TO HISTORY (PAN AC POS) --------
+            if st.button("💾 Save Case to History", key="save_case_pan_acpos"):
+                rec = build_case_record(
+                    pt_name=st.session_state.get("pt_name",""),
+                    pt_mrn=st.session_state.get("pt_mrn",""),
+                    tech=st.session_state.get("tech_nm",""),
+                    run_dt=st.session_state.get("run_dt", date.today()),
+                    lot_p=st.session_state.lot_p,
+                    lot_s=st.session_state.lot_s,
+                    ac_res=ac_res,
+                    recent_tx=recent_tx,
+                    in_p=in_p,
+                    in_s=in_s,
+                    ext=st.session_state.ext,
+                    all_rx=all_rx,
+                    dat_igg=st.session_state.get("dat_igg",""),
+                    dat_c3d=st.session_state.get("dat_c3d",""),
+                    dat_ctl=st.session_state.get("dat_ctl",""),
+                    conclusion_short="Pan-reactive + AC Positive (DAT pathway)",
+                    details={"pattern": "pan_reactive_ac_positive"}
+                )
+                append_case_record(rec)
+                st.success("Saved ✅ (History updated)")
+
         if all_rx:
             pass
         else:
@@ -811,6 +1020,9 @@ else:
             best = find_best_combo(candidates, cells, max_size=3)
 
             st.subheader("Conclusion (Step 1: Rule-out / Rule-in)")
+
+            conclusion_short = ""
+            details = {}
 
             if not best:
                 st.error("No resolved specificity from current data. Proceed with Selected Cells / Enhancement.")
@@ -822,6 +1034,9 @@ else:
                         st.write("**Clinically significant possibilities:** " + ", ".join([f"Anti-{x}" for x in poss_sig]))
                     if poss_cold:
                         st.info("Cold/Insignificant possibilities: " + ", ".join([f"Anti-{x}" for x in poss_cold]))
+
+                conclusion_short = "No resolved specificity (needs selected cells / more work)"
+                details = {"best_combo": None, "candidates_not_excluded": candidates}
 
             else:
                 sep_map = separability_map(best, cells)
@@ -949,6 +1164,54 @@ else:
 
                 else:
                     st.success("No Selected Cells needed: all resolved antibodies are confirmed AND no clinically significant background remains unexcluded.")
+
+                # Prepare history summary
+                confirmed_list = sorted(list(confirmed)) if isinstance(confirmed, set) else []
+                resolved_list = resolved if isinstance(resolved, list) else []
+                needs_work_list = needs_work if isinstance(needs_work, list) else []
+                supported_list = sorted(list(supported_bg.keys())) if isinstance(supported_bg, dict) else []
+
+                if confirmed_list:
+                    conclusion_short = "Confirmed: " + ", ".join([f"Anti-{x}" for x in confirmed_list])
+                elif resolved_list:
+                    conclusion_short = "Resolved (not fully confirmed): " + ", ".join([f"Anti-{x}" for x in resolved_list])
+                else:
+                    conclusion_short = "Unresolved / Needs more work"
+
+                details = {
+                    "best_combo": list(best),
+                    "resolved": resolved_list,
+                    "needs_work": needs_work_list,
+                    "confirmed": confirmed_list,
+                    "supported_bg": supported_list,
+                    "not_excluded_sig": other_sig_final if isinstance(other_sig_final, list) else [],
+                    "not_excluded_cold": other_cold_final if isinstance(other_cold_final, list) else [],
+                    "no_discriminating": no_disc_bg if isinstance(no_disc_bg, list) else []
+                }
+
+            # -------- SAVE TO HISTORY (NON-PAN) --------
+            if st.button("💾 Save Case to History", key="save_case_nonpan"):
+                rec = build_case_record(
+                    pt_name=st.session_state.get("pt_name",""),
+                    pt_mrn=st.session_state.get("pt_mrn",""),
+                    tech=st.session_state.get("tech_nm",""),
+                    run_dt=st.session_state.get("run_dt", date.today()),
+                    lot_p=st.session_state.lot_p,
+                    lot_s=st.session_state.lot_s,
+                    ac_res=ac_res,
+                    recent_tx=recent_tx,
+                    in_p=in_p,
+                    in_s=in_s,
+                    ext=st.session_state.ext,
+                    all_rx=all_rx,
+                    dat_igg=st.session_state.get("dat_igg",""),
+                    dat_c3d=st.session_state.get("dat_c3d",""),
+                    dat_ctl=st.session_state.get("dat_ctl",""),
+                    conclusion_short=conclusion_short,
+                    details=details
+                )
+                append_case_record(rec)
+                st.success("Saved ✅ (History updated)")
 
     with st.expander("➕ Add Selected Cell (From Library)"):
         ex_id = st.text_input("ID", key="ex_id")
