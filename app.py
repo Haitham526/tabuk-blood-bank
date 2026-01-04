@@ -9,7 +9,7 @@ from itertools import combinations
 import hashlib
 
 # --------------------------------------------------------------------------
-# 0) GitHub Save Engine (uses Streamlit Secrets)
+# 0) GitHub Save/Read Engine (uses Streamlit Secrets)
 # --------------------------------------------------------------------------
 def _gh_get_cfg():
     token = st.secrets.get("GITHUB_TOKEN", None)
@@ -44,6 +44,61 @@ def github_upsert_file(path_in_repo: str, content_text: str, commit_message: str
     if w.status_code not in (200, 201):
         raise RuntimeError(f"GitHub PUT error {w.status_code}: {w.text}")
 
+def github_read_file(path_in_repo: str) -> str | None:
+    """
+    Reads a file from GitHub. Returns text or None if not found.
+    Works for small/medium files via contents API; falls back to download_url if provided.
+    """
+    token, repo, branch = _gh_get_cfg()
+    if not token or not repo:
+        return None
+
+    api = f"https://api.github.com/repos/{repo}/contents/{path_in_repo}"
+    headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github+json"}
+
+    r = requests.get(api, headers=headers, params={"ref": branch}, timeout=30)
+    if r.status_code == 404:
+        return None
+    if r.status_code != 200:
+        raise RuntimeError(f"GitHub READ error {r.status_code}: {r.text}")
+
+    js = r.json()
+    if isinstance(js, dict) and js.get("type") == "file":
+        # Prefer base64 content if available
+        if "content" in js and js.get("encoding") == "base64":
+            raw = base64.b64decode(js["content"]).decode("utf-8", errors="replace")
+            return raw
+        # Fallback to download_url
+        dl = js.get("download_url")
+        if dl:
+            rr = requests.get(dl, headers=headers, timeout=30)
+            if rr.status_code == 200:
+                return rr.text
+            raise RuntimeError(f"GitHub download_url error {rr.status_code}: {rr.text}")
+    return None
+
+def github_list_dir(path_in_repo: str) -> list[str]:
+    """
+    Lists files in a GitHub directory. Returns list of paths.
+    """
+    token, repo, branch = _gh_get_cfg()
+    if not token or not repo:
+        return []
+
+    api = f"https://api.github.com/repos/{repo}/contents/{path_in_repo}"
+    headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github+json"}
+
+    r = requests.get(api, headers=headers, params={"ref": branch}, timeout=30)
+    if r.status_code == 404:
+        return []
+    if r.status_code != 200:
+        raise RuntimeError(f"GitHub LIST error {r.status_code}: {r.text}")
+
+    js = r.json()
+    if isinstance(js, list):
+        return [x.get("path") for x in js if isinstance(x, dict) and x.get("type") == "file"]
+    return []
+
 def load_csv_if_exists(local_path: str, default_df: pd.DataFrame) -> pd.DataFrame:
     p = Path(local_path)
     if p.exists():
@@ -63,23 +118,22 @@ def load_json_if_exists(local_path: str, default_obj: dict) -> dict:
     return default_obj
 
 # --------------------------------------------------------------------------
-# 0.1) LOCAL HISTORY ENGINE (Simple internal storage: data/cases.csv)
+# 0.1) HISTORY ENGINE (GitHub-backed, large capacity via monthly partition)
 # --------------------------------------------------------------------------
-CASES_PATH = "data/cases.csv"
-HISTORY_MAX_ROWS = 200000
+HISTORY_DIR_GH = "data/history"     # monthly files stored here on GitHub
+HISTORY_LOCAL_CACHE = "data/cases_cache.csv"  # optional local cache (safe fallback)
+HISTORY_MAX_MONTH_FILES_TO_SEARCH = 48        # search across last up to 48 files (4 years)
+
 DUPLICATE_WINDOW_MINUTES = 10
 
 HISTORY_COLUMNS = [
     "case_id", "saved_at",
-    "mrn", "name", "tech",
-    "sex", "age_y", "age_m", "age_d",
-    "run_dt",
+    "mrn", "name", "sex", "age_y", "age_m", "age_d",
+    "tech", "run_dt",
     "lot_p", "lot_s",
     "ac_res", "recent_tx",
     "all_rx",
     "dat_igg", "dat_c3d", "dat_ctl",
-    "abo_card", "abo_json",
-    "phenotype_json",
     "conclusion_short",
     "fingerprint",
     "summary_json"
@@ -87,9 +141,6 @@ HISTORY_COLUMNS = [
 
 def _safe_str(x):
     return "" if x is None else str(x).strip()
-
-def _ensure_data_folder():
-    Path("data").mkdir(exist_ok=True)
 
 def _now_ts():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -104,25 +155,105 @@ def _make_fingerprint(obj: dict) -> str:
     txt = json.dumps(obj, ensure_ascii=False, sort_keys=True)
     return hashlib.sha256(txt.encode("utf-8")).hexdigest()
 
-def load_cases_df() -> pd.DataFrame:
-    _ensure_data_folder()
-    default = pd.DataFrame(columns=HISTORY_COLUMNS)
-    df = load_csv_if_exists(CASES_PATH, default)
+def _current_month_tag(d: date | None = None) -> str:
+    d = d or date.today()
+    return f"{d.year:04d}-{d.month:02d}"
+
+def _gh_month_file(tag: str) -> str:
+    return f"{HISTORY_DIR_GH}/{tag}.csv"
+
+def _df_ensure_cols(df: pd.DataFrame) -> pd.DataFrame:
     for col in HISTORY_COLUMNS:
         if col not in df.columns:
             df[col] = ""
     return df[HISTORY_COLUMNS]
 
-def save_cases_df(df: pd.DataFrame):
-    _ensure_data_folder()
-    df.to_csv(CASES_PATH, index=False)
+def load_month_df_from_github(tag: str) -> pd.DataFrame:
+    default = pd.DataFrame(columns=HISTORY_COLUMNS)
+    path = _gh_month_file(tag)
+    txt = github_read_file(path)
+    if not txt:
+        return default
+    try:
+        from io import StringIO
+        df = pd.read_csv(StringIO(txt))
+        return _df_ensure_cols(df)
+    except Exception:
+        return default
+
+def save_month_df_to_github(tag: str, df: pd.DataFrame):
+    df = _df_ensure_cols(df)
+    path = _gh_month_file(tag)
+    github_upsert_file(path, df.to_csv(index=False), f"Append history ({tag})")
+
+def load_all_history_df() -> pd.DataFrame:
+    """
+    Loads history from GitHub monthly files (most recent first).
+    Falls back to local cache if GitHub is not configured.
+    """
+    # If GitHub config missing, fallback to local
+    token, repo, _ = _gh_get_cfg()
+    if not token or not repo:
+        default = pd.DataFrame(columns=HISTORY_COLUMNS)
+        df = load_csv_if_exists(HISTORY_LOCAL_CACHE, default)
+        return _df_ensure_cols(df)
+
+    try:
+        files = github_list_dir(HISTORY_DIR_GH)
+        # Extract tags from filenames like data/history/YYYY-MM.csv
+        tags = []
+        for p in files:
+            name = p.split("/")[-1]
+            if name.endswith(".csv") and len(name) >= 11:
+                tag = name.replace(".csv", "")
+                # crude validation YYYY-MM
+                if len(tag) == 7 and tag[4] == "-":
+                    tags.append(tag)
+        tags = sorted(tags, reverse=True)[:HISTORY_MAX_MONTH_FILES_TO_SEARCH]
+
+        all_dfs = []
+        for tag in tags:
+            dfm = load_month_df_from_github(tag)
+            if len(dfm) > 0:
+                all_dfs.append(dfm)
+
+        if not all_dfs:
+            return pd.DataFrame(columns=HISTORY_COLUMNS)
+
+        df = pd.concat(all_dfs, ignore_index=True)
+        df = _df_ensure_cols(df)
+
+        # Update local cache (best-effort)
+        try:
+            Path("data").mkdir(exist_ok=True)
+            df.to_csv(HISTORY_LOCAL_CACHE, index=False)
+        except Exception:
+            pass
+
+        return df
+    except Exception:
+        # fallback to local cache
+        default = pd.DataFrame(columns=HISTORY_COLUMNS)
+        df = load_csv_if_exists(HISTORY_LOCAL_CACHE, default)
+        return _df_ensure_cols(df)
 
 def append_case_record(rec: dict):
-    df = load_cases_df()
+    """
+    Appends a case record into the current month GitHub file.
+    Duplicate suppression only if identical fingerprint saved within last N minutes.
+    """
+    # If GitHub not configured, fallback to local cache only
+    token, repo, _ = _gh_get_cfg()
+    use_github = bool(token and repo)
+
+    tag = _current_month_tag(date.today())
+    df_month = load_month_df_from_github(tag) if use_github else pd.DataFrame(columns=HISTORY_COLUMNS)
+    df_month = _df_ensure_cols(df_month)
+
     fp = _safe_str(rec.get("fingerprint", ""))
 
-    if fp:
-        same = df[df["fingerprint"].astype(str) == fp]
+    if fp and len(df_month) > 0:
+        same = df_month[df_month["fingerprint"].astype(str) == fp]
         if len(same) > 0:
             try:
                 same2 = same.copy()
@@ -135,15 +266,32 @@ def append_case_record(rec: dict):
             except Exception:
                 pass
 
-    df2 = pd.concat([df, pd.DataFrame([rec])], ignore_index=True)
+    df2 = pd.concat([df_month, pd.DataFrame([rec])], ignore_index=True)
+    df2 = _df_ensure_cols(df2)
 
+    # Sort month file by saved_at (desc) best-effort
     try:
         df2["saved_at"] = df2["saved_at"].astype(str)
-        df2 = df2.sort_values("saved_at", ascending=False).head(HISTORY_MAX_ROWS)
+        df2 = df2.sort_values("saved_at", ascending=False)
     except Exception:
         pass
 
-    save_cases_df(df2)
+    if use_github:
+        save_month_df_to_github(tag, df2)
+
+        # Update local cache too (best-effort)
+        try:
+            df_all = load_all_history_df()
+            df_all = pd.concat([df_all, pd.DataFrame([rec])], ignore_index=True)
+            df_all = _df_ensure_cols(df_all)
+            df_all.to_csv(HISTORY_LOCAL_CACHE, index=False)
+        except Exception:
+            pass
+    else:
+        # local only
+        Path("data").mkdir(exist_ok=True)
+        df2.to_csv(HISTORY_LOCAL_CACHE, index=False)
+
     return (True, "Saved")
 
 def find_case_history(df: pd.DataFrame, mrn: str = "", name: str = "") -> pd.DataFrame:
@@ -165,11 +313,11 @@ def find_case_history(df: pd.DataFrame, mrn: str = "", name: str = "") -> pd.Dat
 def build_case_record(
     pt_name: str,
     pt_mrn: str,
-    tech: str,
-    sex: str,
+    pt_sex: str,
     age_y: int,
     age_m: int,
     age_d: int,
+    tech: str,
     run_dt: date,
     lot_p: str,
     lot_s: str,
@@ -182,9 +330,6 @@ def build_case_record(
     dat_igg: str = "",
     dat_c3d: str = "",
     dat_ctl: str = "",
-    abo_card: str = "",
-    abo_obj: dict = None,
-    phenotype_obj: dict = None,
     conclusion_short: str = "",
     details: dict = None
 ) -> dict:
@@ -193,18 +338,26 @@ def build_case_record(
 
     mrn = _safe_str(pt_mrn)
     name = _safe_str(pt_name)
+    sex = _safe_str(pt_sex) if _safe_str(pt_sex) else ""
     tech = _safe_str(tech)
-    sex = _safe_str(sex)
+
+    try:
+        age_y = int(age_y)
+    except Exception:
+        age_y = 0
+    try:
+        age_m = int(age_m)
+    except Exception:
+        age_m = 0
+    try:
+        age_d = int(age_d)
+    except Exception:
+        age_d = 0
 
     case_id = f"{mrn}_{saved_at}".replace(" ", "_").replace(":", "-")
 
     payload = {
-        "patient": {
-            "name": name,
-            "mrn": mrn,
-            "sex": sex,
-            "age": {"years": int(age_y or 0), "months": int(age_m or 0), "days": int(age_d or 0)}
-        },
+        "patient": {"name": name, "mrn": mrn, "sex": sex, "age": {"y": age_y, "m": age_m, "d": age_d}},
         "tech": tech,
         "run_dt": run_dt_str,
         "saved_at": saved_at,
@@ -212,21 +365,19 @@ def build_case_record(
         "inputs": {"panel_reactions": in_p, "screen_reactions": in_s, "AC": ac_res, "recent_tx": bool(recent_tx)},
         "all_rx": bool(all_rx),
         "dat": {"igg": dat_igg, "c3d": dat_c3d, "control": dat_ctl},
-        "abo": {"card": _safe_str(abo_card), "results": (abo_obj or {})},
-        "phenotype": (phenotype_obj or {}),
         "selected_cells": ext,
         "interpretation": details or {}
     }
 
     fp_obj = {
         "mrn": mrn,
+        "sex": sex,
+        "age": {"y": age_y, "m": age_m, "d": age_d},
         "run_dt": run_dt_str,
         "lots": {"panel": lot_p, "screen": lot_s},
         "inputs": {"panel_reactions": in_p, "screen_reactions": in_s, "AC": ac_res, "recent_tx": bool(recent_tx)},
         "all_rx": bool(all_rx),
         "dat": {"igg": dat_igg, "c3d": dat_c3d, "control": dat_ctl},
-        "abo": {"card": _safe_str(abo_card), "results": (abo_obj or {})},
-        "phenotype": (phenotype_obj or {}),
         "selected_cells": ext,
         "interpretation": details or {},
         "conclusion_short": _safe_str(conclusion_short)
@@ -238,11 +389,11 @@ def build_case_record(
         "saved_at": saved_at,
         "mrn": mrn,
         "name": name,
-        "tech": tech,
         "sex": sex,
-        "age_y": int(age_y or 0),
-        "age_m": int(age_m or 0),
-        "age_d": int(age_d or 0),
+        "age_y": age_y,
+        "age_m": age_m,
+        "age_d": age_d,
+        "tech": tech,
         "run_dt": run_dt_str,
         "lot_p": lot_p,
         "lot_s": lot_s,
@@ -252,9 +403,6 @@ def build_case_record(
         "dat_igg": dat_igg,
         "dat_c3d": dat_c3d,
         "dat_ctl": dat_ctl,
-        "abo_card": _safe_str(abo_card),
-        "abo_json": json.dumps(abo_obj or {}, ensure_ascii=False),
-        "phenotype_json": json.dumps(phenotype_obj or {}, ensure_ascii=False),
         "conclusion_short": _safe_str(conclusion_short),
         "fingerprint": fingerprint,
         "summary_json": json.dumps(payload, ensure_ascii=False)
@@ -353,22 +501,13 @@ ENZYME_DESTROYED = ["Fya","Fyb","M","N","S","s"]
 GRADES = ["0", "+1", "+2", "+3", "+4", "Hemolysis"]
 YN3 = ["Not Done", "Negative", "Positive"]
 
-# ABO / Grouping grades (include MF + Not Done)
-ABO_GRADES = ["Not Done", "0", "+1", "+2", "+3", "+4", "Mixed Field", "Hemolysis"]
-SEX_OPTS = ["", "M", "F"]
-DETECT3 = ["Not Done", "Detected", "Not Detected"]
-
-# Phenotype structure
-RH_MAIN = ["C", "c", "E", "e", "K", "Control"]
-EXT_1 = ["P1", "Lea", "Leb", "Lua", "Lub", "Control"]
-EXT_2 = ["k", "Kpa", "Kpb", "Jka", "Jkb", "Control"]
-EXT_3 = ["M", "N", "S", "s", "Fya", "Fyb"]
-
 # --------------------------------------------------------------------------
 # 3) STATE
 # --------------------------------------------------------------------------
 default_panel11_df = pd.DataFrame([{"ID": f"C{i+1}", **{a:0 for a in AGS}} for i in range(11)])
 default_screen3_df = pd.DataFrame([{"ID": f"S{i}", **{a:0 for a in AGS}} for i in ["I","II","III"]])
+
+Path("data").mkdir(exist_ok=True)
 
 if "panel11_df" not in st.session_state:
     st.session_state.panel11_df = load_csv_if_exists("data/p11.csv", default_panel11_df)
@@ -394,27 +533,27 @@ if "analysis_payload" not in st.session_state:
 if "show_dat" not in st.session_state:
     st.session_state.show_dat = False
 
-# New patient profile defaults
-if "pt_sex" not in st.session_state:
-    st.session_state.pt_sex = ""
-if "age_y" not in st.session_state:
-    st.session_state.age_y = 0
-if "age_m" not in st.session_state:
-    st.session_state.age_m = 0
-if "age_d" not in st.session_state:
-    st.session_state.age_d = 0
+# patient header defaults (ensures RESET always works)
+for k, v in {
+    "pt_name": "",
+    "pt_mrn": "",
+    "pt_sex": "M",
+    "age_y": 0,
+    "age_m": 0,
+    "age_d": 0,
+    "tech_nm": "",
+    "run_dt": date.today(),
+}.items():
+    if k not in st.session_state:
+        st.session_state[k] = v
 
 # --------------------------------------------------------------------------
 # 4) HELPERS / ENGINE
 # --------------------------------------------------------------------------
 def normalize_grade(val) -> int:
     s = str(val).lower().strip()
-    if s in ["0", "neg", "negative", "none", "not done", "nd", "n/d"]:
+    if s in ["0", "neg", "negative", "none"]:
         return 0
-    if "mixed" in s:
-        return 1
-    if "hemo" in s:
-        return 1
     return 1
 
 def is_homozygous(ph, ag: str) -> bool:
@@ -653,37 +792,6 @@ def anti_g_alert_html(strong: bool = False) -> str:
     </div>
     """
 
-def _age_days(y: int, m: int, d: int) -> int:
-    try:
-        y = int(y or 0); m = int(m or 0); d = int(d or 0)
-        return y*365 + m*30 + d
-    except Exception:
-        return 0
-
-def _phenotype_conflict_alert(antibodies: list, ph_obj: dict):
-    # If antibody Anti-X exists but phenotype says X Detected, flag.
-    if (not antibodies) or (not isinstance(ph_obj, dict)):
-        return None
-
-    bad = []
-    for ag in antibodies:
-        if not ag:
-            continue
-        v = ph_obj.get(ag)
-        if isinstance(v, str) and v.strip().lower() == "detected":
-            bad.append(ag)
-
-    if bad:
-        return (
-            "⚠️ Phenotype conflict: patient recorded as "
-            + ", ".join([f"{x} Detected" for x in bad])
-            + " while antibody Anti-"
-            + ", Anti-".join(bad)
-            + " is suggested/confirmed. Re-check ID/phenotype (prefer pre-transfusion sample)."
-        )
-
-    return None
-
 # --------------------------------------------------------------------------
 # 4.6) HISTORY REPORT RENDERER (Professional view instead of JSON)
 # --------------------------------------------------------------------------
@@ -696,14 +804,6 @@ def _fmt_antibody_list(lst):
         return "—"
     return ", ".join([f"Anti-{a}" for a in lst])
 
-def _fmt_dict_table(d: dict):
-    if not isinstance(d, dict) or not d:
-        return pd.DataFrame([{"Item": "—", "Result": "—"}])
-    rows = []
-    for k, v in d.items():
-        rows.append({"Item": str(k), "Result": str(v)})
-    return pd.DataFrame(rows)
-
 def render_history_report(payload: dict):
     patient = payload.get("patient", {}) or {}
     lots = payload.get("lots", {}) or {}
@@ -711,18 +811,18 @@ def render_history_report(payload: dict):
     dat = payload.get("dat", {}) or {}
     interp = payload.get("interpretation", {}) or {}
     selected = payload.get("selected_cells", []) or []
-    abo = payload.get("abo", {}) or {}
-    ph = payload.get("phenotype", {}) or {}
 
     name = _safe_str(patient.get("name",""))
     mrn  = _safe_str(patient.get("mrn",""))
+    sex  = _safe_str(patient.get("sex",""))
+    age  = patient.get("age", {}) or {}
+    age_y = _safe_str(age.get("y",""))
+    age_m = _safe_str(age.get("m",""))
+    age_d = _safe_str(age.get("d",""))
+
     tech = _safe_str(payload.get("tech",""))
     run_dt = _safe_str(payload.get("run_dt",""))
     saved_at = _safe_str(payload.get("saved_at",""))
-
-    sex = _safe_str(patient.get("sex",""))
-    age = patient.get("age", {}) or {}
-    age_txt = f"{int(age.get('years',0))}y {int(age.get('months',0))}m {int(age.get('days',0))}d"
 
     ac = _safe_str(inputs.get("AC",""))
     recent_tx = bool(inputs.get("recent_tx", False))
@@ -731,6 +831,7 @@ def render_history_report(payload: dict):
     lot_p = _safe_str(lots.get("panel",""))
     lot_s = _safe_str(lots.get("screen",""))
 
+    # Chips (flags)
     chips = []
     chips.append(f"<span class='chip chip-ok'>AC: {ac or '—'}</span>")
     chips.append(f"<span class='chip {'chip-danger' if all_rx else 'chip-ok'}'>Pattern: {'PAN-reactive' if all_rx else 'Non-pan'}</span>")
@@ -739,6 +840,7 @@ def render_history_report(payload: dict):
     else:
         chips.append("<span class='chip chip-ok'>No recent transfusion flag</span>")
 
+    # DAT chips
     dat_igg = _safe_str(dat.get("igg",""))
     dat_c3d = _safe_str(dat.get("c3d",""))
     dat_ctl = _safe_str(dat.get("control",""))
@@ -755,13 +857,15 @@ def render_history_report(payload: dict):
     </div>
     """, unsafe_allow_html=True)
 
-    c1, c2, c3 = st.columns(3)
+    c1, c2, c3, c4 = st.columns(4)
     with c1:
         st.markdown(f"<div class='kv'><b>Patient Name</b><br>{name or '—'}</div>", unsafe_allow_html=True)
     with c2:
         st.markdown(f"<div class='kv'><b>MRN</b><br>{mrn or '—'}</div>", unsafe_allow_html=True)
     with c3:
-        st.markdown(f"<div class='kv'><b>Sex / Age</b><br>{sex or '—'} &nbsp;|&nbsp; {age_txt}</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='kv'><b>Sex</b><br>{sex or '—'}</div>", unsafe_allow_html=True)
+    with c4:
+        st.markdown(f"<div class='kv'><b>Age (Y/M/D)</b><br>{age_y or '0'} / {age_m or '0'} / {age_d or '0'}</div>", unsafe_allow_html=True)
 
     st.write("")
     a1, a2, a3 = st.columns(3)
@@ -772,16 +876,7 @@ def render_history_report(payload: dict):
     with a3:
         st.markdown(f"<div class='kv'><b>Screen Lot</b><br>{lot_s or '—'}</div>", unsafe_allow_html=True)
 
-    st.write("")
-    st.subheader("ABO / Rh Typing (Recorded)")
-    abo_card = _safe_str(abo.get("card",""))
-    st.markdown(f"<div class='kv'><b>Card</b><br>{abo_card or '—'}</div>", unsafe_allow_html=True)
-    st.dataframe(_fmt_dict_table(abo.get("results", {})), use_container_width=True)
-
-    st.write("")
-    st.subheader("Phenotype (Recorded)")
-    st.dataframe(_fmt_dict_table(ph), use_container_width=True)
-
+    # Reactions
     st.write("")
     st.subheader("Reactions Summary")
 
@@ -803,6 +898,7 @@ def render_history_report(payload: dict):
     st.markdown("**Panel Cells (1–11)**")
     st.dataframe(pr_df, use_container_width=True)
 
+    # Interpretation
     st.write("")
     st.subheader("Interpretation / Results")
 
@@ -840,6 +936,7 @@ def render_history_report(payload: dict):
     if no_disc:
         st.warning("No discriminating cells available for: " + _fmt_antibody_list(no_disc))
 
+    # Selected cells
     st.write("")
     st.subheader("Selected Cells Added (if any)")
     if selected:
@@ -916,7 +1013,40 @@ def _checkbox_column_config():
 with st.sidebar:
     st.image("https://cdn-icons-png.flaticon.com/512/2966/2966327.png", width=60)
     nav = st.radio("Menu", ["Workstation", "Supervisor"], key="nav_menu")
+
+    # ✅ FULL RESET: clears patient + age + sex + reactions + analysis + selected cells
     if st.button("RESET DATA", key="btn_reset"):
+        # Patient header
+        for k, v in {
+            "pt_name": "",
+            "pt_mrn": "",
+            "pt_sex": "M",
+            "age_y": 0,
+            "age_m": 0,
+            "age_d": 0,
+            "tech_nm": "",
+            "run_dt": date.today(),
+        }.items():
+            st.session_state[k] = v
+
+        # Reaction inputs
+        for k, v in {
+            "rx_ac": "Negative",
+            "recent_tx": False,
+            "rx_sI": "0",
+            "rx_sII": "0",
+            "rx_sIII": "0",
+            "rx_p1": "0", "rx_p2": "0", "rx_p3": "0", "rx_p4": "0", "rx_p5": "0", "rx_p6": "0",
+            "rx_p7": "0", "rx_p8": "0", "rx_p9": "0", "rx_p10": "0", "rx_p11": "0",
+            "dat_igg": "Not Done",
+            "dat_c3d": "Not Done",
+            "dat_ctl": "Not Done",
+            "ex_id": "",
+            "ex_res": "0",
+        }.items():
+            st.session_state[k] = v
+
+        # Analysis state
         st.session_state.ext = []
         st.session_state.analysis_ready = False
         st.session_state.analysis_payload = None
@@ -977,8 +1107,7 @@ if nav == "Supervisor":
 
             st.markdown("""
             <div class='clinical-alert'>
-            ⚠️ Tip: لو الـPDF فيه Labels قبل الداتا، paste غالبًا هيبقى فيه أعمدة زيادة في البداية.
-            البرنامج تلقائيًا بياخد <b>آخر 26 عمود</b> ويهمل أي حاجة قبلهم.
+            ⚠️ Tip: If your PDF/table paste includes extra leading columns (labels), the app automatically takes the <b>LAST 26 columns</b> and ignores the rest.
             </div>
             """, unsafe_allow_html=True)
 
@@ -987,7 +1116,7 @@ if nav == "Supervisor":
             st.markdown("""
             <div class='clinical-info'>
             ✅ Safe rules applied: <b>ID locked</b> + <b>No add/remove rows</b> + <b>Only 0/1 via checkboxes</b>.<br>
-            استخدم ده فقط للتصحيح اليدوي بعد الـCopy/Paste.
+            Use this only for small corrections after copy/paste.
             </div>
             """, unsafe_allow_html=True)
 
@@ -1029,7 +1158,7 @@ if nav == "Supervisor":
 
         st.write("---")
         st.subheader("3) Publish to ALL devices (Save to GitHub)")
-        st.warning("قبل النشر: راجع اللوت + راجع الجداول بسرعة (Panel/Screen).")
+        st.warning("Before publishing: confirm Lot numbers + Panel/Screen tables are correct.")
 
         confirm_pub = st.checkbox("I confirm Panel/Screen data were reviewed and are correct", key="confirm_publish")
 
@@ -1063,29 +1192,27 @@ else:
     st.markdown(f"<div class='lot-bar'><span>ID Panel Lot: {lp_txt}</span> | <span>Screen Lot: {ls_txt}</span></div>",
                 unsafe_allow_html=True)
 
-    # Patient header row (added Sex + Age y/m/d)
-    top1, top2, top3, top4, top5, top6 = st.columns([1.3, 1.0, 0.6, 1.1, 0.9, 1.0])
-    _ = top1.text_input("Name", key="pt_name")
-    _ = top2.text_input("MRN", key="pt_mrn")
-    _ = top3.selectbox("Sex", SEX_OPTS, key="pt_sex")
+    # ✅ ONE-LINE HEADER (Age stays on same line with Sex/Tech)
+    col_name, col_mrn, col_sex, col_age, col_tech, col_date = st.columns([2.2, 1.4, 1.0, 2.3, 1.4, 1.4])
 
-    with top4:
-        st.markdown("**Age (Y / M / D)**")
-        ay, am, ad = st.columns(3)
-        st.session_state.age_y = ay.number_input("Y", min_value=0, max_value=120, value=int(st.session_state.get("age_y", 0)), step=1, key="age_y_in")
-        st.session_state.age_m = am.number_input("M", min_value=0, max_value=11, value=int(st.session_state.get("age_m", 0)), step=1, key="age_m_in")
-        st.session_state.age_d = ad.number_input("D", min_value=0, max_value=31, value=int(st.session_state.get("age_d", 0)), step=1, key="age_d_in")
+    col_name.text_input("Name", key="pt_name")
+    col_mrn.text_input("MRN", key="pt_mrn")
+    col_sex.selectbox("Sex", ["M", "F"], key="pt_sex")
 
-    _ = top5.text_input("Tech", key="tech_nm")
-    _ = top6.date_input("Date", value=date.today(), key="run_dt")
+    with col_age:
+        st.markdown("<div style='font-weight:600; margin-bottom:0.25rem;'>Age (Y / M / D)</div>", unsafe_allow_html=True)
+        ay, am, ad = st.columns([1, 1, 1])
+        ay.number_input("Y", min_value=0, max_value=120, step=1, key="age_y", label_visibility="collapsed")
+        am.number_input("M", min_value=0, max_value=11, step=1, key="age_m", label_visibility="collapsed")
+        ad.number_input("D", min_value=0, max_value=31, step=1, key="age_d", label_visibility="collapsed")
 
-    age_days = _age_days(st.session_state.get("age_y", 0), st.session_state.get("age_m", 0), st.session_state.get("age_d", 0))
-    is_neonate = (age_days > 0 and age_days < 120)
+    col_tech.text_input("Tech", key="tech_nm")
+    col_date.date_input("Date", value=st.session_state.get("run_dt", date.today()), key="run_dt")
 
     # ---------------------------
-    # HISTORY LOOKUP (PRO VIEW)
+    # HISTORY LOOKUP (GitHub-backed)
     # ---------------------------
-    cases_df = load_cases_df()
+    cases_df = load_all_history_df()
     hist = find_case_history(cases_df, mrn=st.session_state.get("pt_mrn",""), name=st.session_state.get("pt_name",""))
 
     if len(hist) > 0:
@@ -1098,6 +1225,7 @@ else:
 
         with st.expander("📚 Open Patient History"):
             show_cols = ["saved_at","run_dt","tech","sex","age_y","age_m","age_d","conclusion_short","ac_res","recent_tx","all_rx"]
+            show_cols = [c for c in show_cols if c in hist.columns]
             st.dataframe(hist[show_cols], use_container_width=True)
 
             idx_list = list(range(len(hist)))
@@ -1127,93 +1255,7 @@ else:
     # MAIN FORM
     # ----------------------------------------------------------------------
     with st.form("main_form", clear_on_submit=False):
-        st.write("### Patient Testing Entry")
-
-        # ---------------------------
-        # ABO / Rh Typing (NEW)
-        # ---------------------------
-        st.markdown("#### ABO / Rh(D) Typing")
-        if is_neonate:
-            st.markdown("""
-            <div class='clinical-info'>
-            👶 <b>Neonate mode detected (Age &lt; 4 months)</b><br>
-            • Reverse grouping is typically <b>not required</b> for initial neonatal typing.<br>
-            • If purpose is <b>RhIG eligibility</b> → use <b>DVI+</b> card approach.<br>
-            • If purpose is <b>Transfusion</b> → use <b>DVI−</b> card approach.
-            </div>
-            """, unsafe_allow_html=True)
-
-        purpose = st.selectbox("Purpose (for neonate only)", ["Transfusion", "RhIG eligibility"], index=0, key="abo_purpose")
-
-        if is_neonate:
-            d_card = "DVI+" if purpose == "RhIG eligibility" else "DVI-"
-            abo_card = f"Neonate: A, B, AB, {d_card}, Control, DAT"
-            colA, colB, colC, colD, colE, colF = st.columns(6)
-            abo_antiA = colA.selectbox("Anti-A", ABO_GRADES, key="abo_antiA")
-            abo_antiB = colB.selectbox("Anti-B", ABO_GRADES, key="abo_antiB")
-            abo_antiAB = colC.selectbox("Anti-AB", ABO_GRADES, key="abo_antiAB")
-            abo_antiD = colD.selectbox(f"Anti-D ({d_card})", ABO_GRADES, key="abo_antiD")
-            abo_ctl = colE.selectbox("Control", ABO_GRADES, key="abo_ctl")
-            abo_dat = colF.selectbox("DAT", ABO_GRADES, key="abo_dat")
-
-            # Reverse hidden
-            abo_A1 = "Not Done"
-            abo_Bcells = "Not Done"
-
-        else:
-            abo_card = "Adult: Anti-A, Anti-B, Anti-D (DVI-), Control + Reverse (A1 cells, B cells)"
-            colA, colB, colC, colD, colE, colF = st.columns(6)
-            abo_antiA = colA.selectbox("Anti-A", ABO_GRADES, key="abo_antiA")
-            abo_antiB = colB.selectbox("Anti-B", ABO_GRADES, key="abo_antiB")
-            abo_antiD = colC.selectbox("Anti-D (DVI-)", ABO_GRADES, key="abo_antiD")
-            abo_ctl   = colD.selectbox("Control", ABO_GRADES, key="abo_ctl")
-            abo_A1    = colE.selectbox("A1 cells", ABO_GRADES, key="abo_A1")
-            abo_Bcells= colF.selectbox("B cells", ABO_GRADES, key="abo_Bcells")
-            # DAT optional for adult
-            abo_dat = st.selectbox("DAT (if performed)", ABO_GRADES, key="abo_dat")
-
-        abo_obj = {
-            "Anti-A": abo_antiA,
-            "Anti-B": abo_antiB,
-            "Anti-D": abo_antiD,
-            "Control": abo_ctl,
-            "A1 cells": abo_A1,
-            "B cells": abo_Bcells,
-            "DAT": abo_dat,
-            "NeonateMode": bool(is_neonate),
-            "Purpose": purpose if is_neonate else "N/A"
-        }
-
-        # ---------------------------
-        # Phenotype (NEW)
-        # ---------------------------
-        st.write("")
-        st.markdown("#### Patient Phenotype (if available)")
-        st.caption("Use Detected / Not Detected / Not Done. Leave as Not Done if not tested.")
-
-        ph = {}
-
-        st.markdown("**Rh/K phenotype**")
-        pcols = st.columns(6)
-        for i, ag in enumerate(RH_MAIN):
-            ph[ag] = pcols[i % 6].selectbox(ag, DETECT3, key=f"ph_{ag}_main")
-
-        st.markdown("**Extended phenotype (optional)**")
-        e1 = st.columns(6)
-        for i, ag in enumerate(EXT_1):
-            ph[ag] = e1[i % 6].selectbox(ag, DETECT3, key=f"ph_{ag}_e1")
-
-        e2 = st.columns(6)
-        for i, ag in enumerate(EXT_2):
-            ph[ag] = e2[i % 6].selectbox(ag, DETECT3, key=f"ph_{ag}_e2")
-
-        e3 = st.columns(6)
-        for i, ag in enumerate(EXT_3):
-            ph[ag] = e3[i % 6].selectbox(ag, DETECT3, key=f"ph_{ag}_e3")
-
-        st.write("---")
         st.write("### Reaction Entry")
-
         L, R = st.columns([1, 2.5])
 
         with L:
@@ -1273,9 +1315,6 @@ else:
                 "in_s": in_s,
                 "ac_res": ac_res,
                 "recent_tx": recent_tx,
-                "abo_card": abo_card,
-                "abo_obj": abo_obj,
-                "phenotype_obj": ph
             }
             st.session_state.analysis_ready = True
 
@@ -1288,9 +1327,6 @@ else:
         in_s = st.session_state.analysis_payload["in_s"]
         ac_res = st.session_state.analysis_payload["ac_res"]
         recent_tx = st.session_state.analysis_payload["recent_tx"]
-        abo_card = st.session_state.analysis_payload.get("abo_card","")
-        abo_obj  = st.session_state.analysis_payload.get("abo_obj",{})
-        phenotype_obj = st.session_state.analysis_payload.get("phenotype_obj",{})
 
         ac_negative = (ac_res == "Negative")
         all_rx = all_reactive_pattern(in_p, in_s)
@@ -1336,11 +1372,11 @@ else:
                 rec = build_case_record(
                     pt_name=st.session_state.get("pt_name",""),
                     pt_mrn=st.session_state.get("pt_mrn",""),
-                    tech=st.session_state.get("tech_nm",""),
-                    sex=st.session_state.get("pt_sex",""),
+                    pt_sex=st.session_state.get("pt_sex",""),
                     age_y=st.session_state.get("age_y",0),
                     age_m=st.session_state.get("age_m",0),
                     age_d=st.session_state.get("age_d",0),
+                    tech=st.session_state.get("tech_nm",""),
                     run_dt=st.session_state.get("run_dt", date.today()),
                     lot_p=st.session_state.lot_p,
                     lot_s=st.session_state.lot_s,
@@ -1353,15 +1389,12 @@ else:
                     dat_igg="",
                     dat_c3d="",
                     dat_ctl="",
-                    abo_card=abo_card,
-                    abo_obj=abo_obj,
-                    phenotype_obj=phenotype_obj,
                     conclusion_short="Pan-reactive + AC Negative (High-incidence / multiple allo suspected)",
                     details={"pattern": "pan_reactive_ac_negative"}
                 )
                 ok, msg = append_case_record(rec)
                 if ok:
-                    st.success("Saved ✅ (History updated)")
+                    st.success("Saved ✅ (History updated on GitHub)")
                 else:
                     st.warning("⚠️ " + msg)
 
@@ -1444,11 +1477,11 @@ else:
                 rec = build_case_record(
                     pt_name=st.session_state.get("pt_name",""),
                     pt_mrn=st.session_state.get("pt_mrn",""),
-                    tech=st.session_state.get("tech_nm",""),
-                    sex=st.session_state.get("pt_sex",""),
+                    pt_sex=st.session_state.get("pt_sex",""),
                     age_y=st.session_state.get("age_y",0),
                     age_m=st.session_state.get("age_m",0),
                     age_d=st.session_state.get("age_d",0),
+                    tech=st.session_state.get("tech_nm",""),
                     run_dt=st.session_state.get("run_dt", date.today()),
                     lot_p=st.session_state.lot_p,
                     lot_s=st.session_state.lot_s,
@@ -1461,15 +1494,12 @@ else:
                     dat_igg=st.session_state.get("dat_igg",""),
                     dat_c3d=st.session_state.get("dat_c3d",""),
                     dat_ctl=st.session_state.get("dat_ctl",""),
-                    abo_card=abo_card,
-                    abo_obj=abo_obj,
-                    phenotype_obj=phenotype_obj,
                     conclusion_short="Pan-reactive + AC Positive (DAT pathway)",
                     details={"pattern": "pan_reactive_ac_positive"}
                 )
                 ok, msg = append_case_record(rec)
                 if ok:
-                    st.success("Saved ✅ (History updated)")
+                    st.success("Saved ✅ (History updated on GitHub)")
                 else:
                     st.warning("⚠️ " + msg)
 
@@ -1589,14 +1619,6 @@ else:
                     strong = ("D" in confirmed and "C" in confirmed)
                     st.markdown(anti_g_alert_html(strong=strong), unsafe_allow_html=True)
 
-                # NEW: phenotype conflict alert (based on confirmed/resolved)
-                confirmed_list = sorted(list(confirmed)) if isinstance(confirmed, set) else []
-                resolved_list = resolved if isinstance(resolved, list) else []
-                check_ab = list(dict.fromkeys(confirmed_list + resolved_list))
-                conflict_msg = _phenotype_conflict_alert(check_ab, phenotype_obj)
-                if conflict_msg:
-                    st.markdown(f"<div class='clinical-danger'>{conflict_msg}</div>", unsafe_allow_html=True)
-
                 st.write("---")
 
                 targets_needing_selected = list(dict.fromkeys(
@@ -1635,6 +1657,9 @@ else:
                 else:
                     st.success("No Selected Cells needed: all resolved antibodies are confirmed AND no clinically significant background remains unexcluded.")
 
+                confirmed_list = sorted(list(confirmed)) if isinstance(confirmed, set) else []
+                resolved_list = resolved if isinstance(resolved, list) else []
+                needs_work_list = needs_work if isinstance(needs_work, list) else []
                 supported_list = sorted(list(supported_bg.keys())) if isinstance(supported_bg, dict) else []
 
                 if confirmed_list:
@@ -1647,7 +1672,7 @@ else:
                 details = {
                     "best_combo": list(best),
                     "resolved": resolved_list,
-                    "needs_work": needs_work if isinstance(needs_work, list) else [],
+                    "needs_work": needs_work_list,
                     "confirmed": confirmed_list,
                     "supported_bg": supported_list,
                     "not_excluded_sig": other_sig_final if isinstance(other_sig_final, list) else [],
@@ -1659,11 +1684,11 @@ else:
                 rec = build_case_record(
                     pt_name=st.session_state.get("pt_name",""),
                     pt_mrn=st.session_state.get("pt_mrn",""),
-                    tech=st.session_state.get("tech_nm",""),
-                    sex=st.session_state.get("pt_sex",""),
+                    pt_sex=st.session_state.get("pt_sex",""),
                     age_y=st.session_state.get("age_y",0),
                     age_m=st.session_state.get("age_m",0),
                     age_d=st.session_state.get("age_d",0),
+                    tech=st.session_state.get("tech_nm",""),
                     run_dt=st.session_state.get("run_dt", date.today()),
                     lot_p=st.session_state.lot_p,
                     lot_s=st.session_state.lot_s,
@@ -1676,15 +1701,12 @@ else:
                     dat_igg=st.session_state.get("dat_igg",""),
                     dat_c3d=st.session_state.get("dat_c3d",""),
                     dat_ctl=st.session_state.get("dat_ctl",""),
-                    abo_card=abo_card,
-                    abo_obj=abo_obj,
-                    phenotype_obj=phenotype_obj,
                     conclusion_short=conclusion_short,
                     details=details
                 )
                 ok, msg = append_case_record(rec)
                 if ok:
-                    st.success("Saved ✅ (History updated)")
+                    st.success("Saved ✅ (History updated on GitHub)")
                 else:
                     st.warning("⚠️ " + msg)
 
