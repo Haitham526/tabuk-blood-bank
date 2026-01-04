@@ -1,0 +1,58 @@
+{
+  "patient": {
+    "name": "Haitham Ismail",
+    "mrn": "55555"
+  },
+  "tech": "51599657",
+  "run_dt": "2026-01-04",
+  "saved_at": "2026-01-04 18:56:15",
+  "lots": {
+    "panel": "45161.35.x   Exp:19-01-2026",
+    "screen": "45184.49.x   Exp:19-01-2026"
+  },
+  "inputs": {
+    "panel_reactions": {
+      "1": "+2",
+      "2": "+2",
+      "3": "+2",
+      "4": "0",
+      "5": "0",
+      "6": "0",
+      "7": "0",
+      "8": "+2",
+      "9": "0",
+      "10": "0",
+      "11": "0"
+    },
+    "screen_reactions": {
+      "I": "+2",
+      "II": "+2",
+      "III": "0"
+    },
+    "AC": "Negative",
+    "recent_tx": false
+  },
+  "all_rx": false,
+  "dat": {
+    "igg": "",
+    "c3d": "",
+    "control": ""
+  },
+  "selected_cells": [],
+  "interpretation": {
+    "best_combo": [
+      "D"
+    ],
+    "resolved": [
+      "D"
+    ],
+    "needs_work": [],
+    "confirmed": [
+      "D"
+    ],
+    "supported_bg": [],
+    "not_excluded_sig": [],
+    "not_excluded_cold": [],
+    "no_discriminating": []
+  }
+}
