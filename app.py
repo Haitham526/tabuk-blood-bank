@@ -1,11 +1,12 @@
 import streamlit as st
 import pandas as pd
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 import json
 import base64
 import requests
 from pathlib import Path
 from itertools import combinations
+import hashlib
 
 # --------------------------------------------------------------------------
 # 0) GitHub Save Engine (uses Streamlit Secrets)
@@ -67,6 +68,9 @@ def load_json_if_exists(local_path: str, default_obj: dict) -> dict:
 CASES_PATH = "data/cases.csv"
 HISTORY_MAX_ROWS = 20000  # you can raise it later if you want
 
+# Only prevents accidental double-save of IDENTICAL record within this window:
+DUPLICATE_WINDOW_MINUTES = 10
+
 HISTORY_COLUMNS = [
     "case_id", "saved_at",
     "mrn", "name", "tech",
@@ -76,6 +80,7 @@ HISTORY_COLUMNS = [
     "all_rx",
     "dat_igg", "dat_c3d", "dat_ctl",
     "conclusion_short",
+    "fingerprint",          # NEW: used only to prevent accidental duplicates
     "summary_json"
 ]
 
@@ -84,6 +89,23 @@ def _safe_str(x):
 
 def _ensure_data_folder():
     Path("data").mkdir(exist_ok=True)
+
+def _now_ts():
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+def _parse_dt(s: str):
+    try:
+        return datetime.strptime(str(s), "%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return None
+
+def _make_fingerprint(obj: dict) -> str:
+    """
+    Stable signature for the case based on core content (NOT timestamps).
+    Used only to prevent accidental duplicate saves (double-click).
+    """
+    txt = json.dumps(obj, ensure_ascii=False, sort_keys=True)
+    return hashlib.sha256(txt.encode("utf-8")).hexdigest()
 
 def load_cases_df() -> pd.DataFrame:
     _ensure_data_folder()
@@ -100,18 +122,44 @@ def save_cases_df(df: pd.DataFrame):
     df.to_csv(CASES_PATH, index=False)
 
 def append_case_record(rec: dict):
+    """
+    Returns: (saved: bool, message: str)
+    - Saves always, except when the SAME fingerprint is saved within DUPLICATE_WINDOW_MINUTES.
+    - This does NOT block multiple visits / different dates / new antibodies.
+    """
     df = load_cases_df()
+
+    fp = _safe_str(rec.get("fingerprint", ""))
+
+    # Duplicate check: only if same fingerprint saved very recently
+    if fp:
+        same = df[df["fingerprint"].astype(str) == fp]
+        if len(same) > 0:
+            # Find most recent saved_at among those
+            try:
+                same2 = same.copy()
+                same2["__dt"] = same2["saved_at"].apply(_parse_dt)
+                same2 = same2.dropna(subset=["__dt"]).sort_values("__dt", ascending=False)
+                if len(same2) > 0:
+                    last_dt = same2.iloc[0]["__dt"]
+                    if last_dt and datetime.now() - last_dt <= timedelta(minutes=DUPLICATE_WINDOW_MINUTES):
+                        return (False, f"Duplicate detected: identical record already saved within last {DUPLICATE_WINDOW_MINUTES} minutes.")
+            except Exception:
+                # If parsing fails, do not block saving
+                pass
+
     df2 = pd.concat([df, pd.DataFrame([rec])], ignore_index=True)
 
     # Keep only latest HISTORY_MAX_ROWS rows
     try:
         df2["saved_at"] = df2["saved_at"].astype(str)
+        # sorting by saved_at string works with this format YYYY-MM-DD HH:MM:SS
         df2 = df2.sort_values("saved_at", ascending=False).head(HISTORY_MAX_ROWS)
-        df2 = df2.sort_values("saved_at", ascending=False)
     except Exception:
         pass
 
     save_cases_df(df2)
+    return (True, "Saved")
 
 def find_case_history(df: pd.DataFrame, mrn: str = "", name: str = "") -> pd.DataFrame:
     mrn = _safe_str(mrn)
@@ -128,9 +176,6 @@ def find_case_history(df: pd.DataFrame, mrn: str = "", name: str = "") -> pd.Dat
     except Exception:
         pass
     return out
-
-def _now_ts():
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 def build_case_record(
     pt_name: str,
@@ -160,6 +205,7 @@ def build_case_record(
 
     case_id = f"{mrn}_{saved_at}".replace(" ", "_").replace(":", "-")
 
+    # Core payload for viewing later
     payload = {
         "patient": {"name": name, "mrn": mrn},
         "tech": tech,
@@ -172,6 +218,20 @@ def build_case_record(
         "selected_cells": ext,
         "interpretation": details or {}
     }
+
+    # Stable content for fingerprint (exclude saved_at/case_id)
+    fp_obj = {
+        "mrn": mrn,
+        "run_dt": run_dt_str,
+        "lots": {"panel": lot_p, "screen": lot_s},
+        "inputs": {"panel_reactions": in_p, "screen_reactions": in_s, "AC": ac_res, "recent_tx": bool(recent_tx)},
+        "all_rx": bool(all_rx),
+        "dat": {"igg": dat_igg, "c3d": dat_c3d, "control": dat_ctl},
+        "selected_cells": ext,
+        "interpretation": details or {},
+        "conclusion_short": _safe_str(conclusion_short)
+    }
+    fingerprint = _make_fingerprint(fp_obj)
 
     return {
         "case_id": case_id,
@@ -189,6 +249,7 @@ def build_case_record(
         "dat_c3d": dat_c3d,
         "dat_ctl": dat_ctl,
         "conclusion_short": _safe_str(conclusion_short),
+        "fingerprint": fingerprint,
         "summary_json": json.dumps(payload, ensure_ascii=False)
     }
 
@@ -471,7 +532,6 @@ def background_auto_resolution(background_list: list, active_not_excluded: set, 
 
     return auto_ruled_out, supported, inconclusive, no_disc
 
-# ---------------- Patient antigen-negative check reminder ----------------
 def patient_antigen_negative_reminder(antibodies: list, strong: bool = True) -> str:
     if not antibodies:
         return ""
@@ -503,7 +563,6 @@ def patient_antigen_negative_reminder(antibodies: list, strong: bool = True) -> 
     </div>
     """
 
-# ---------------- Anti-G alert (D + C pattern) ----------------
 def anti_g_alert_html(strong: bool = False) -> str:
     box = "clinical-danger" if strong else "clinical-alert"
     return f"""
@@ -526,22 +585,16 @@ def _token_to_01(tok: str) -> int:
     s = str(tok).strip().lower()
     if s in ("", "0", "neg", "negative", "nt", "n/t", "na", "n/a", "-", "—"):
         return 0
-    # anything that looks positive
     if "+" in s:
         return 1
     if s in ("1", "1+", "2", "2+", "3", "3+", "4", "4+", "pos", "positive", "w", "wk", "weak", "w+", "wf"):
         return 1
-    # fallback: if it contains digits other than 0 treat as positive
     for ch in s:
         if ch.isdigit() and ch != "0":
             return 1
     return 0
 
 def parse_paste_table(txt: str, expected_rows: int, id_prefix: str, id_list=None):
-    """
-    Expect each line to contain 26 tab-separated tokens in AGS order.
-    If more than 26 tokens exist, take the LAST 26 (common when row starts with labels).
-    """
     rows = [r for r in str(txt).strip().splitlines() if r.strip()]
     data = []
 
@@ -552,10 +605,8 @@ def parse_paste_table(txt: str, expected_rows: int, id_prefix: str, id_list=None
         parts = rows[i].split("\t")
         vals = [_token_to_01(p) for p in parts]
 
-        # if extra leading columns exist, keep last 26
         if len(vals) > len(AGS):
             vals = vals[-len(AGS):]
-        # pad to 26 if short
         while len(vals) < len(AGS):
             vals.append(0)
 
@@ -565,9 +616,7 @@ def parse_paste_table(txt: str, expected_rows: int, id_prefix: str, id_list=None
         data.append(d)
 
     df = pd.DataFrame(data)
-    # if not enough rows pasted, keep remaining rows from current state (safer)
     if len(df) < expected_rows:
-        # create empty rows for missing lines (won't overwrite existing unless user wants)
         for k in range(len(df), expected_rows):
             d = {"ID": id_list[k], **{ag: 0 for ag in AGS}}
             df = pd.concat([df, pd.DataFrame([d])], ignore_index=True)
@@ -630,7 +679,6 @@ if nav == "Supervisor":
                 p_txt = st.text_area("Paste 11 rows (tab-separated; 26 columns in AGS order)", height=170, key="p11_paste")
                 if st.button("✅ Update Panel 11 from Paste", key="upd_p11_paste"):
                     df_new, msg = parse_paste_table(p_txt, expected_rows=11, id_prefix="C")
-                    # keep exact IDs C1..C11 (as in default)
                     df_new["ID"] = [f"C{i+1}" for i in range(11)]
                     st.session_state.panel11_df = df_new.copy()
                     st.success(msg + " Panel 11 updated locally.")
@@ -745,7 +793,7 @@ else:
     _ = top4.date_input("Date", value=date.today(), key="run_dt")
 
     # ---------------------------
-    # HISTORY LOOKUP (NEW)
+    # HISTORY LOOKUP
     # ---------------------------
     cases_df = load_cases_df()
     hist = find_case_history(cases_df, mrn=st.session_state.get("pt_mrn",""), name=st.session_state.get("pt_name",""))
@@ -888,7 +936,6 @@ else:
             </div>
             """, unsafe_allow_html=True)
 
-            # -------- SAVE TO HISTORY (PAN AC NEG) --------
             if st.button("💾 Save Case to History", key="save_case_pan_acneg"):
                 rec = build_case_record(
                     pt_name=st.session_state.get("pt_name",""),
@@ -909,8 +956,11 @@ else:
                     conclusion_short="Pan-reactive + AC Negative (High-incidence / multiple allo suspected)",
                     details={"pattern": "pan_reactive_ac_negative"}
                 )
-                append_case_record(rec)
-                st.success("Saved ✅ (History updated)")
+                ok, msg = append_case_record(rec)
+                if ok:
+                    st.success("Saved ✅ (History updated)")
+                else:
+                    st.warning("⚠️ " + msg)
 
         elif all_rx and (not ac_negative):
             st.markdown("""
@@ -987,7 +1037,6 @@ else:
             </div>
             """, unsafe_allow_html=True)
 
-            # -------- SAVE TO HISTORY (PAN AC POS) --------
             if st.button("💾 Save Case to History", key="save_case_pan_acpos"):
                 rec = build_case_record(
                     pt_name=st.session_state.get("pt_name",""),
@@ -1008,8 +1057,11 @@ else:
                     conclusion_short="Pan-reactive + AC Positive (DAT pathway)",
                     details={"pattern": "pan_reactive_ac_positive"}
                 )
-                append_case_record(rec)
-                st.success("Saved ✅ (History updated)")
+                ok, msg = append_case_record(rec)
+                if ok:
+                    st.success("Saved ✅ (History updated)")
+                else:
+                    st.warning("⚠️ " + msg)
 
         if all_rx:
             pass
@@ -1165,7 +1217,6 @@ else:
                 else:
                     st.success("No Selected Cells needed: all resolved antibodies are confirmed AND no clinically significant background remains unexcluded.")
 
-                # Prepare history summary
                 confirmed_list = sorted(list(confirmed)) if isinstance(confirmed, set) else []
                 resolved_list = resolved if isinstance(resolved, list) else []
                 needs_work_list = needs_work if isinstance(needs_work, list) else []
@@ -1189,7 +1240,6 @@ else:
                     "no_discriminating": no_disc_bg if isinstance(no_disc_bg, list) else []
                 }
 
-            # -------- SAVE TO HISTORY (NON-PAN) --------
             if st.button("💾 Save Case to History", key="save_case_nonpan"):
                 rec = build_case_record(
                     pt_name=st.session_state.get("pt_name",""),
@@ -1210,8 +1260,11 @@ else:
                     conclusion_short=conclusion_short,
                     details=details
                 )
-                append_case_record(rec)
-                st.success("Saved ✅ (History updated)")
+                ok, msg = append_case_record(rec)
+                if ok:
+                    st.success("Saved ✅ (History updated)")
+                else:
+                    st.warning("⚠️ " + msg)
 
     with st.expander("➕ Add Selected Cell (From Library)"):
         ex_id = st.text_input("ID", key="ex_id")
