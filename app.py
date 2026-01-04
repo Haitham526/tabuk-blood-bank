@@ -1137,15 +1137,14 @@ else:
     col8.date_input("Date", value=date.today(), key="run_dt")
 
     # Neonate hint
-age_days = calc_age_days(
-    st.session_state.get("age_y", 0),
-    st.session_state.get("age_m", 0),
-    st.session_state.get("age_d", 0),
-)
-
-# IMPORTANT: 0/0/0 = "not entered" => NOT neonate
-neonate = (age_days > 0 and age_days < 120)  # < 4 months
-
+    neonate = is_neonate_under_4_months(st.session_state.get("age_y",0), st.session_state.get("age_m",0), st.session_state.get("age_d",0))
+    if neonate:
+        st.markdown("""
+        <div class='clinical-info'>
+        👶 <b>Neonate detected (age &lt; 4 months)</b>: Reverse grouping is typically unreliable.<br>
+        If purpose is <b>RhIG eligibility</b> use DVI+; if purpose is <b>transfusion</b> use DVI− (per your policy).
+        </div>
+        """, unsafe_allow_html=True)
 
     # ---------------------------
     # ABO / Phenotype (restored)
