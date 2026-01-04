@@ -66,9 +66,7 @@ def load_json_if_exists(local_path: str, default_obj: dict) -> dict:
 # 0.1) LOCAL HISTORY ENGINE (Simple internal storage: data/cases.csv)
 # --------------------------------------------------------------------------
 CASES_PATH = "data/cases.csv"
-HISTORY_MAX_ROWS = 20000  # you can raise it later if you want
-
-# Only prevents accidental double-save of IDENTICAL record within this window:
+HISTORY_MAX_ROWS = 20000
 DUPLICATE_WINDOW_MINUTES = 10
 
 HISTORY_COLUMNS = [
@@ -80,7 +78,7 @@ HISTORY_COLUMNS = [
     "all_rx",
     "dat_igg", "dat_c3d", "dat_ctl",
     "conclusion_short",
-    "fingerprint",          # NEW: used only to prevent accidental duplicates
+    "fingerprint",
     "summary_json"
 ]
 
@@ -100,10 +98,6 @@ def _parse_dt(s: str):
         return None
 
 def _make_fingerprint(obj: dict) -> str:
-    """
-    Stable signature for the case based on core content (NOT timestamps).
-    Used only to prevent accidental duplicate saves (double-click).
-    """
     txt = json.dumps(obj, ensure_ascii=False, sort_keys=True)
     return hashlib.sha256(txt.encode("utf-8")).hexdigest()
 
@@ -111,7 +105,6 @@ def load_cases_df() -> pd.DataFrame:
     _ensure_data_folder()
     default = pd.DataFrame(columns=HISTORY_COLUMNS)
     df = load_csv_if_exists(CASES_PATH, default)
-    # Ensure all expected columns exist (backward compatible)
     for col in HISTORY_COLUMNS:
         if col not in df.columns:
             df[col] = ""
@@ -122,20 +115,12 @@ def save_cases_df(df: pd.DataFrame):
     df.to_csv(CASES_PATH, index=False)
 
 def append_case_record(rec: dict):
-    """
-    Returns: (saved: bool, message: str)
-    - Saves always, except when the SAME fingerprint is saved within DUPLICATE_WINDOW_MINUTES.
-    - This does NOT block multiple visits / different dates / new antibodies.
-    """
     df = load_cases_df()
-
     fp = _safe_str(rec.get("fingerprint", ""))
 
-    # Duplicate check: only if same fingerprint saved very recently
     if fp:
         same = df[df["fingerprint"].astype(str) == fp]
         if len(same) > 0:
-            # Find most recent saved_at among those
             try:
                 same2 = same.copy()
                 same2["__dt"] = same2["saved_at"].apply(_parse_dt)
@@ -145,15 +130,12 @@ def append_case_record(rec: dict):
                     if last_dt and datetime.now() - last_dt <= timedelta(minutes=DUPLICATE_WINDOW_MINUTES):
                         return (False, f"Duplicate detected: identical record already saved within last {DUPLICATE_WINDOW_MINUTES} minutes.")
             except Exception:
-                # If parsing fails, do not block saving
                 pass
 
     df2 = pd.concat([df, pd.DataFrame([rec])], ignore_index=True)
 
-    # Keep only latest HISTORY_MAX_ROWS rows
     try:
         df2["saved_at"] = df2["saved_at"].astype(str)
-        # sorting by saved_at string works with this format YYYY-MM-DD HH:MM:SS
         df2 = df2.sort_values("saved_at", ascending=False).head(HISTORY_MAX_ROWS)
     except Exception:
         pass
@@ -205,7 +187,6 @@ def build_case_record(
 
     case_id = f"{mrn}_{saved_at}".replace(" ", "_").replace(":", "-")
 
-    # Core payload for viewing later
     payload = {
         "patient": {"name": name, "mrn": mrn},
         "tech": tech,
@@ -219,7 +200,6 @@ def build_case_record(
         "interpretation": details or {}
     }
 
-    # Stable content for fingerprint (exclude saved_at/case_id)
     fp_obj = {
         "mrn": mrn,
         "run_dt": run_dt_str,
@@ -269,6 +249,50 @@ st.markdown("""
     .clinical-danger { background-color: #f8d7da; border: 2px solid #dc3545; padding: 12px; color: #000; font-weight: 700; margin: 8px 0; border-radius: 6px;}
     .clinical-info { background-color: #cff4fc; border: 2px solid #0dcaf0; padding: 12px; color: #000; font-weight: 600; margin: 8px 0; border-radius: 6px;}
     .cell-hint { font-size: 0.9em; color: #155724; background: #d4edda; padding: 2px 6px; border-radius: 4px; }
+
+    .report-card {
+        border: 2px solid #8B0000;
+        border-radius: 12px;
+        padding: 14px 16px;
+        background: #fff;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+        margin-top: 10px;
+        margin-bottom: 12px;
+    }
+    .report-title {
+        font-size: 20px;
+        font-weight: 800;
+        color: #8B0000;
+        margin-bottom: 2px;
+    }
+    .report-sub {
+        color: #555;
+        font-size: 12px;
+        margin-bottom: 10px;
+    }
+    .kv {
+        background: #f8f9fa;
+        border: 1px solid #e9ecef;
+        border-radius: 10px;
+        padding: 10px 12px;
+        height: 100%;
+    }
+    .kv b { color: #111; }
+    .chip {
+        display:inline-block;
+        padding: 3px 8px;
+        border-radius: 999px;
+        font-weight: 700;
+        font-size: 12px;
+        margin-right: 6px;
+        margin-bottom: 6px;
+        border: 1px solid #ddd;
+        background:#fafafa;
+    }
+    .chip-danger{ border-color:#dc3545; color:#a40012; background:#fff0f2;}
+    .chip-ok{ border-color:#198754; color:#0f5132; background:#ecf7f0;}
+    .chip-warn{ border-color:#ffca2c; color:#7a5a00; background:#fff9e6;}
+
     .dr-signature {
         position: fixed; bottom: 10px; right: 15px;
         background: rgba(255,255,255,0.95);
@@ -325,7 +349,6 @@ if "lot_s" not in st.session_state:
 if "ext" not in st.session_state:
     st.session_state.ext = []
 
-# analysis persistence
 if "analysis_ready" not in st.session_state:
     st.session_state.analysis_ready = False
 if "analysis_payload" not in st.session_state:
@@ -579,6 +602,156 @@ def anti_g_alert_html(strong: bool = False) -> str:
     """
 
 # --------------------------------------------------------------------------
+# 4.6) HISTORY REPORT RENDERER (Professional view instead of JSON)
+# --------------------------------------------------------------------------
+def _as_list(x):
+    return x if isinstance(x, list) else []
+
+def _fmt_antibody_list(lst):
+    lst = [a for a in _as_list(lst) if a]
+    if not lst:
+        return "—"
+    return ", ".join([f"Anti-{a}" for a in lst])
+
+def render_history_report(payload: dict):
+    patient = payload.get("patient", {}) or {}
+    lots = payload.get("lots", {}) or {}
+    inputs = payload.get("inputs", {}) or {}
+    dat = payload.get("dat", {}) or {}
+    interp = payload.get("interpretation", {}) or {}
+    selected = payload.get("selected_cells", []) or []
+
+    name = _safe_str(patient.get("name",""))
+    mrn  = _safe_str(patient.get("mrn",""))
+    tech = _safe_str(payload.get("tech",""))
+    run_dt = _safe_str(payload.get("run_dt",""))
+    saved_at = _safe_str(payload.get("saved_at",""))
+
+    ac = _safe_str(inputs.get("AC",""))
+    recent_tx = bool(inputs.get("recent_tx", False))
+    all_rx = bool(payload.get("all_rx", False))
+
+    lot_p = _safe_str(lots.get("panel",""))
+    lot_s = _safe_str(lots.get("screen",""))
+
+    # Chips (flags)
+    chips = []
+    chips.append(f"<span class='chip chip-ok'>AC: {ac or '—'}</span>")
+    chips.append(f"<span class='chip {'chip-danger' if all_rx else 'chip-ok'}'>Pattern: {'PAN-reactive' if all_rx else 'Non-pan'}</span>")
+    if recent_tx:
+        chips.append("<span class='chip chip-danger'>Recent transfusion ≤ 4 weeks</span>")
+    else:
+        chips.append("<span class='chip chip-ok'>No recent transfusion flag</span>")
+
+    # DAT chips
+    dat_igg = _safe_str(dat.get("igg",""))
+    dat_c3d = _safe_str(dat.get("c3d",""))
+    dat_ctl = _safe_str(dat.get("control",""))
+    if dat_igg or dat_c3d or dat_ctl:
+        chips.append(f"<span class='chip chip-warn'>DAT IgG: {dat_igg or '—'}</span>")
+        chips.append(f"<span class='chip chip-warn'>DAT C3d: {dat_c3d or '—'}</span>")
+        chips.append(f"<span class='chip chip-warn'>DAT Control: {dat_ctl or '—'}</span>")
+
+    st.markdown(f"""
+    <div class="report-card">
+        <div class="report-title">Antibody Identification — History Report</div>
+        <div class="report-sub">Saved at: <b>{saved_at or '—'}</b> &nbsp;|&nbsp; Run Date: <b>{run_dt or '—'}</b></div>
+        <div>{''.join(chips)}</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.markdown(f"<div class='kv'><b>Patient Name</b><br>{name or '—'}</div>", unsafe_allow_html=True)
+    with c2:
+        st.markdown(f"<div class='kv'><b>MRN</b><br>{mrn or '—'}</div>", unsafe_allow_html=True)
+    with c3:
+        st.markdown(f"<div class='kv'><b>Tech / Operator</b><br>{tech or '—'}</div>", unsafe_allow_html=True)
+
+    st.write("")
+    a1, a2 = st.columns(2)
+    with a1:
+        st.markdown(f"<div class='kv'><b>ID Panel Lot</b><br>{lot_p or '—'}</div>", unsafe_allow_html=True)
+    with a2:
+        st.markdown(f"<div class='kv'><b>Screen Lot</b><br>{lot_s or '—'}</div>", unsafe_allow_html=True)
+
+    # Reactions
+    st.write("")
+    st.subheader("Reactions Summary")
+
+    screen_rx = inputs.get("screen_reactions", {}) or {}
+    panel_rx  = inputs.get("panel_reactions", {}) or {}
+
+    sr_df = pd.DataFrame([{
+        "Screen I": screen_rx.get("I",""),
+        "Screen II": screen_rx.get("II",""),
+        "Screen III": screen_rx.get("III",""),
+    }])
+    st.markdown("**Screening Cells**")
+    st.dataframe(sr_df, use_container_width=True)
+
+    pr_rows = []
+    for i in range(1, 12):
+        pr_rows.append({"Cell": f"Panel #{i}", "Reaction": panel_rx.get(str(i), panel_rx.get(i, ""))})
+    pr_df = pd.DataFrame(pr_rows)
+    st.markdown("**Panel Cells (1–11)**")
+    st.dataframe(pr_df, use_container_width=True)
+
+    # Interpretation
+    st.write("")
+    st.subheader("Interpretation / Results")
+
+    pattern = _safe_str(interp.get("pattern",""))
+    if pattern:
+        st.info(f"Pattern pathway: {pattern}")
+
+    best_combo = interp.get("best_combo", None)
+    if best_combo is not None:
+        st.markdown("**Primary Suggested Combination (best fit)**")
+        st.write(_fmt_antibody_list(best_combo))
+
+    confirmed = interp.get("confirmed", [])
+    resolved  = interp.get("resolved", [])
+    needs_work = interp.get("needs_work", [])
+    supported_bg = interp.get("supported_bg", [])
+    not_ex_sig = interp.get("not_excluded_sig", [])
+    not_ex_cold = interp.get("not_excluded_cold", [])
+    no_disc = interp.get("no_discriminating", [])
+
+    b1, b2, b3 = st.columns(3)
+    with b1:
+        st.markdown(f"<div class='kv'><b>Confirmed</b><br>{_fmt_antibody_list(confirmed)}</div>", unsafe_allow_html=True)
+    with b2:
+        st.markdown(f"<div class='kv'><b>Resolved (not fully confirmed)</b><br>{_fmt_antibody_list(resolved)}</div>", unsafe_allow_html=True)
+    with b3:
+        st.markdown(f"<div class='kv'><b>Needs work / Interference</b><br>{_fmt_antibody_list(needs_work)}</div>", unsafe_allow_html=True)
+
+    if supported_bg:
+        st.warning("Background suspected (not confirmed): " + _fmt_antibody_list(supported_bg))
+    if not_ex_sig:
+        st.warning("Clinically significant NOT excluded: " + _fmt_antibody_list(not_ex_sig))
+    if not_ex_cold:
+        st.info("Cold/insignificant NOT excluded: " + _fmt_antibody_list(not_ex_cold))
+    if no_disc:
+        st.warning("No discriminating cells available for: " + _fmt_antibody_list(no_disc))
+
+    # Selected cells
+    st.write("")
+    st.subheader("Selected Cells Added (if any)")
+    if selected:
+        try:
+            sc_df = pd.DataFrame(selected)
+            cols = [c for c in ["id", "res"] if c in sc_df.columns]
+            if cols:
+                st.dataframe(sc_df[cols], use_container_width=True)
+            else:
+                st.dataframe(sc_df, use_container_width=True)
+        except Exception:
+            st.write(selected)
+    else:
+        st.write("— None —")
+
+# --------------------------------------------------------------------------
 # 4.5) SUPERVISOR: Copy/Paste Parser (Option A: 26 columns in AGS order)
 # --------------------------------------------------------------------------
 def _token_to_01(tok: str) -> int:
@@ -793,7 +966,7 @@ else:
     _ = top4.date_input("Date", value=date.today(), key="run_dt")
 
     # ---------------------------
-    # HISTORY LOOKUP
+    # HISTORY LOOKUP (PRO VIEW)
     # ---------------------------
     cases_df = load_cases_df()
     hist = find_case_history(cases_df, mrn=st.session_state.get("pt_mrn",""), name=st.session_state.get("pt_name",""))
@@ -816,12 +989,26 @@ else:
                 idx_list,
                 format_func=lambda i: f"{hist.iloc[i]['saved_at']} | {hist.iloc[i]['conclusion_short']}"
             )
-            if st.button("Open selected run details", key="btn_open_hist"):
+
+            bA, bB = st.columns([1,1])
+            with bA:
+                view_report = st.button("Open selected run (Report)", key="btn_open_hist_report")
+            with bB:
+                view_json = st.button("View Raw JSON (Debug)", key="btn_open_hist_json")
+
+            if view_report or view_json:
                 try:
-                    st.json(json.loads(hist.iloc[pick]["summary_json"]))
+                    payload = json.loads(hist.iloc[pick]["summary_json"])
+                    if view_report:
+                        render_history_report(payload)
+                    if view_json:
+                        st.json(payload)
                 except Exception:
                     st.error("Could not open this record (corrupted JSON).")
 
+    # ----------------------------------------------------------------------
+    # MAIN FORM
+    # ----------------------------------------------------------------------
     with st.form("main_form", clear_on_submit=False):
         st.write("### Reaction Entry")
         L, R = st.columns([1, 2.5])
