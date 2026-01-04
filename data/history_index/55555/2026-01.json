@@ -1,0 +1,15 @@
+[
+  {
+    "saved_at": "2026-01-04 18:56:15",
+    "run_dt": "2026-01-04",
+    "tech": "51599657",
+    "name": "Haitham Ismail",
+    "mrn": "55555",
+    "conclusion_short": "Confirmed: Anti-D",
+    "ac_res": "Negative",
+    "recent_tx": false,
+    "all_rx": false,
+    "fingerprint": "2b61dff8e3b1d47424b7d3228632754cf1e932874fc7e28fdcdf6863d3ffb172",
+    "run_file": "data/history_runs/55555/55555_2026-01-04_18-56-15.json"
+  }
+]
