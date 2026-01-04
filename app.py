@@ -9,13 +9,56 @@ from itertools import combinations
 import hashlib
 
 # --------------------------------------------------------------------------
-# 0) GitHub Save Engine (uses Streamlit Secrets)
+# 0) GitHub Engine (uses Streamlit Secrets)
 # --------------------------------------------------------------------------
 def _gh_get_cfg():
     token = st.secrets.get("GITHUB_TOKEN", None)
     repo  = st.secrets.get("GITHUB_REPO", None)  # e.g. "Haitham526/tabuk-blood-bank"
     branch = st.secrets.get("GITHUB_BRANCH", "main")
     return token, repo, branch
+
+def github_get_file_text(path_in_repo: str):
+    """Return (text, sha) or (None, None) if not found."""
+    token, repo, branch = _gh_get_cfg()
+    if not token or not repo:
+        raise RuntimeError("Missing Streamlit Secrets: GITHUB_TOKEN / GITHUB_REPO")
+
+    api = f"https://api.github.com/repos/{repo}/contents/{path_in_repo}"
+    headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github+json"}
+
+    r = requests.get(api, headers=headers, params={"ref": branch}, timeout=30)
+    if r.status_code == 404:
+        return None, None
+    if r.status_code != 200:
+        raise RuntimeError(f"GitHub GET error {r.status_code}: {r.text}")
+
+    j = r.json()
+    sha = j.get("sha")
+    content_b64 = j.get("content", "")
+    if not content_b64:
+        return "", sha
+    raw = base64.b64decode(content_b64).decode("utf-8", errors="replace")
+    return raw, sha
+
+def github_list_dir(path_in_repo: str):
+    """List directory contents. Returns [] if not found."""
+    token, repo, branch = _gh_get_cfg()
+    if not token or not repo:
+        raise RuntimeError("Missing Streamlit Secrets: GITHUB_TOKEN / GITHUB_REPO")
+
+    api = f"https://api.github.com/repos/{repo}/contents/{path_in_repo}"
+    headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github+json"}
+
+    r = requests.get(api, headers=headers, params={"ref": branch}, timeout=30)
+    if r.status_code == 404:
+        return []
+    if r.status_code != 200:
+        raise RuntimeError(f"GitHub LIST error {r.status_code}: {r.text}")
+
+    data = r.json()
+    if isinstance(data, list):
+        return data
+    return []
 
 def github_upsert_file(path_in_repo: str, content_text: str, commit_message: str):
     token, repo, branch = _gh_get_cfg()
@@ -63,30 +106,16 @@ def load_json_if_exists(local_path: str, default_obj: dict) -> dict:
     return default_obj
 
 # --------------------------------------------------------------------------
-# 0.1) LOCAL HISTORY ENGINE (Simple internal storage: data/cases.csv)
+# 0.1) GITHUB HISTORY ENGINE (Large scalable storage)
+#   - Each run saved as its own JSON file
+#   - Per-patient monthly index for fast lookup
 # --------------------------------------------------------------------------
-CASES_PATH = "data/cases.csv"
-HISTORY_MAX_ROWS = 20000
+GH_RUNS_ROOT  = "data/history_runs"
+GH_INDEX_ROOT = "data/history_index"
 DUPLICATE_WINDOW_MINUTES = 10
-
-HISTORY_COLUMNS = [
-    "case_id", "saved_at",
-    "mrn", "name", "tech",
-    "run_dt",
-    "lot_p", "lot_s",
-    "ac_res", "recent_tx",
-    "all_rx",
-    "dat_igg", "dat_c3d", "dat_ctl",
-    "conclusion_short",
-    "fingerprint",
-    "summary_json"
-]
 
 def _safe_str(x):
     return "" if x is None else str(x).strip()
-
-def _ensure_data_folder():
-    Path("data").mkdir(exist_ok=True)
 
 def _now_ts():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -101,63 +130,145 @@ def _make_fingerprint(obj: dict) -> str:
     txt = json.dumps(obj, ensure_ascii=False, sort_keys=True)
     return hashlib.sha256(txt.encode("utf-8")).hexdigest()
 
-def load_cases_df() -> pd.DataFrame:
-    _ensure_data_folder()
-    default = pd.DataFrame(columns=HISTORY_COLUMNS)
-    df = load_csv_if_exists(CASES_PATH, default)
-    for col in HISTORY_COLUMNS:
-        if col not in df.columns:
-            df[col] = ""
-    return df[HISTORY_COLUMNS]
+def gh_read_json(path_in_repo: str, default_obj):
+    txt, _sha = github_get_file_text(path_in_repo)
+    if txt is None:
+        return default_obj, None
+    try:
+        return json.loads(txt), _sha
+    except Exception:
+        return default_obj, _sha
 
-def save_cases_df(df: pd.DataFrame):
-    _ensure_data_folder()
-    df.to_csv(CASES_PATH, index=False)
+def gh_write_json(path_in_repo: str, obj, msg: str):
+    content = json.dumps(obj, ensure_ascii=False, indent=2)
+    github_upsert_file(path_in_repo, content, msg)
 
-def append_case_record(rec: dict):
-    df = load_cases_df()
-    fp = _safe_str(rec.get("fingerprint", ""))
+def _index_path(mrn: str, run_dt: date) -> str:
+    mrn = _safe_str(mrn)
+    ym = f"{run_dt.year:04d}-{run_dt.month:02d}"
+    return f"{GH_INDEX_ROOT}/{mrn}/{ym}.json"
 
-    if fp:
-        same = df[df["fingerprint"].astype(str) == fp]
-        if len(same) > 0:
-            try:
-                same2 = same.copy()
-                same2["__dt"] = same2["saved_at"].apply(_parse_dt)
-                same2 = same2.dropna(subset=["__dt"]).sort_values("__dt", ascending=False)
-                if len(same2) > 0:
-                    last_dt = same2.iloc[0]["__dt"]
+def _run_path(mrn: str, case_id: str) -> str:
+    mrn = _safe_str(mrn)
+    return f"{GH_RUNS_ROOT}/{mrn}/{case_id}.json"
+
+def gh_get_patient_history(mrn: str):
+    """
+    Returns list of index entries (merged across all month files),
+    sorted by saved_at desc.
+    """
+    mrn = _safe_str(mrn)
+    if not mrn:
+        return []
+
+    folder = f"{GH_INDEX_ROOT}/{mrn}"
+    items = github_list_dir(folder)
+    files = []
+    for it in items:
+        if it.get("type") == "file" and str(it.get("name","")).endswith(".json"):
+            files.append(it.get("path"))
+
+    all_rows = []
+    for pth in files:
+        obj, _ = gh_read_json(pth, default_obj=[])
+        if isinstance(obj, list):
+            all_rows.extend(obj)
+
+    def keyfn(x):
+        d = _parse_dt(x.get("saved_at",""))
+        return d or datetime.min
+
+    all_rows.sort(key=keyfn, reverse=True)
+    return all_rows
+
+def gh_load_run_payload(run_file_path: str):
+    payload, _ = gh_read_json(run_file_path, default_obj=None)
+    return payload
+
+def gh_append_case_record(rec: dict):
+    """
+    Saves:
+      1) full run payload in run file
+      2) index entry in monthly index file
+    Also blocks exact duplicates within DUPLICATE_WINDOW_MINUTES.
+    """
+    mrn = _safe_str(rec.get("mrn",""))
+    if not mrn:
+        return (False, "MRN is required to save history to GitHub.")
+
+    # Full payload is stored inside summary_json currently
+    try:
+        payload = json.loads(rec.get("summary_json","{}"))
+    except Exception:
+        payload = {}
+
+    run_dt_str = _safe_str(rec.get("run_dt",""))
+    try:
+        run_dt_obj = datetime.strptime(run_dt_str, "%Y-%m-%d").date()
+    except Exception:
+        run_dt_obj = date.today()
+
+    saved_at = _safe_str(rec.get("saved_at","")) or _now_ts()
+    fp = _safe_str(rec.get("fingerprint",""))
+
+    # 1) Duplicate check: look at newest entries only (fast)
+    try:
+        hist = gh_get_patient_history(mrn)
+        if hist:
+            # check top ~20 only
+            for h in hist[:20]:
+                if _safe_str(h.get("fingerprint","")) == fp:
+                    last_dt = _parse_dt(h.get("saved_at",""))
                     if last_dt and datetime.now() - last_dt <= timedelta(minutes=DUPLICATE_WINDOW_MINUTES):
                         return (False, f"Duplicate detected: identical record already saved within last {DUPLICATE_WINDOW_MINUTES} minutes.")
-            except Exception:
-                pass
-
-    df2 = pd.concat([df, pd.DataFrame([rec])], ignore_index=True)
-
-    try:
-        df2["saved_at"] = df2["saved_at"].astype(str)
-        df2 = df2.sort_values("saved_at", ascending=False).head(HISTORY_MAX_ROWS)
     except Exception:
+        # if GitHub lookup fails, do not block saving
         pass
 
-    save_cases_df(df2)
-    return (True, "Saved")
+    case_id = _safe_str(rec.get("case_id",""))
+    if not case_id:
+        case_id = f"{mrn}_{saved_at}".replace(" ", "_").replace(":", "-")
 
-def find_case_history(df: pd.DataFrame, mrn: str = "", name: str = "") -> pd.DataFrame:
-    mrn = _safe_str(mrn)
-    name = _safe_str(name).lower()
+    run_file = _run_path(mrn, case_id)
 
-    out = df.iloc[0:0]
-    if mrn:
-        out = df[df["mrn"].astype(str) == mrn]
-    elif name:
-        out = df[df["name"].astype(str).str.lower().str.contains(name, na=False)]
+    # Save the full payload as a standalone file
+    try:
+        gh_write_json(run_file, payload, f"Add history run {mrn} {saved_at}")
+    except Exception as e:
+        return (False, f"GitHub save failed (run file): {e}")
+
+    # 2) Update monthly index
+    idx_file = _index_path(mrn, run_dt_obj)
+
+    entry = {
+        "saved_at": saved_at,
+        "run_dt": _safe_str(rec.get("run_dt","")),
+        "tech": _safe_str(rec.get("tech","")),
+        "name": _safe_str(rec.get("name","")),
+        "mrn": mrn,
+        "conclusion_short": _safe_str(rec.get("conclusion_short","")),
+        "ac_res": _safe_str(rec.get("ac_res","")),
+        "recent_tx": bool(rec.get("recent_tx", False)),
+        "all_rx": bool(rec.get("all_rx", False)),
+        "fingerprint": fp,
+        "run_file": run_file
+    }
 
     try:
-        out = out.sort_values("saved_at", ascending=False)
-    except Exception:
-        pass
-    return out
+        cur, _sha = gh_read_json(idx_file, default_obj=[])
+        if not isinstance(cur, list):
+            cur = []
+        cur.append(entry)
+
+        # sort desc
+        cur.sort(key=lambda x: _parse_dt(x.get("saved_at","")) or datetime.min, reverse=True)
+
+        # no trimming (keeps everything) — but still safe because we split per month
+        gh_write_json(idx_file, cur, f"Update history index {mrn} {idx_file.split('/')[-1]}")
+    except Exception as e:
+        return (False, f"GitHub save failed (index): {e}")
+
+    return (True, "Saved to GitHub")
 
 def build_case_record(
     pt_name: str,
@@ -602,7 +713,7 @@ def anti_g_alert_html(strong: bool = False) -> str:
     """
 
 # --------------------------------------------------------------------------
-# 4.6) HISTORY REPORT RENDERER (Professional view instead of JSON)
+# 4.6) HISTORY REPORT RENDERER (Professional view)
 # --------------------------------------------------------------------------
 def _as_list(x):
     return x if isinstance(x, list) else []
@@ -634,7 +745,6 @@ def render_history_report(payload: dict):
     lot_p = _safe_str(lots.get("panel",""))
     lot_s = _safe_str(lots.get("screen",""))
 
-    # Chips (flags)
     chips = []
     chips.append(f"<span class='chip chip-ok'>AC: {ac or '—'}</span>")
     chips.append(f"<span class='chip {'chip-danger' if all_rx else 'chip-ok'}'>Pattern: {'PAN-reactive' if all_rx else 'Non-pan'}</span>")
@@ -643,7 +753,6 @@ def render_history_report(payload: dict):
     else:
         chips.append("<span class='chip chip-ok'>No recent transfusion flag</span>")
 
-    # DAT chips
     dat_igg = _safe_str(dat.get("igg",""))
     dat_c3d = _safe_str(dat.get("c3d",""))
     dat_ctl = _safe_str(dat.get("control",""))
@@ -675,7 +784,6 @@ def render_history_report(payload: dict):
     with a2:
         st.markdown(f"<div class='kv'><b>Screen Lot</b><br>{lot_s or '—'}</div>", unsafe_allow_html=True)
 
-    # Reactions
     st.write("")
     st.subheader("Reactions Summary")
 
@@ -697,7 +805,6 @@ def render_history_report(payload: dict):
     st.markdown("**Panel Cells (1–11)**")
     st.dataframe(pr_df, use_container_width=True)
 
-    # Interpretation
     st.write("")
     st.subheader("Interpretation / Results")
 
@@ -735,7 +842,6 @@ def render_history_report(payload: dict):
     if no_disc:
         st.warning("No discriminating cells available for: " + _fmt_antibody_list(no_disc))
 
-    # Selected cells
     st.write("")
     st.subheader("Selected Cells Added (if any)")
     if selected:
@@ -966,45 +1072,54 @@ else:
     _ = top4.date_input("Date", value=date.today(), key="run_dt")
 
     # ---------------------------
-    # HISTORY LOOKUP (PRO VIEW)
+    # HISTORY LOOKUP (GITHUB PRO VIEW)
     # ---------------------------
-    cases_df = load_cases_df()
-    hist = find_case_history(cases_df, mrn=st.session_state.get("pt_mrn",""), name=st.session_state.get("pt_name",""))
+    mrn_lookup = _safe_str(st.session_state.get("pt_mrn",""))
+    hist = []
+    hist_err = None
 
-    if len(hist) > 0:
+    if mrn_lookup:
+        try:
+            hist = gh_get_patient_history(mrn_lookup)
+        except Exception as e:
+            hist_err = str(e)
+
+    if hist_err:
+        st.error(f"History lookup failed: {hist_err}")
+
+    if mrn_lookup and len(hist) > 0:
         st.markdown(f"""
         <div class='clinical-alert'>
-        🧾 <b>History Found</b> — This patient has <b>{len(hist)}</b> previous record(s).  
+        🧾 <b>History Found</b> — This patient has <b>{len(hist)}</b> previous record(s) on GitHub.  
         Please review before interpretation.
         </div>
         """, unsafe_allow_html=True)
 
         with st.expander("📚 Open Patient History"):
-            show_cols = ["saved_at","run_dt","tech","conclusion_short","ac_res","recent_tx","all_rx"]
-            st.dataframe(hist[show_cols], use_container_width=True)
+            df_hist = pd.DataFrame(hist)
+            show_cols = [c for c in ["saved_at","run_dt","tech","conclusion_short","ac_res","recent_tx","all_rx"] if c in df_hist.columns]
+            st.dataframe(df_hist[show_cols], use_container_width=True)
 
             idx_list = list(range(len(hist)))
             pick = st.selectbox(
                 "Select a previous run",
                 idx_list,
-                format_func=lambda i: f"{hist.iloc[i]['saved_at']} | {hist.iloc[i]['conclusion_short']}"
+                format_func=lambda i: f"{hist[i].get('saved_at','')} | {hist[i].get('conclusion_short','')}"
             )
 
-            bA, bB = st.columns([1,1])
-            with bA:
-                view_report = st.button("Open selected run (Report)", key="btn_open_hist_report")
-            with bB:
-                view_json = st.button("View Raw JSON (Debug)", key="btn_open_hist_json")
-
-            if view_report or view_json:
+            if st.button("Open selected run (Report)", key="btn_open_hist_report"):
                 try:
-                    payload = json.loads(hist.iloc[pick]["summary_json"])
-                    if view_report:
+                    run_file = hist[pick].get("run_file","")
+                    payload = gh_load_run_payload(run_file)
+                    if payload:
                         render_history_report(payload)
-                    if view_json:
-                        st.json(payload)
-                except Exception:
-                    st.error("Could not open this record (corrupted JSON).")
+                    else:
+                        st.error("Could not open this record (empty payload).")
+                except Exception as e:
+                    st.error(f"Could not open this record: {e}")
+
+    elif mrn_lookup and len(hist) == 0:
+        st.info("No GitHub history found for this MRN yet.")
 
     # ----------------------------------------------------------------------
     # MAIN FORM
@@ -1123,7 +1238,7 @@ else:
             </div>
             """, unsafe_allow_html=True)
 
-            if st.button("💾 Save Case to History", key="save_case_pan_acneg"):
+            if st.button("💾 Save Case to History (GitHub)", key="save_case_pan_acneg"):
                 rec = build_case_record(
                     pt_name=st.session_state.get("pt_name",""),
                     pt_mrn=st.session_state.get("pt_mrn",""),
@@ -1143,9 +1258,9 @@ else:
                     conclusion_short="Pan-reactive + AC Negative (High-incidence / multiple allo suspected)",
                     details={"pattern": "pan_reactive_ac_negative"}
                 )
-                ok, msg = append_case_record(rec)
+                ok, msg = gh_append_case_record(rec)
                 if ok:
-                    st.success("Saved ✅ (History updated)")
+                    st.success("Saved ✅ (GitHub History updated)")
                 else:
                     st.warning("⚠️ " + msg)
 
@@ -1224,7 +1339,7 @@ else:
             </div>
             """, unsafe_allow_html=True)
 
-            if st.button("💾 Save Case to History", key="save_case_pan_acpos"):
+            if st.button("💾 Save Case to History (GitHub)", key="save_case_pan_acpos"):
                 rec = build_case_record(
                     pt_name=st.session_state.get("pt_name",""),
                     pt_mrn=st.session_state.get("pt_mrn",""),
@@ -1244,9 +1359,9 @@ else:
                     conclusion_short="Pan-reactive + AC Positive (DAT pathway)",
                     details={"pattern": "pan_reactive_ac_positive"}
                 )
-                ok, msg = append_case_record(rec)
+                ok, msg = gh_append_case_record(rec)
                 if ok:
-                    st.success("Saved ✅ (History updated)")
+                    st.success("Saved ✅ (GitHub History updated)")
                 else:
                     st.warning("⚠️ " + msg)
 
@@ -1427,7 +1542,7 @@ else:
                     "no_discriminating": no_disc_bg if isinstance(no_disc_bg, list) else []
                 }
 
-            if st.button("💾 Save Case to History", key="save_case_nonpan"):
+            if st.button("💾 Save Case to History (GitHub)", key="save_case_nonpan"):
                 rec = build_case_record(
                     pt_name=st.session_state.get("pt_name",""),
                     pt_mrn=st.session_state.get("pt_mrn",""),
@@ -1447,9 +1562,9 @@ else:
                     conclusion_short=conclusion_short,
                     details=details
                 )
-                ok, msg = append_case_record(rec)
+                ok, msg = gh_append_case_record(rec)
                 if ok:
-                    st.success("Saved ✅ (History updated)")
+                    st.success("Saved ✅ (GitHub History updated)")
                 else:
                     st.warning("⚠️ " + msg)
 
