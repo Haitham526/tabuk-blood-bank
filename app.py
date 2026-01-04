@@ -662,8 +662,9 @@ def _age_days(y: int, m: int, d: int) -> int:
 
 def _phenotype_conflict_alert(antibodies: list, ph_obj: dict):
     # If antibody Anti-X exists but phenotype says X Detected, flag.
-    if not antibodies or not isinstance(ph_obj, dict):
+    if (not antibodies) or (not isinstance(ph_obj, dict)):
         return None
+
     bad = []
     for ag in antibodies:
         if not ag:
@@ -671,8 +672,16 @@ def _phenotype_conflict_alert(antibodies: list, ph_obj: dict):
         v = ph_obj.get(ag)
         if isinstance(v, str) and v.strip().lower() == "detected":
             bad.append(ag)
+
     if bad:
-        return f"⚠️ Phenotype conflict: patient recorded as {', '.join([f'{x} Detected' for x in bad])} while antibody Anti-{', Anti-'.join(bad)} is suggested/confirmed. Re-check ID/phenotype (prefer pre-transfusion sample)."
+        return (
+            "⚠️ Phenotype conflict: patient recorded as "
+            + ", ".join([f"{x} Detected" for x in bad])
+            + " while antibody Anti-"
+            + ", Anti-".join(bad)
+            + " is suggested/confirmed. Re-check ID/phenotype (prefer pre-transfusion sample)."
+        )
+
     return None
 
 # --------------------------------------------------------------------------
