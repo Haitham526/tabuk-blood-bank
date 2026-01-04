@@ -9,7 +9,7 @@ from itertools import combinations
 import hashlib
 
 # --------------------------------------------------------------------------
-# 0) GitHub Engine (uses Streamlit Secrets)
+# 0) GitHub Save Engine (uses Streamlit Secrets)
 # --------------------------------------------------------------------------
 def _gh_get_cfg():
     token = st.secrets.get("GITHUB_TOKEN", None)
@@ -44,25 +44,6 @@ def github_upsert_file(path_in_repo: str, content_text: str, commit_message: str
     if w.status_code not in (200, 201):
         raise RuntimeError(f"GitHub PUT error {w.status_code}: {w.text}")
 
-def github_read_file(path_in_repo: str) -> str | None:
-    token, repo, branch = _gh_get_cfg()
-    if not token or not repo:
-        return None
-
-    api = f"https://api.github.com/repos/{repo}/contents/{path_in_repo}"
-    headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github+json"}
-    r = requests.get(api, headers=headers, params={"ref": branch}, timeout=30)
-    if r.status_code == 404:
-        return None
-    if r.status_code != 200:
-        raise RuntimeError(f"GitHub GET error {r.status_code}: {r.text}")
-
-    data = r.json()
-    content = data.get("content", "")
-    if not content:
-        return ""
-    return base64.b64decode(content).decode("utf-8", errors="replace")
-
 def load_csv_if_exists(local_path: str, default_df: pd.DataFrame) -> pd.DataFrame:
     p = Path(local_path)
     if p.exists():
@@ -82,24 +63,23 @@ def load_json_if_exists(local_path: str, default_obj: dict) -> dict:
     return default_obj
 
 # --------------------------------------------------------------------------
-# 0.1) HISTORY ENGINE (GitHub-backed index + per-case JSON for big storage)
+# 0.1) LOCAL HISTORY ENGINE (Simple internal storage: data/cases.csv)
 # --------------------------------------------------------------------------
-HISTORY_INDEX_LOCAL = "data/cases_index.csv"
-HISTORY_INDEX_REPO  = "data/cases_index.csv"   # central index on GitHub
-HISTORY_CASES_DIR   = "history"                # per-case JSON stored here on GitHub
-HISTORY_MAX_INDEX_ROWS = 200000
+CASES_PATH = "data/cases.csv"
+HISTORY_MAX_ROWS = 20000
 DUPLICATE_WINDOW_MINUTES = 10
 
 HISTORY_COLUMNS = [
-    "case_id","saved_at","mrn","name","tech",
-    "sex","age_y","age_m","age_d",
+    "case_id", "saved_at",
+    "mrn", "name", "sex", "age_y", "age_m", "age_d", "tech",
     "run_dt",
-    "abo_reported","rhd_reported",
-    "lot_p","lot_s",
-    "ac_res","recent_tx","all_rx",
+    "lot_p", "lot_s",
+    "ac_res", "recent_tx",
+    "all_rx",
+    "dat_igg", "dat_c3d", "dat_ctl",
     "conclusion_short",
     "fingerprint",
-    "json_path"
+    "summary_json"
 ]
 
 def _safe_str(x):
@@ -121,68 +101,22 @@ def _make_fingerprint(obj: dict) -> str:
     txt = json.dumps(obj, ensure_ascii=False, sort_keys=True)
     return hashlib.sha256(txt.encode("utf-8")).hexdigest()
 
-def _history_try_refresh_from_github():
-    """
-    Best-effort: pull latest index from GitHub (central) into local file.
-    If secrets not configured or network fails → keep local.
-    """
-    try:
-        txt = github_read_file(HISTORY_INDEX_REPO)
-        if txt is None:
-            return
-        _ensure_data_folder()
-        Path(HISTORY_INDEX_LOCAL).write_text(txt, encoding="utf-8")
-    except Exception:
-        # silent fallback
-        return
-
 def load_cases_df() -> pd.DataFrame:
     _ensure_data_folder()
-
-    # refresh once per session
-    if "history_refreshed" not in st.session_state:
-        _history_try_refresh_from_github()
-        st.session_state.history_refreshed = True
-
     default = pd.DataFrame(columns=HISTORY_COLUMNS)
-    df = load_csv_if_exists(HISTORY_INDEX_LOCAL, default)
-
-    # Backward-compat: if old file had summary_json, keep it but we won't require it
+    df = load_csv_if_exists(CASES_PATH, default)
     for col in HISTORY_COLUMNS:
         if col not in df.columns:
             df[col] = ""
+    return df[HISTORY_COLUMNS]
 
-    df = df[HISTORY_COLUMNS].copy()
-    return df
-
-def save_cases_df_local(df: pd.DataFrame):
+def save_cases_df(df: pd.DataFrame):
     _ensure_data_folder()
-    df.to_csv(HISTORY_INDEX_LOCAL, index=False)
+    df.to_csv(CASES_PATH, index=False)
 
-def save_cases_df_to_github(df: pd.DataFrame):
-    # upsert entire index (keep it small)
-    try:
-        github_upsert_file(HISTORY_INDEX_REPO, df.to_csv(index=False), "Update cases history index")
-    except Exception:
-        # silent fallback to local only
-        return
-
-def _build_case_json_path(mrn: str, saved_at: str) -> str:
-    # history/YYYY/MM/MRN/case_<timestamp>.json
-    dt = _parse_dt(saved_at) or datetime.now()
-    y = dt.strftime("%Y")
-    m = dt.strftime("%m")
-    mrn_safe = mrn if mrn else "NO_MRN"
-    stamp = dt.strftime("%Y%m%d_%H%M%S")
-    return f"{HISTORY_CASES_DIR}/{y}/{m}/{mrn_safe}/case_{stamp}.json"
-
-def append_case_record(index_row: dict, case_payload: dict):
-    """
-    Save big payload to GitHub as JSON (if configured), and store searchable index row in CSV.
-    Duplicate protection uses fingerprint within DUPLICATE_WINDOW_MINUTES.
-    """
+def append_case_record(rec: dict):
     df = load_cases_df()
-    fp = _safe_str(index_row.get("fingerprint", ""))
+    fp = _safe_str(rec.get("fingerprint", ""))
 
     if fp:
         same = df[df["fingerprint"].astype(str) == fp]
@@ -198,36 +132,15 @@ def append_case_record(index_row: dict, case_payload: dict):
             except Exception:
                 pass
 
-    # 1) store payload JSON to GitHub (best effort)
-    json_path = _safe_str(index_row.get("json_path",""))
-    if not json_path:
-        json_path = _build_case_json_path(_safe_str(index_row.get("mrn","")), _safe_str(index_row.get("saved_at","")))
-
-    try:
-        github_upsert_file(json_path, json.dumps(case_payload, ensure_ascii=False, indent=2), f"Add case {index_row.get('case_id','')}")
-        index_row["json_path"] = json_path
-    except Exception:
-        # If GitHub not configured, keep payload locally inside index (NOT recommended, but prevents data loss)
-        # We'll store it in a hidden local file for safety
-        _ensure_data_folder()
-        local_json = f"data/{_safe_str(index_row.get('case_id','case')).replace(':','-')}.json"
-        try:
-            Path(local_json).write_text(json.dumps(case_payload, ensure_ascii=False, indent=2), encoding="utf-8")
-            index_row["json_path"] = local_json
-        except Exception:
-            pass
-
-    # 2) append index row locally then push index to GitHub
-    df2 = pd.concat([df, pd.DataFrame([index_row])], ignore_index=True)
+    df2 = pd.concat([df, pd.DataFrame([rec])], ignore_index=True)
 
     try:
         df2["saved_at"] = df2["saved_at"].astype(str)
-        df2 = df2.sort_values("saved_at", ascending=False).head(HISTORY_MAX_INDEX_ROWS)
+        df2 = df2.sort_values("saved_at", ascending=False).head(HISTORY_MAX_ROWS)
     except Exception:
         pass
 
-    save_cases_df_local(df2)
-    save_cases_df_to_github(df2)
+    save_cases_df(df2)
     return (True, "Saved")
 
 def find_case_history(df: pd.DataFrame, mrn: str = "", name: str = "") -> pd.DataFrame:
@@ -246,24 +159,102 @@ def find_case_history(df: pd.DataFrame, mrn: str = "", name: str = "") -> pd.Dat
         pass
     return out
 
-def load_case_payload_from_path(path_in_repo_or_local: str) -> dict | None:
-    p = _safe_str(path_in_repo_or_local)
-    if not p:
-        return None
-    # local file?
-    if p.startswith("data/") and Path(p).exists():
-        try:
-            return json.loads(Path(p).read_text(encoding="utf-8"))
-        except Exception:
-            return None
-    # GitHub file
+def build_case_record(
+    pt_name: str,
+    pt_mrn: str,
+    sex: str,
+    age_y: int,
+    age_m: int,
+    age_d: int,
+    tech: str,
+    run_dt: date,
+    lot_p: str,
+    lot_s: str,
+    ac_res: str,
+    recent_tx: bool,
+    in_p: dict,
+    in_s: dict,
+    ext: list,
+    all_rx: bool,
+    dat_igg: str = "",
+    dat_c3d: str = "",
+    dat_ctl: str = "",
+    conclusion_short: str = "",
+    details: dict = None,
+    abo_block: dict = None
+) -> dict:
+    saved_at = _now_ts()
+    run_dt_str = str(run_dt)
+
+    mrn = _safe_str(pt_mrn)
+    name = _safe_str(pt_name)
+    tech = _safe_str(tech)
+    sex = _safe_str(sex)
+
     try:
-        txt = github_read_file(p)
-        if txt is None:
-            return None
-        return json.loads(txt) if txt else {}
+        age_y = int(age_y or 0)
+        age_m = int(age_m or 0)
+        age_d = int(age_d or 0)
     except Exception:
-        return None
+        age_y, age_m, age_d = 0, 0, 0
+
+    case_id = f"{mrn}_{saved_at}".replace(" ", "_").replace(":", "-")
+
+    payload = {
+        "patient": {"name": name, "mrn": mrn, "sex": sex, "age_y": age_y, "age_m": age_m, "age_d": age_d},
+        "tech": tech,
+        "run_dt": run_dt_str,
+        "saved_at": saved_at,
+        "lots": {"panel": lot_p, "screen": lot_s},
+        "abo": abo_block or {},
+        "inputs": {"panel_reactions": in_p, "screen_reactions": in_s, "AC": ac_res, "recent_tx": bool(recent_tx)},
+        "all_rx": bool(all_rx),
+        "dat": {"igg": dat_igg, "c3d": dat_c3d, "control": dat_ctl},
+        "selected_cells": ext,
+        "interpretation": details or {}
+    }
+
+    fp_obj = {
+        "mrn": mrn,
+        "sex": sex,
+        "age_y": age_y,
+        "age_m": age_m,
+        "age_d": age_d,
+        "run_dt": run_dt_str,
+        "lots": {"panel": lot_p, "screen": lot_s},
+        "abo": abo_block or {},
+        "inputs": {"panel_reactions": in_p, "screen_reactions": in_s, "AC": ac_res, "recent_tx": bool(recent_tx)},
+        "all_rx": bool(all_rx),
+        "dat": {"igg": dat_igg, "c3d": dat_c3d, "control": dat_ctl},
+        "selected_cells": ext,
+        "interpretation": details or {},
+        "conclusion_short": _safe_str(conclusion_short)
+    }
+    fingerprint = _make_fingerprint(fp_obj)
+
+    return {
+        "case_id": case_id,
+        "saved_at": saved_at,
+        "mrn": mrn,
+        "name": name,
+        "sex": sex,
+        "age_y": age_y,
+        "age_m": age_m,
+        "age_d": age_d,
+        "tech": tech,
+        "run_dt": run_dt_str,
+        "lot_p": lot_p,
+        "lot_s": lot_s,
+        "ac_res": ac_res,
+        "recent_tx": bool(recent_tx),
+        "all_rx": bool(all_rx),
+        "dat_igg": dat_igg,
+        "dat_c3d": dat_c3d,
+        "dat_ctl": dat_ctl,
+        "conclusion_short": _safe_str(conclusion_short),
+        "fingerprint": fingerprint,
+        "summary_json": json.dumps(payload, ensure_ascii=False)
+    }
 
 # --------------------------------------------------------------------------
 # 1) PAGE SETUP & CSS
@@ -357,15 +348,44 @@ ENZYME_DESTROYED = ["Fya","Fyb","M","N","S","s"]
 
 GRADES = ["0", "+1", "+2", "+3", "+4", "Hemolysis"]
 YN3 = ["Not Done", "Negative", "Positive"]
-DET3 = ["Not Done", "Not Detected", "Detected"]
 
-ABO_GRADE = ["Not Done", "0", "+1", "+2", "+3", "+4", "Mixed-field", "Hemolysis"]
+# ABO constants
+SEX_OPTS = ["", "M", "F"]
+ABO_GRADE = ["Not Done", "0", "+1", "+2", "+3", "+4", "Mixed field", "Hemolysis"]
+DAT_GRADE = ["Not Done", "0", "+1", "+2", "+3", "+4", "Hemolysis"]
 ABO_REPORT = ["Unknown", "O", "A", "B", "AB"]
-RHD_REPORT = ["Unknown", "D Positive", "D Negative", "Weak/Partial/Indeterminate"]
+RHD_REPORT = ["Unknown", "Positive", "Negative"]
 
 # --------------------------------------------------------------------------
-# 3) STATE (Panel/Screen library + lots)
+# 3) STATE INIT (avoid Streamlit warnings)
 # --------------------------------------------------------------------------
+def _init_default(key, value):
+    if key not in st.session_state:
+        st.session_state[key] = value
+
+_init_default("pt_name", "")
+_init_default("pt_mrn", "")
+_init_default("sex", "")
+_init_default("age_y", 0)
+_init_default("age_m", 0)
+_init_default("age_d", 0)
+_init_default("tech_nm", "")
+_init_default("run_dt", date.today())
+
+# ABO defaults
+_init_default("abo_mode", "Adult (ABO/Rh DVI− + Reverse)")
+_init_default("abo_purpose", "")
+_init_default("abo_rep", "Unknown")
+_init_default("rhd_rep", "Unknown")
+_init_default("abo_a", "Not Done")
+_init_default("abo_b", "Not Done")
+_init_default("abo_ab", "Not Done")
+_init_default("abo_d", "Not Done")
+_init_default("abo_ctl", "Not Done")
+_init_default("abo_a1", "Not Done")
+_init_default("abo_bcells", "Not Done")
+_init_default("abo_dat", "Not Done")
+
 default_panel11_df = pd.DataFrame([{"ID": f"C{i+1}", **{a:0 for a in AGS}} for i in range(11)])
 default_screen3_df = pd.DataFrame([{"ID": f"S{i}", **{a:0 for a in AGS}} for i in ["I","II","III"]])
 
@@ -394,12 +414,27 @@ if "show_dat" not in st.session_state:
     st.session_state.show_dat = False
 
 # --------------------------------------------------------------------------
-# 4) HELPERS / ENGINE (Antibody ID core)  -- unchanged logic
+# 4) AGE HELPERS (IMPORTANT: 0/0/0 = "not entered")
+# --------------------------------------------------------------------------
+def calc_age_days(y: int, m: int, d: int) -> int:
+    try:
+        y = int(y or 0); m = int(m or 0); d = int(d or 0)
+    except Exception:
+        return 0
+    if y == 0 and m == 0 and d == 0:
+        return 0
+    # conservative approximation (good enough for neonate gate)
+    return y*365 + m*30 + d
+
+# --------------------------------------------------------------------------
+# 5) HELPERS / ENGINE (your original logic unchanged)
 # --------------------------------------------------------------------------
 def normalize_grade(val) -> int:
     s = str(val).lower().strip()
     if s in ["0", "neg", "negative", "none", "not done"]:
         return 0
+    if "mixed" in s:
+        return 1
     return 1
 
 def is_homozygous(ph, ag: str) -> bool:
@@ -408,7 +443,7 @@ def is_homozygous(ph, ag: str) -> bool:
     pair = PAIRS.get(ag)
     if not pair:
         return True
-    return (int(ph.get(ag,0))==1 and int(ph.get(pair,0))==0)
+    return (ph.get(ag,0)==1 and ph.get(pair,0)==0)
 
 def ph_has(ph, ag: str) -> bool:
     try:
@@ -595,10 +630,12 @@ def background_auto_resolution(background_list: list, active_not_excluded: set, 
 def patient_antigen_negative_reminder(antibodies: list, strong: bool = True) -> str:
     if not antibodies:
         return ""
+
     uniq = []
     for a in antibodies:
         if a and a not in uniq:
             uniq.append(a)
+
     uniq = [a for a in uniq if a not in IGNORED_AGS]
     if not uniq:
         return ""
@@ -637,7 +674,7 @@ def anti_g_alert_html(strong: bool = False) -> str:
     """
 
 # --------------------------------------------------------------------------
-# 4.6) HISTORY REPORT RENDERER (Professional view)
+# 6) HISTORY REPORT RENDERER (Professional view instead of JSON)
 # --------------------------------------------------------------------------
 def _as_list(x):
     return x if isinstance(x, list) else []
@@ -648,9 +685,6 @@ def _fmt_antibody_list(lst):
         return "—"
     return ", ".join([f"Anti-{a}" for a in lst])
 
-def _fmt_bool(x):
-    return "Yes" if bool(x) else "No"
-
 def render_history_report(payload: dict):
     patient = payload.get("patient", {}) or {}
     lots = payload.get("lots", {}) or {}
@@ -659,17 +693,17 @@ def render_history_report(payload: dict):
     interp = payload.get("interpretation", {}) or {}
     selected = payload.get("selected_cells", []) or []
     abo = payload.get("abo", {}) or {}
-    pheno = payload.get("phenotype", {}) or {}
 
     name = _safe_str(patient.get("name",""))
     mrn  = _safe_str(patient.get("mrn",""))
-    tech = _safe_str(payload.get("tech",""))
-    run_dt = _safe_str(payload.get("run_dt",""))
-    saved_at = _safe_str(payload.get("saved_at",""))
     sex = _safe_str(patient.get("sex",""))
     age_y = _safe_str(patient.get("age_y",""))
     age_m = _safe_str(patient.get("age_m",""))
     age_d = _safe_str(patient.get("age_d",""))
+
+    tech = _safe_str(payload.get("tech",""))
+    run_dt = _safe_str(payload.get("run_dt",""))
+    saved_at = _safe_str(payload.get("saved_at",""))
 
     ac = _safe_str(inputs.get("AC",""))
     recent_tx = bool(inputs.get("recent_tx", False))
@@ -681,7 +715,10 @@ def render_history_report(payload: dict):
     chips = []
     chips.append(f"<span class='chip chip-ok'>AC: {ac or '—'}</span>")
     chips.append(f"<span class='chip {'chip-danger' if all_rx else 'chip-ok'}'>Pattern: {'PAN-reactive' if all_rx else 'Non-pan'}</span>")
-    chips.append(f"<span class='chip {'chip-danger' if recent_tx else 'chip-ok'}'>Recent transfusion ≤ 4 weeks: {_fmt_bool(recent_tx)}</span>")
+    if recent_tx:
+        chips.append("<span class='chip chip-danger'>Recent transfusion ≤ 4 weeks</span>")
+    else:
+        chips.append("<span class='chip chip-ok'>No recent transfusion flag</span>")
 
     dat_igg = _safe_str(dat.get("igg",""))
     dat_c3d = _safe_str(dat.get("c3d",""))
@@ -693,7 +730,7 @@ def render_history_report(payload: dict):
 
     st.markdown(f"""
     <div class="report-card">
-        <div class="report-title">Serology Case — History Report</div>
+        <div class="report-title">Antibody Identification — History Report</div>
         <div class="report-sub">Saved at: <b>{saved_at or '—'}</b> &nbsp;|&nbsp; Run Date: <b>{run_dt or '—'}</b></div>
         <div>{''.join(chips)}</div>
     </div>
@@ -707,87 +744,22 @@ def render_history_report(payload: dict):
     with c3:
         st.markdown(f"<div class='kv'><b>Sex</b><br>{sex or '—'}</div>", unsafe_allow_html=True)
     with c4:
-        st.markdown(f"<div class='kv'><b>Age (Y/M/D)</b><br>{age_y or '0'}/{age_m or '0'}/{age_d or '0'}</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='kv'><b>Age (Y/M/D)</b><br>{age_y}/{age_m}/{age_d}</div>", unsafe_allow_html=True)
 
     st.write("")
-    a1, a2, a3 = st.columns(3)
+    a1, a2 = st.columns(2)
     with a1:
-        st.markdown(f"<div class='kv'><b>Tech / Operator</b><br>{tech or '—'}</div>", unsafe_allow_html=True)
-    with a2:
         st.markdown(f"<div class='kv'><b>ID Panel Lot</b><br>{lot_p or '—'}</div>", unsafe_allow_html=True)
-    with a3:
+    with a2:
         st.markdown(f"<div class='kv'><b>Screen Lot</b><br>{lot_s or '—'}</div>", unsafe_allow_html=True)
 
-    # ABO
+    if abo:
+        st.write("")
+        st.subheader("ABO / RhD / DAT (saved)")
+        st.json(abo)
+
     st.write("")
-    st.subheader("ABO / RhD (as entered)")
-    abo_rep = _safe_str(abo.get("reported_abo",""))
-    rhd_rep = _safe_str(abo.get("reported_rhd",""))
-    b1, b2, b3 = st.columns(3)
-    with b1:
-        st.markdown(f"<div class='kv'><b>Reported ABO</b><br>{abo_rep or '—'}</div>", unsafe_allow_html=True)
-    with b2:
-        st.markdown(f"<div class='kv'><b>Reported RhD</b><br>{rhd_rep or '—'}</div>", unsafe_allow_html=True)
-    with b3:
-        st.markdown(f"<div class='kv'><b>Card Mode</b><br>{_safe_str(abo.get('card_mode','')) or '—'}</div>", unsafe_allow_html=True)
-
-    fwd = abo.get("forward", {}) or {}
-    rev = abo.get("reverse", {}) or {}
-    databo = abo.get("dat", {}) or {}
-
-    fwd_df = pd.DataFrame([{
-        "Anti-A": fwd.get("anti_a",""),
-        "Anti-B": fwd.get("anti_b",""),
-        "Anti-AB": fwd.get("anti_ab",""),
-        "Anti-D": fwd.get("anti_d",""),
-        "Control": fwd.get("control",""),
-    }])
-    st.markdown("**Forward Grouping**")
-    st.dataframe(fwd_df, use_container_width=True)
-
-    if rev:
-        rev_df = pd.DataFrame([{
-            "A1 Cells": rev.get("a1_cells",""),
-            "B Cells": rev.get("b_cells",""),
-        }])
-        st.markdown("**Reverse Grouping**")
-        st.dataframe(rev_df, use_container_width=True)
-    else:
-        st.info("Reverse grouping not entered for this case.")
-
-    dat_df = pd.DataFrame([{
-        "DAT": databo.get("dat",""),
-    }])
-    st.markdown("**DAT (ABO card)**")
-    st.dataframe(dat_df, use_container_width=True)
-
-    # Phenotype
-    st.write("")
-    st.subheader("Patient Phenotype (as entered)")
-    if pheno:
-        rh = pheno.get("rh", {}) or {}
-        ext1 = pheno.get("ext1", {}) or {}
-        ext2 = pheno.get("ext2", {}) or {}
-        ext3 = pheno.get("ext3", {}) or {}
-
-        if rh:
-            st.markdown("**Rh (C/c/E/e/K)**")
-            st.dataframe(pd.DataFrame([rh]), use_container_width=True)
-        if ext1:
-            st.markdown("**Extended: P1, Lea, Leb, Lua, Lub**")
-            st.dataframe(pd.DataFrame([ext1]), use_container_width=True)
-        if ext2:
-            st.markdown("**Extended: k, Kpa, Kpb, Jka, Jkb**")
-            st.dataframe(pd.DataFrame([ext2]), use_container_width=True)
-        if ext3:
-            st.markdown("**Extended: M, N, S, s, Fya, Fyb**")
-            st.dataframe(pd.DataFrame([ext3]), use_container_width=True)
-    else:
-        st.write("— Not entered —")
-
-    # Reactions summary (antibody ID)
-    st.write("")
-    st.subheader("Antibody ID — Reactions Summary")
+    st.subheader("Reactions Summary")
 
     screen_rx = inputs.get("screen_reactions", {}) or {}
     panel_rx  = inputs.get("panel_reactions", {}) or {}
@@ -807,9 +779,8 @@ def render_history_report(payload: dict):
     st.markdown("**Panel Cells (1–11)**")
     st.dataframe(pr_df, use_container_width=True)
 
-    # Interpretation
     st.write("")
-    st.subheader("Antibody ID — Interpretation / Results")
+    st.subheader("Interpretation / Results")
 
     pattern = _safe_str(interp.get("pattern",""))
     if pattern:
@@ -851,51 +822,17 @@ def render_history_report(payload: dict):
         try:
             sc_df = pd.DataFrame(selected)
             cols = [c for c in ["id", "res"] if c in sc_df.columns]
-            st.dataframe(sc_df[cols] if cols else sc_df, use_container_width=True)
+            if cols:
+                st.dataframe(sc_df[cols], use_container_width=True)
+            else:
+                st.dataframe(sc_df, use_container_width=True)
         except Exception:
             st.write(selected)
     else:
         st.write("— None —")
 
 # --------------------------------------------------------------------------
-# 4.7) PATIENT / ABO / PHENOTYPE helpers
-# --------------------------------------------------------------------------
-def calc_age_days(y: int, m: int, d: int) -> int:
-    y = int(y or 0); m = int(m or 0); d = int(d or 0)
-    return y*365 + m*30 + d
-
-def is_neonate_under_4_months(y:int,m:int,d:int) -> bool:
-    return (int(y or 0) == 0) and (int(m or 0) < 4)
-
-def _pheno_conflict_alert(antibodies: list, pheno_dict: dict):
-    # if Anti-X present but phenotype says X detected -> warn
-    if not antibodies or not isinstance(pheno_dict, dict):
-        return
-    detected = set()
-    for grp in ["rh","ext1","ext2","ext3"]:
-        block = pheno_dict.get(grp, {}) or {}
-        for k,v in block.items():
-            if str(v).strip() == "Detected":
-                detected.add(k.replace("Anti-","").replace("anti-","").strip())
-    conflicts = []
-    for ab in antibodies:
-        a = str(ab).strip()
-        if not a:
-            continue
-        if a in detected:
-            conflicts.append(a)
-    if conflicts:
-        st.markdown(f"""
-        <div class='clinical-danger'>
-        ⚠️ <b>Phenotype vs Antibody conflict</b><br>
-        Antibody identification includes: <b>{', '.join([f'Anti-{c}' for c in conflicts])}</b><br>
-        But the entered patient phenotype shows the same antigen(s) as <b>Detected</b>.<br>
-        <b>Action:</b> Re-check antibody ID / confirm phenotype on a pre-transfusion sample (or consider recent transfusion / mixed RBC population).
-        </div>
-        """, unsafe_allow_html=True)
-
-# --------------------------------------------------------------------------
-# 4.5) SUPERVISOR: Copy/Paste Parser (Option A: 26 columns in AGS order)
+# 7) SUPERVISOR: Copy/Paste Parser (Option A: 26 columns in AGS order)
 # --------------------------------------------------------------------------
 def _token_to_01(tok: str) -> int:
     s = str(tok).strip().lower()
@@ -950,42 +887,37 @@ def _checkbox_column_config():
     }
 
 # --------------------------------------------------------------------------
-# 5) SIDEBAR
+# 8) SIDEBAR + RESET (IMPORTANT FIX: clears age/sex too)
 # --------------------------------------------------------------------------
-def _reset_workstation_keys():
+def reset_workstation_state():
     keys_to_clear = [
-        "pt_name","pt_mrn","sex","age_y","age_m","age_d","tech_nm","run_dt",
-        "abo_rep","rhd_rep","abo_mode","abo_purpose",
-        "abo_a","abo_b","abo_ab","abo_d","abo_ctl","abo_a1","abo_bcells","abo_dat",
-        "ph_rh_C","ph_rh_c","ph_rh_E","ph_rh_e","ph_rh_K","ph_rh_control",
-        "ph_ext1_P1","ph_ext1_Lea","ph_ext1_Leb","ph_ext1_Lua","ph_ext1_Lub","ph_ext1_control",
-        "ph_ext2_k","ph_ext2_Kpa","ph_ext2_Kpb","ph_ext2_Jka","ph_ext2_Jkb","ph_ext2_control",
-        "ph_ext3_M","ph_ext3_N","ph_ext3_S","ph_ext3_s","ph_ext3_Fya","ph_ext3_Fyb","ph_ext3_control",
-        # reaction entry
-        "rx_ac","recent_tx","rx_sI","rx_sII","rx_sIII",
+        # patient
+        "pt_name", "pt_mrn", "sex", "age_y", "age_m", "age_d", "tech_nm", "run_dt",
+        # abo
+        "abo_mode", "abo_purpose", "abo_rep", "rhd_rep",
+        "abo_a", "abo_b", "abo_ab", "abo_d", "abo_ctl", "abo_a1", "abo_bcells", "abo_dat",
+        # antibody inputs
+        "rx_ac", "recent_tx",
+        "rx_sI", "rx_sII", "rx_sIII",
         "rx_p1","rx_p2","rx_p3","rx_p4","rx_p5","rx_p6","rx_p7","rx_p8","rx_p9","rx_p10","rx_p11",
-        # DAT mono
         "dat_igg","dat_c3d","dat_ctl",
-        # extras
-        "ex_id","ex_res"
+        # analysis flags
+        "analysis_ready","analysis_payload","show_dat",
     ]
     for k in keys_to_clear:
         if k in st.session_state:
             del st.session_state[k]
+    st.session_state.ext = []
+    st.rerun()
 
 with st.sidebar:
     st.image("https://cdn-icons-png.flaticon.com/512/2966/2966327.png", width=60)
     nav = st.radio("Menu", ["Workstation", "Supervisor"], key="nav_menu")
     if st.button("RESET DATA", key="btn_reset"):
-        st.session_state.ext = []
-        st.session_state.analysis_ready = False
-        st.session_state.analysis_payload = None
-        st.session_state.show_dat = False
-        _reset_workstation_keys()
-        st.rerun()
+        reset_workstation_state()
 
 # --------------------------------------------------------------------------
-# 6) SUPERVISOR
+# 9) SUPERVISOR PAGE (unchanged)
 # --------------------------------------------------------------------------
 if nav == "Supervisor":
     st.title("Config")
@@ -1038,7 +970,8 @@ if nav == "Supervisor":
 
             st.markdown("""
             <div class='clinical-alert'>
-            ⚠️ Tip: If your paste includes extra leading columns, the app automatically uses the <b>last 26 columns</b>.
+            ⚠️ Tip: لو الـPDF فيه Labels قبل الداتا، paste غالبًا هيبقى فيه أعمدة زيادة في البداية.
+            البرنامج تلقائيًا بياخد <b>آخر 26 عمود</b> ويهمل أي حاجة قبلهم.
             </div>
             """, unsafe_allow_html=True)
 
@@ -1047,7 +980,7 @@ if nav == "Supervisor":
             st.markdown("""
             <div class='clinical-info'>
             ✅ Safe rules applied: <b>ID locked</b> + <b>No add/remove rows</b> + <b>Only 0/1 via checkboxes</b>.<br>
-            Use only for small corrections after Copy/Paste.
+            استخدم ده فقط للتصحيح اليدوي بعد الـCopy/Paste.
             </div>
             """, unsafe_allow_html=True)
 
@@ -1089,7 +1022,7 @@ if nav == "Supervisor":
 
         st.write("---")
         st.subheader("3) Publish to ALL devices (Save to GitHub)")
-        st.warning("Before publishing: confirm lots + confirm panel/screen tables are correct.")
+        st.warning("قبل النشر: راجع اللوت + راجع الجداول بسرعة (Panel/Screen).")
 
         confirm_pub = st.checkbox("I confirm Panel/Screen data were reviewed and are correct", key="confirm_publish")
 
@@ -1108,7 +1041,7 @@ if nav == "Supervisor":
                     st.error(f"❌ Save failed: {e}")
 
 # --------------------------------------------------------------------------
-# 7) WORKSTATION
+# 10) WORKSTATION
 # --------------------------------------------------------------------------
 else:
     st.markdown("""
@@ -1123,98 +1056,20 @@ else:
     st.markdown(f"<div class='lot-bar'><span>ID Panel Lot: {lp_txt}</span> | <span>Screen Lot: {ls_txt}</span></div>",
                 unsafe_allow_html=True)
 
-    # ---------------------------
-    # Patient header (ALL on one line)
-    # ---------------------------
-    col1, col2, col3, col4, col5, col6, col7, col8 = st.columns([1.6, 1.1, 0.7, 0.6, 0.6, 0.6, 1.0, 1.0])
-    col1.text_input("Name", key="pt_name")
-    col2.text_input("MRN", key="pt_mrn")
-    col3.selectbox("Sex", ["", "M", "F"], key="sex")
-    col4.number_input("Age Y", min_value=0, max_value=120, step=1, value=0, key="age_y")
-    col5.number_input("Age M", min_value=0, max_value=11, step=1, value=0, key="age_m")
-    col6.number_input("Age D", min_value=0, max_value=31, step=1, value=0, key="age_d")
-    col7.text_input("Tech", key="tech_nm")
-    col8.date_input("Date", value=date.today(), key="run_dt")
+    # patient row (ALL in one line)
+    c1, c2, c3, c4, c5, c6, c7, c8 = st.columns([2.2, 1.3, 1.1, 0.8, 0.8, 0.8, 1.3, 1.2])
+    c1.text_input("Name", key="pt_name")
+    c2.text_input("MRN", key="pt_mrn")
+    c3.selectbox("Sex", SEX_OPTS, key="sex")
+    c4.number_input("Age Y", min_value=0, max_value=130, step=1, key="age_y")
+    c5.number_input("Age M", min_value=0, max_value=11, step=1, key="age_m")
+    c6.number_input("Age D", min_value=0, max_value=31, step=1, key="age_d")
+    c7.text_input("Tech", key="tech_nm")
+    c8.date_input("Date", key="run_dt")
 
-    # Neonate hint
-    neonate = is_neonate_under_4_months(st.session_state.get("age_y",0), st.session_state.get("age_m",0), st.session_state.get("age_d",0))
-    if neonate:
-        st.markdown("""
-        <div class='clinical-info'>
-        👶 <b>Neonate detected (age &lt; 4 months)</b>: Reverse grouping is typically unreliable.<br>
-        If purpose is <b>RhIG eligibility</b> use DVI+; if purpose is <b>transfusion</b> use DVI− (per your policy).
-        </div>
-        """, unsafe_allow_html=True)
-
-    # ---------------------------
-    # ABO / Phenotype (restored)
-    # ---------------------------
-    with st.expander("🧾 ABO / RhD / DAT (Enter by grade)", expanded=True):
-        a1, a2, a3 = st.columns([1.2, 1.2, 1.2])
-        a1.selectbox("Reported ABO (for paperwork)", ABO_REPORT, key="abo_rep")
-        a2.selectbox("Reported RhD (for paperwork)", RHD_REPORT, key="rhd_rep")
-        # card mode
-        if neonate:
-            a3.selectbox("Card Mode", ["Neonate (ABO/Rh + DAT)"], key="abo_mode")
-            purpose = st.radio("Purpose", ["Transfusion (DVI−)", "RhIG eligibility (DVI+)"], horizontal=True, key="abo_purpose")
-        else:
-            a3.selectbox("Card Mode", ["Adult (ABO/Rh DVI− + Reverse)"], key="abo_mode")
-            st.session_state["abo_purpose"] = ""
-
-        f1, f2, f3, f4, f5 = st.columns(5)
-        f1.selectbox("Anti-A", ABO_GRADE, key="abo_a")
-        f2.selectbox("Anti-B", ABO_GRADE, key="abo_b")
-        f3.selectbox("Anti-AB", ABO_GRADE, key="abo_ab")
-        f4.selectbox("Anti-D", ABO_GRADE, key="abo_d")
-        f5.selectbox("Control", ABO_GRADE, key="abo_ctl")
-
-        if not neonate:
-            r1, r2 = st.columns(2)
-            r1.selectbox("A1 Cells", ABO_GRADE, key="abo_a1")
-            r2.selectbox("B Cells", ABO_GRADE, key="abo_bcells")
-        else:
-            st.session_state.setdefault("abo_a1", "Not Done")
-            st.session_state.setdefault("abo_bcells", "Not Done")
-
-        st.selectbox("DAT (grade or Not Done)", ["Not Done"] + GRADES + ["Mixed-field", "Hemolysis"], key="abo_dat")
-
-    with st.expander("🧬 Patient Phenotype (Detected / Not Detected / Not Done)", expanded=False):
-        st.markdown("**Rh phenotype (C, c, E, e, K) — plus Control**")
-        p1, p2, p3, p4, p5, p6 = st.columns(6)
-        p1.selectbox("C", DET3, key="ph_rh_C")
-        p2.selectbox("c", DET3, key="ph_rh_c")
-        p3.selectbox("E", DET3, key="ph_rh_E")
-        p4.selectbox("e", DET3, key="ph_rh_e")
-        p5.selectbox("K", DET3, key="ph_rh_K")
-        p6.selectbox("Control", DET3, key="ph_rh_control")
-
-        st.markdown("**Extended 1: P1, Lea, Leb, Lua, Lub — plus Control**")
-        e1, e2, e3, e4, e5, e6 = st.columns(6)
-        e1.selectbox("P1", DET3, key="ph_ext1_P1")
-        e2.selectbox("Lea", DET3, key="ph_ext1_Lea")
-        e3.selectbox("Leb", DET3, key="ph_ext1_Leb")
-        e4.selectbox("Lua", DET3, key="ph_ext1_Lua")
-        e5.selectbox("Lub", DET3, key="ph_ext1_Lub")
-        e6.selectbox("Control", DET3, key="ph_ext1_control")
-
-        st.markdown("**Extended 2: k, Kpa, Kpb, Jka, Jkb — plus Control**")
-        g1, g2, g3, g4, g5, g6 = st.columns(6)
-        g1.selectbox("k", DET3, key="ph_ext2_k")
-        g2.selectbox("Kpa", DET3, key="ph_ext2_Kpa")
-        g3.selectbox("Kpb", DET3, key="ph_ext2_Kpb")
-        g4.selectbox("Jka", DET3, key="ph_ext2_Jka")
-        g5.selectbox("Jkb", DET3, key="ph_ext2_Jkb")
-        g6.selectbox("Control", DET3, key="ph_ext2_control")
-
-        st.markdown("**Extended 3: M, N, S, s, Fya, Fyb — plus Control**")
-        h1, h2, h3, h4, h5, h6, h7 = st.columns(7)
-        h1.selectbox("M", DET3, key="ph_ext3_M")
-        h2.selectbox("N", DET3, key="ph_ext3_N")
-        h3.selectbox("S", DET3, key="ph_ext3_S")
-        h4.selectbox("s", DET3, key="ph_ext3_s")
-        h5.selectbox("Fya", DET3, key="ph_ext3_Fya")
-        h6.selectbox("Fyb", DET3, key="ph_ext3_Fyb")
-        h7.selectbox("Control", DET3, key="ph_ext3_control")
+    # neonate gate
+    age_days = calc_age_days(st.session_state.get("age_y", 0), st.session_state.get("age_m", 0), st.session_state.get("age_d", 0))
+    neonate = (age_days > 0 and age_days < 120)  # < 4 months
 
     # ---------------------------
     # HISTORY LOOKUP
@@ -1231,7 +1086,7 @@ else:
         """, unsafe_allow_html=True)
 
         with st.expander("📚 Open Patient History"):
-            show_cols = ["saved_at","run_dt","tech","sex","age_y","age_m","age_d","conclusion_short","ac_res","recent_tx","all_rx","abo_reported","rhd_reported"]
+            show_cols = ["saved_at","run_dt","tech","sex","age_y","age_m","age_d","conclusion_short","ac_res","recent_tx","all_rx"]
             show_cols = [c for c in show_cols if c in hist.columns]
             st.dataframe(hist[show_cols], use_container_width=True)
 
@@ -1242,16 +1097,104 @@ else:
                 format_func=lambda i: f"{hist.iloc[i]['saved_at']} | {hist.iloc[i]['conclusion_short']}"
             )
 
-            if st.button("Open selected run (Report)", key="btn_open_hist_report"):
-                row = hist.iloc[pick]
-                payload = load_case_payload_from_path(_safe_str(row.get("json_path","")))
-                if not payload:
-                    st.error("Could not load this case payload (missing/corrupted).")
-                else:
-                    render_history_report(payload)
+            bA, bB = st.columns([1,1])
+            with bA:
+                view_report = st.button("Open selected run (Report)", key="btn_open_hist_report")
+            with bB:
+                view_json = st.button("View Raw JSON (Debug)", key="btn_open_hist_json")
+
+            if view_report or view_json:
+                try:
+                    payload = json.loads(hist.iloc[pick]["summary_json"])
+                    if view_report:
+                        render_history_report(payload)
+                    if view_json:
+                        st.json(payload)
+                except Exception:
+                    st.error("Could not open this record (corrupted JSON).")
+
+    # ---------------------------
+    # ABO/RhD/DAT BLOCK (FIXED: Adult + Neonate)
+    # ---------------------------
+    if neonate:
+        st.markdown("""
+        <div class='clinical-info'>
+        👶 <b>Neonate detected (age &lt; 4 months)</b>: Reverse grouping is typically unreliable.<br>
+        If purpose is <b>RhIG eligibility</b> use <b>DVI+</b>; if purpose is <b>transfusion</b> use <b>DVI−</b> (per your policy).
+        </div>
+        """, unsafe_allow_html=True)
+
+    with st.expander("🧾 ABO / RhD / DAT (Enter by grade)", expanded=True):
+        a1, a2, a3 = st.columns([1.2, 1.2, 1.2])
+        a1.selectbox("Reported ABO (for paperwork)", ABO_REPORT, key="abo_rep")
+        a2.selectbox("Reported RhD (for paperwork)", RHD_REPORT, key="rhd_rep")
+
+        mode_options = ["Adult (ABO/Rh DVI− + Reverse)", "Neonate (ABO/Rh + DAT)"]
+        default_mode = mode_options[1] if neonate else mode_options[0]
+        if st.session_state.get("abo_mode") not in mode_options:
+            st.session_state["abo_mode"] = default_mode
+        a3.selectbox("Card Mode", mode_options, key="abo_mode")
+
+        if st.session_state["abo_mode"].startswith("Neonate"):
+            st.radio("Purpose", ["Transfusion (DVI−)", "RhIG eligibility (DVI+)"], horizontal=True, key="abo_purpose")
+        else:
+            st.session_state["abo_purpose"] = ""
+
+        # Forward
+        if st.session_state["abo_mode"].startswith("Adult"):
+            f1, f2, f3, f4 = st.columns(4)
+            f1.selectbox("Anti-A", ABO_GRADE, key="abo_a")
+            f2.selectbox("Anti-B", ABO_GRADE, key="abo_b")
+            f3.selectbox("Anti-D (DVI−)", ABO_GRADE, key="abo_d")
+            f4.selectbox("Control", ABO_GRADE, key="abo_ctl")
+
+            # Reverse
+            r1, r2 = st.columns(2)
+            r1.selectbox("A1 Cells", ABO_GRADE, key="abo_a1")
+            r2.selectbox("B Cells", ABO_GRADE, key="abo_bcells")
+
+            # Neonate-only fields set to Not Done
+            st.session_state["abo_ab"] = "Not Done"
+            st.session_state["abo_dat"] = "Not Done"
+
+        else:
+            # Neonate
+            f1, f2, f3, f4, f5 = st.columns(5)
+            f1.selectbox("Anti-A", ABO_GRADE, key="abo_a")
+            f2.selectbox("Anti-B", ABO_GRADE, key="abo_b")
+            f3.selectbox("Anti-AB", ABO_GRADE, key="abo_ab")
+            f4.selectbox("Anti-D", ABO_GRADE, key="abo_d")
+            f5.selectbox("Control", ABO_GRADE, key="abo_ctl")
+
+            st.selectbox("DAT (grade or Not Done)", DAT_GRADE, key="abo_dat")
+
+            # Reverse hidden + forced Not Done
+            st.session_state["abo_a1"] = "Not Done"
+            st.session_state["abo_bcells"] = "Not Done"
+            st.info("Reverse grouping is hidden in Neonate mode.")
+
+    # collect ABO block for saving
+    abo_block = {
+        "mode": st.session_state.get("abo_mode",""),
+        "purpose": st.session_state.get("abo_purpose",""),
+        "reported_abo": st.session_state.get("abo_rep",""),
+        "reported_rhd": st.session_state.get("rhd_rep",""),
+        "forward": {
+            "anti_a": st.session_state.get("abo_a",""),
+            "anti_b": st.session_state.get("abo_b",""),
+            "anti_ab": st.session_state.get("abo_ab",""),
+            "anti_d": st.session_state.get("abo_d",""),
+            "control": st.session_state.get("abo_ctl",""),
+        },
+        "reverse": {
+            "a1_cells": st.session_state.get("abo_a1",""),
+            "b_cells": st.session_state.get("abo_bcells",""),
+        },
+        "dat": st.session_state.get("abo_dat","")
+    }
 
     # ----------------------------------------------------------------------
-    # MAIN FORM (Antibody ID)
+    # MAIN FORM (your original)
     # ----------------------------------------------------------------------
     with st.form("main_form", clear_on_submit=False):
         st.write("### Reaction Entry")
@@ -1267,9 +1210,9 @@ else:
                 st.markdown("""
                 <div class='clinical-danger'>
                 🩸 <b>RECENT TRANSFUSION FLAGGED</b><br>
-                ⚠️ Consider <b>DHTR</b> / anamnestic alloantibody response if compatible with clinical picture.<br>
+                ⚠️ Consider <b>Delayed Hemolytic Transfusion Reaction (DHTR)</b> / anamnestic alloantibody response if compatible with clinical picture.<br>
                 <ul>
-                  <li>Review Hb trend, hemolysis markers, DAT as indicated.</li>
+                  <li>Review Hb trend, hemolysis markers (bilirubin/LDH/haptoglobin), DAT as indicated.</li>
                   <li>Compare pre- vs post-transfusion samples if available.</li>
                   <li>Escalate early if new alloantibody suspected.</li>
                 </ul>
@@ -1300,7 +1243,429 @@ else:
 
         run_btn = st.form_submit_button("🚀 Run Analysis", use_container_width=True)
 
-    # --------- (باقي الكود طويل جداً وموجود بالكامل في النسخة) ---------
-    # مهم: سيب الملف زي ما هو لحد آخر سطر — دي نسخة كاملة مش Patch.
+    if run_btn:
+        if not st.session_state.lot_p or not st.session_state.lot_s:
+            st.error("⛔ Lots not configured by Supervisor.")
+            st.session_state.analysis_ready = False
+            st.session_state.analysis_payload = None
+            st.session_state.show_dat = False
+        else:
+            in_p = {1:p1,2:p2,3:p3,4:p4,5:p5,6:p6,7:p7,8:p8,9:p9,10:p10,11:p11}
+            in_s = {"I": s_I, "II": s_II, "III": s_III}
+            st.session_state.analysis_payload = {
+                "in_p": in_p,
+                "in_s": in_s,
+                "ac_res": ac_res,
+                "recent_tx": recent_tx,
+            }
+            st.session_state.analysis_ready = True
 
-    st.info("✅ This file is intentionally complete. Keep it exactly as-is.")
+            ac_negative = (ac_res == "Negative")
+            all_rx = all_reactive_pattern(in_p, in_s)
+            st.session_state.show_dat = bool(all_rx and (not ac_negative))
+
+    if st.session_state.get("analysis_ready") and st.session_state.get("analysis_payload"):
+        in_p = st.session_state.analysis_payload["in_p"]
+        in_s = st.session_state.analysis_payload["in_s"]
+        ac_res = st.session_state.analysis_payload["ac_res"]
+        recent_tx = st.session_state.analysis_payload["recent_tx"]
+
+        ac_negative = (ac_res == "Negative")
+        all_rx = all_reactive_pattern(in_p, in_s)
+
+        # --------------------------------------------------------------
+        # PAN-REACTIVE LOGIC
+        # --------------------------------------------------------------
+        if all_rx and ac_negative:
+            tx_note = ""
+            if recent_tx:
+                tx_note = """
+                <li style="color:#7a0000;"><b>Recent transfusion ≤ 4 weeks</b>: strongly consider <b>DHTR</b> / anamnestic alloantibody response if clinically compatible; compare pre/post samples and review hemolysis markers.</li>
+                """
+
+            st.markdown(f"""
+            <div class='clinical-danger'>
+            ⚠️ <b>Pan-reactive pattern with NEGATIVE autocontrol</b><br>
+            <b>Most consistent with:</b>
+            <ul>
+              <li><b>Alloantibody to a High-Incidence (High-Frequency) Antigen</b></li>
+              <li><b>OR multiple alloantibodies</b> not separable with the current cells</li>
+            </ul>
+            <b>Action / Workflow (priority):</b>
+            <ol>
+              <li><b>STOP</b> routine single-specificity interpretation (rule-out/rule-in is not valid here).</li>
+              <li>Immediate referral to <b>Blood Bank Physician / Reference Lab</b>.</li>
+              <li>Request <b>patient extended phenotype / genotype</b> (pre-transfusion if available).</li>
+              <li>Start <b>rare compatible unit search</b> (regional/national resources).</li>
+              <li><b>First-degree relatives donors</b>: consider typing/testing as potential compatible donors when clinically appropriate.</li>
+              <li>Use <b>additional panels / different lots</b> + <b>selected cells</b> to separate multiple alloantibodies if suspected.</li>
+              {tx_note}
+            </ol>
+            </div>
+            """, unsafe_allow_html=True)
+
+            st.markdown("""
+            <div class='clinical-info'>
+            🔎 <b>Note:</b> Routine specificity engine is intentionally paused for this pattern.
+            </div>
+            """, unsafe_allow_html=True)
+
+            if st.button("💾 Save Case to History", key="save_case_pan_acneg"):
+                rec = build_case_record(
+                    pt_name=st.session_state.get("pt_name",""),
+                    pt_mrn=st.session_state.get("pt_mrn",""),
+                    sex=st.session_state.get("sex",""),
+                    age_y=st.session_state.get("age_y",0),
+                    age_m=st.session_state.get("age_m",0),
+                    age_d=st.session_state.get("age_d",0),
+                    tech=st.session_state.get("tech_nm",""),
+                    run_dt=st.session_state.get("run_dt", date.today()),
+                    lot_p=st.session_state.lot_p,
+                    lot_s=st.session_state.lot_s,
+                    ac_res=ac_res,
+                    recent_tx=recent_tx,
+                    in_p=in_p,
+                    in_s=in_s,
+                    ext=st.session_state.ext,
+                    all_rx=all_rx,
+                    dat_igg="",
+                    dat_c3d="",
+                    dat_ctl="",
+                    conclusion_short="Pan-reactive + AC Negative (High-incidence / multiple allo suspected)",
+                    details={"pattern": "pan_reactive_ac_negative"},
+                    abo_block=abo_block
+                )
+                ok, msg = append_case_record(rec)
+                if ok:
+                    st.success("Saved ✅ (History updated)")
+                else:
+                    st.warning("⚠️ " + msg)
+
+        elif all_rx and (not ac_negative):
+            st.markdown("""
+            <div class='clinical-danger'>
+            ⚠️ <b>Pan-reactive pattern with POSITIVE autocontrol</b><br>
+            Requires <b>Monospecific DAT</b> pathway (IgG / C3d / Control) before any alloantibody claims.
+            </div>
+            """, unsafe_allow_html=True)
+
+            st.subheader("Monospecific DAT Entry (Required)")
+            c1, c2, c3 = st.columns(3)
+            dat_igg = c1.selectbox("DAT IgG", YN3, key="dat_igg")
+            dat_c3d = c2.selectbox("DAT C3d", YN3, key="dat_c3d")
+            dat_ctl = c3.selectbox("DAT Control", YN3, key="dat_ctl")
+
+            if dat_ctl == "Positive":
+                st.markdown("""
+                <div class='clinical-danger'>
+                ⛔ <b>DAT Control is POSITIVE</b> → invalid run / control failure.<br>
+                Repeat DAT before interpretation.
+                </div>
+                """, unsafe_allow_html=True)
+            elif dat_igg == "Not Done" or dat_c3d == "Not Done":
+                st.markdown("""
+                <div class='clinical-alert'>
+                ⚠️ Please perform <b>Monospecific DAT (IgG & C3d)</b> to proceed.
+                </div>
+                """, unsafe_allow_html=True)
+            else:
+                if dat_igg == "Positive":
+                    ads = "Auto-adsorption (ONLY if NOT recently transfused)" if not recent_tx else "Allo-adsorption (recent transfusion → avoid auto-adsorption)"
+                    st.markdown(f"""
+                    <div class='clinical-info'>
+                    ✅ <b>DAT IgG POSITIVE</b> (C3d: {dat_c3d}) → consistent with <b>Warm Autoantibody / WAIHA</b>.<br><br>
+                    <b>Recommended Workflow:</b>
+                    <ol>
+                      <li>Consider <b>eluate</b> when indicated.</li>
+                      <li>Perform <b>adsorption</b>: <b>{ads}</b> to unmask alloantibodies.</li>
+                      <li>Patient <b>phenotype/genotype</b> (pre-transfusion preferred).</li>
+                      <li>Transfuse per policy (antigen-matched / least-incompatible as appropriate).</li>
+                    </ol>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+                elif dat_igg == "Negative" and dat_c3d == "Positive":
+                    st.markdown("""
+                    <div class='clinical-info'>
+                    ✅ <b>DAT IgG NEGATIVE + C3d POSITIVE</b> → complement-mediated process (e.g., cold autoantibody).<br><br>
+                    <b>Recommended Workflow:</b>
+                    <ol>
+                      <li>Evaluate cold interference (pre-warm / thermal amplitude) per SOP.</li>
+                      <li>Repeat as needed at 37°C.</li>
+                      <li>Refer if clinically significant transfusion requirement.</li>
+                    </ol>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+                else:
+                    st.markdown("""
+                    <div class='clinical-alert'>
+                    ⚠️ <b>AC POSITIVE but DAT IgG & C3d NEGATIVE</b> → consider in-vitro interference/technique issue (rouleaux, cold at RT, reagent effects).<br><br>
+                    <b>Recommended Actions:</b>
+                    <ol>
+                      <li>Repeat with proper technique; saline replacement if rouleaux suspected.</li>
+                      <li>Pre-warm/37°C repeat if cold suspected.</li>
+                      <li>If unresolved → refer.</li>
+                    </ol>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+            st.markdown("""
+            <div class='clinical-info'>
+            🔎 <b>Note:</b> Routine specificity engine remains paused in pan-reactive cases until DAT pathway is addressed.
+            </div>
+            """, unsafe_allow_html=True)
+
+            if st.button("💾 Save Case to History", key="save_case_pan_acpos"):
+                rec = build_case_record(
+                    pt_name=st.session_state.get("pt_name",""),
+                    pt_mrn=st.session_state.get("pt_mrn",""),
+                    sex=st.session_state.get("sex",""),
+                    age_y=st.session_state.get("age_y",0),
+                    age_m=st.session_state.get("age_m",0),
+                    age_d=st.session_state.get("age_d",0),
+                    tech=st.session_state.get("tech_nm",""),
+                    run_dt=st.session_state.get("run_dt", date.today()),
+                    lot_p=st.session_state.lot_p,
+                    lot_s=st.session_state.lot_s,
+                    ac_res=ac_res,
+                    recent_tx=recent_tx,
+                    in_p=in_p,
+                    in_s=in_s,
+                    ext=st.session_state.ext,
+                    all_rx=all_rx,
+                    dat_igg=st.session_state.get("dat_igg",""),
+                    dat_c3d=st.session_state.get("dat_c3d",""),
+                    dat_ctl=st.session_state.get("dat_ctl",""),
+                    conclusion_short="Pan-reactive + AC Positive (DAT pathway)",
+                    details={"pattern": "pan_reactive_ac_positive"},
+                    abo_block=abo_block
+                )
+                ok, msg = append_case_record(rec)
+                if ok:
+                    st.success("Saved ✅ (History updated)")
+                else:
+                    st.warning("⚠️ " + msg)
+
+        if all_rx:
+            pass
+        else:
+            cells = get_cells(in_p, in_s, st.session_state.ext)
+            ruled = rule_out(in_p, in_s, st.session_state.ext)
+            candidates = [a for a in AGS if a not in ruled and a not in IGNORED_AGS]
+            best = find_best_combo(candidates, cells, max_size=3)
+
+            st.subheader("Conclusion (Step 1: Rule-out / Rule-in)")
+
+            conclusion_short = ""
+            details = {}
+
+            if not best:
+                st.error("No resolved specificity from current data. Proceed with Selected Cells / Enhancement.")
+                poss_sig = [a for a in candidates if a not in INSIGNIFICANT_AGS][:12]
+                poss_cold = [a for a in candidates if a in INSIGNIFICANT_AGS][:6]
+                if poss_sig or poss_cold:
+                    st.markdown("### ⚠️ Not excluded yet (Needs more work — DO NOT confirm now):")
+                    if poss_sig:
+                        st.write("**Clinically significant possibilities:** " + ", ".join([f"Anti-{x}" for x in poss_sig]))
+                    if poss_cold:
+                        st.info("Cold/Insignificant possibilities: " + ", ".join([f"Anti-{x}" for x in poss_cold]))
+
+                conclusion_short = "No resolved specificity (needs selected cells / more work)"
+                details = {"best_combo": None, "candidates_not_excluded": candidates}
+
+            else:
+                sep_map = separability_map(best, cells)
+                resolved = [a for a in best if sep_map.get(a, False)]
+                needs_work = [a for a in best if not sep_map.get(a, False)]
+
+                if resolved:
+                    st.success("Resolved (pattern explained & separable): " + ", ".join([f"Anti-{a}" for a in resolved]))
+                if needs_work:
+                    st.warning("Pattern suggests these, but NOT separable yet (DO NOT confirm): " +
+                               ", ".join([f"Anti-{a}" for a in needs_work]))
+
+                remaining_other = [a for a in candidates if a not in best]
+                other_sig = [a for a in remaining_other if a not in INSIGNIFICANT_AGS]
+                other_cold = [a for a in remaining_other if a in INSIGNIFICANT_AGS]
+
+                active_not_excluded = set(resolved + needs_work + other_sig + other_cold)
+
+                auto_ruled_out, supported_bg, inconclusive_bg, no_disc_bg = background_auto_resolution(
+                    background_list=other_sig + other_cold,
+                    active_not_excluded=active_not_excluded,
+                    cells=cells
+                )
+
+                other_sig_final = [a for a in other_sig if a not in auto_ruled_out]
+                other_cold_final = [a for a in other_cold if a not in auto_ruled_out]
+
+                if auto_ruled_out:
+                    st.markdown("### ✅ Auto Rule-out (from available discriminating cells):")
+                    for ag, labs in auto_ruled_out.items():
+                        st.write(f"- **Anti-{ag} ruled out** (discriminating cell(s) NEGATIVE): " + ", ".join(labs))
+
+                if supported_bg:
+                    st.markdown("### ⚠️ Background antibodies suggested by discriminating cells (NOT confirmed yet):")
+                    for ag, labs in supported_bg.items():
+                        st.write(f"- **Anti-{ag} suspected** (discriminating cell(s) POSITIVE): " + ", ".join(labs))
+
+                if inconclusive_bg:
+                    st.markdown("### ⚠️ Inconclusive background (mixed discriminating results):")
+                    for ag, labs in inconclusive_bg.items():
+                        st.write(f"- **Anti-{ag} inconclusive** (mixed results): " + ", ".join(labs))
+
+                if other_sig_final or other_cold_final or no_disc_bg:
+                    st.markdown("### ⚠️ Not excluded yet (background possibilities):")
+                    if other_sig_final:
+                        st.write("**Clinically significant:** " + ", ".join([f"Anti-{x}" for x in other_sig_final]))
+                    if other_cold_final:
+                        st.info("Cold/Insignificant: " + ", ".join([f"Anti-{x}" for x in other_cold_final]))
+                    if no_disc_bg:
+                        st.warning("No discriminating cells available in current panel/screen for: " +
+                                   ", ".join([f"Anti-{x}" for x in no_disc_bg]))
+
+                st.write("---")
+                st.subheader("Confirmation (Rule of Three) — Resolved & Separable only")
+
+                confirmation = {}
+                confirmed = set()
+                needs_more_for_confirmation = set()
+
+                if not resolved:
+                    st.info("No antibody is separable yet → DO NOT apply Rule of Three. Add discriminating selected cells.")
+                else:
+                    for a in resolved:
+                        full, mod, p_cnt, n_cnt = check_rule_three_only_on_discriminating(a, best, cells)
+                        confirmation[a] = (full, mod, p_cnt, n_cnt)
+                        if full or mod:
+                            confirmed.add(a)
+                        else:
+                            needs_more_for_confirmation.add(a)
+
+                    for a in resolved:
+                        full, mod, p_cnt, n_cnt = confirmation[a]
+                        if full:
+                            st.write(f"✅ **Anti-{a} CONFIRMED**: Full Rule (3+3) met on discriminating cells (P:{p_cnt} / N:{n_cnt})")
+                        elif mod:
+                            st.write(f"✅ **Anti-{a} CONFIRMED**: Modified Rule (2+3) met on discriminating cells (P:{p_cnt} / N:{n_cnt})")
+                        else:
+                            st.write(f"⚠️ **Anti-{a} NOT confirmed yet**: need more discriminating cells (P:{p_cnt} / N:{n_cnt})")
+
+                if confirmed:
+                    st.markdown(patient_antigen_negative_reminder(sorted(list(confirmed)), strong=True), unsafe_allow_html=True)
+                elif resolved:
+                    st.markdown(patient_antigen_negative_reminder(sorted(list(resolved)), strong=False), unsafe_allow_html=True)
+
+                d_present = ("D" in confirmed) or ("D" in resolved) or ("D" in needs_work)
+                c_present = ("C" in confirmed) or ("C" in resolved) or ("C" in needs_work) or ("C" in supported_bg) or ("C" in other_sig_final)
+                if d_present and c_present:
+                    strong = ("D" in confirmed and "C" in confirmed)
+                    st.markdown(anti_g_alert_html(strong=strong), unsafe_allow_html=True)
+
+                st.write("---")
+
+                targets_needing_selected = list(dict.fromkeys(
+                    needs_work +
+                    list(needs_more_for_confirmation) +
+                    list(supported_bg.keys()) +
+                    other_sig_final
+                ))
+
+                if targets_needing_selected:
+                    st.markdown("### 🧪 Selected Cells (Only if needed to resolve interference / exclude / confirm)")
+
+                    for a in targets_needing_selected:
+                        active_set_now = set(resolved + needs_work + other_sig_final + list(supported_bg.keys()))
+
+                        if a in needs_work:
+                            st.warning(f"Anti-{a}: **Interference / not separable** → need {a}+ cells NEGATIVE for other active suspects.")
+                        elif a in other_sig_final:
+                            st.warning(f"Anti-{a}: **Clinically significant background NOT excluded** → need discriminating cells to exclude/confirm.")
+                        elif a in supported_bg:
+                            st.info(f"Anti-{a}: **Suggested by discriminating POSITIVE cell(s)** → requires confirmation (rule-of-three / additional discriminating cells).")
+                        else:
+                            st.info(f"Anti-{a}: **Not confirmed yet** → need more discriminating cells.")
+
+                        sugg = suggest_selected_cells(a, list(active_set_now))
+                        if sugg:
+                            for lab, note in sugg[:12]:
+                                st.write(f"- {lab}  <span class='cell-hint'>{note}</span>", unsafe_allow_html=True)
+                        else:
+                            st.write("- No suitable discriminating cell in current inventory → use another lot / external selected cells.")
+
+                    enz = enzyme_hint_if_needed(targets_needing_selected)
+                    if enz:
+                        st.info("💡 " + enz)
+
+                else:
+                    st.success("No Selected Cells needed: all resolved antibodies are confirmed AND no clinically significant background remains unexcluded.")
+
+                confirmed_list = sorted(list(confirmed)) if isinstance(confirmed, set) else []
+                resolved_list = resolved if isinstance(resolved, list) else []
+                needs_work_list = needs_work if isinstance(needs_work, list) else []
+                supported_list = sorted(list(supported_bg.keys())) if isinstance(supported_bg, dict) else []
+
+                if confirmed_list:
+                    conclusion_short = "Confirmed: " + ", ".join([f"Anti-{x}" for x in confirmed_list])
+                elif resolved_list:
+                    conclusion_short = "Resolved (not fully confirmed): " + ", ".join([f"Anti-{x}" for x in resolved_list])
+                else:
+                    conclusion_short = "Unresolved / Needs more work"
+
+                details = {
+                    "best_combo": list(best),
+                    "resolved": resolved_list,
+                    "needs_work": needs_work_list,
+                    "confirmed": confirmed_list,
+                    "supported_bg": supported_list,
+                    "not_excluded_sig": other_sig_final if isinstance(other_sig_final, list) else [],
+                    "not_excluded_cold": other_cold_final if isinstance(other_cold_final, list) else [],
+                    "no_discriminating": no_disc_bg if isinstance(no_disc_bg, list) else []
+                }
+
+            if st.button("💾 Save Case to History", key="save_case_nonpan"):
+                rec = build_case_record(
+                    pt_name=st.session_state.get("pt_name",""),
+                    pt_mrn=st.session_state.get("pt_mrn",""),
+                    sex=st.session_state.get("sex",""),
+                    age_y=st.session_state.get("age_y",0),
+                    age_m=st.session_state.get("age_m",0),
+                    age_d=st.session_state.get("age_d",0),
+                    tech=st.session_state.get("tech_nm",""),
+                    run_dt=st.session_state.get("run_dt", date.today()),
+                    lot_p=st.session_state.lot_p,
+                    lot_s=st.session_state.lot_s,
+                    ac_res=ac_res,
+                    recent_tx=recent_tx,
+                    in_p=in_p,
+                    in_s=in_s,
+                    ext=st.session_state.ext,
+                    all_rx=all_rx,
+                    dat_igg=st.session_state.get("dat_igg",""),
+                    dat_c3d=st.session_state.get("dat_c3d",""),
+                    dat_ctl=st.session_state.get("dat_ctl",""),
+                    conclusion_short=conclusion_short,
+                    details=details,
+                    abo_block=abo_block
+                )
+                ok, msg = append_case_record(rec)
+                if ok:
+                    st.success("Saved ✅ (History updated)")
+                else:
+                    st.warning("⚠️ " + msg)
+
+    with st.expander("➕ Add Selected Cell (From Library)"):
+        ex_id = st.text_input("ID", key="ex_id")
+        ex_res = st.selectbox("Reaction", GRADES, key="ex_res")
+        ag_cols = st.columns(6)
+        new_ph = {}
+        for i, ag in enumerate(AGS):
+            new_ph[ag] = 1 if ag_cols[i%6].checkbox(ag, key=f"ex_{ag}") else 0
+
+        if st.button("Confirm Add", key="btn_add_ex"):
+            st.session_state.ext.append({"id": ex_id.strip() if ex_id else "", "res": normalize_grade(ex_res), "ph": new_ph})
+            st.success("Added! Re-run Analysis.")
+
+    if st.session_state.ext:
+        st.table(pd.DataFrame(st.session_state.ext)[["id","res"]])
