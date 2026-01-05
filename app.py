@@ -807,30 +807,6 @@ def interpret_abo_rhd(
                 if not _abo_mapping_consistent(fwd_abo, rev_a1, rev_b):
                     discrepancy = True
                     notes.append("Forward and reverse grouping are inconsistent → ABO DISCREPANCY.")
-                    # Pattern-specific hypotheses (rule-based, conservative)
-                    antiA_s  = _grade_to_strength(antiA)
-                    antiB_s  = _grade_to_strength(antiB)
-                    revA1_s  = _grade_to_strength(rev_a1)
-                    revB_s   = _grade_to_strength(rev_b)
-
-                    # 1) A-subgroup with anti-A1 (classic: A2 with anti-A1)
-                    # Forward suggests A, and reverse has unexpected reactivity with A1 cells while anti-B is present.
-                    if fwd_abo == "A" and antiA_s >= 2 and antiB_s == 0 and revA1_s >= 1 and revB_s >= 2:
-                        notes.append("Pattern suggests possible A-subgroup with anti‑A1 (e.g., A2 with anti‑A1): Forward looks like A, while reverse shows unexpected reaction with A1 cells.")
-                        notes.append("Next tests: Repeat grouping; test with A1 lectin (Dolichos biflorus) and/or A2 cells; consider full ABO subgroup workup before final reporting.")
-                        notes.append("Transfusion safety (until resolved): Prefer group O red cells; plasma per urgency/policy (often AB plasma if plasma is required).")
-
-                    # 2) A2B with anti-A1 (Forward AB but reverse reacts with A1 cells unexpectedly)
-                    if fwd_abo == "AB" and antiA_s >= 2 and antiB_s >= 2 and revA1_s >= 1:
-                        notes.append("Forward suggests AB, but reverse shows unexpected reaction with A1 cells → consider A2B with anti‑A1. Confirm with A1 lectin / subgroup testing.")
-
-                    # 3) Control-check / technical + cold agglutinin hints
-                    if "control" in raw and _grade_to_strength(_safe_str(raw.get("control","0"))) >= 1:
-                        notes.append("Control is positive → results may be unreliable (e.g., cold autoagglutinins/rouleaux/technical issue). Repeat grouping and resolve before issuing an ABO-specific result.")
-
-                    # 4) If antibody screen is positive, reverse discrepancies may be influenced by unexpected antibodies
-                    if screen_any_positive:
-                        notes.append("Antibody screen is positive → reverse grouping discrepancies can be influenced by unexpected antibodies reacting with reverse cells. Correlate with antibody screen/ID and consider pre-warm/IgG-only methods as per policy.")
                 else:
                     # Even if consistent, ensure reverse strength meets expectation (>=2+ when positive expected)
                     # Determine which reverse should be positive
@@ -1588,9 +1564,9 @@ else:
         </div>
         """, unsafe_allow_html=True)
 
-        with st.expander("🧩 ABO Discrepancy — Guidance (Next steps)", expanded=True):
+        with st.expander("🧩 ABO Discrepancy — Guidance (How to report the result?)", expanded=True):
             st.markdown(
-                "<div class='clinical-alert'><b>Guidance</b><ul style='margin-top:6px;'>" +
+                "<div class='clinical-alert'><b>How to report the result?</b><ul style='margin-top:6px;'>" +
                 "".join([f"<li>{_safe_str(n)}</li>" for n in abo_interp["notes"]]) +
                 "</ul></div>",
                 unsafe_allow_html=True
