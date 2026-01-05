@@ -738,6 +738,17 @@ def _abo_mapping_consistent(forward_abo: str, rev_a1: str, rev_b: str) -> bool:
         return a1_pos and b_pos
     return False
 
+
+
+def _abo_inputs_blank(raw: Dict[str, str]) -> bool:
+    """True if all ABO/RhD/DAT fields are still 'Not Done' (prevents false discrepancy alerts on empty form)."""
+    mode = _safe_str(raw.get("mode", ""))
+    if mode == "neonate":
+        keys = ["antiA","antiB","antiAB","antiD","ctl","dat"]
+    else:
+        keys = ["antiA","antiB","antiD","ctl","a1cells","bcells"]
+    return all(_safe_str(raw.get(k, "Not Done")) in ("", "Not Done") for k in keys)
+
 def interpret_abo_rhd(
     is_neonate: bool,
     purpose: str,
@@ -745,38 +756,72 @@ def interpret_abo_rhd(
     screen_any_positive: bool
 ) -> Dict[str, Any]:
     """
-    Policy-aligned ABO/RhD/DAT interpretation.
-
-    Key policy rules implemented:
-      - Control must be NEGATIVE; if positive => INVALID, repeat (policy 6.6.1).
-      - Adult/Child (≥4 months): forward reactions expected strong (≥3+); reverse expected (when positive) ≥2+.
-        Any weak/mixed-field or forward/reverse mismatch => DISCREPANCY workup (policy 6.7, 7.0).
-      - Neonate (<4 months): reverse grouping is unreliable/not required; forward must be ≥2+ to be considered reliable;
-        weaker or mixed-field => special situation / discrepancy guidance (policy 6.5.2).
-      - RhD: DVI+ for RhIG/newborn purpose, DVI− for transfusion typing per your local workflow.
-        Weak/mixed-field Anti-D => treat as RhD NEGATIVE for transfusion until resolved (policy-aligned safety principle).
+    raw keys:
+      Adult: antiA, antiB, antiD, ctl, a1cells, bcells
+      Neonate: antiA, antiB, antiAB, antiD, ctl, dat
+    Returns:
+      {
+        abo_final, rhd_final,
+        discrepancy(bool), invalid(bool),
+        status: "empty" | "incomplete" | "complete",
+        notes(list[str])
+      }
     """
     notes: List[str] = []
     discrepancy = False
     invalid = False
 
-    # -------------------------
-    # 1) Control validity
-    # -------------------------
+    # -----------------------------
+    # Entry gating (avoid "discrepancy" on blank screen)
+    # -----------------------------
+    if is_neonate:
+        required_keys = ["antiA", "antiB", "antiD", "ctl"]  # antiAB/DAT are optional for gating
+    else:
+        required_keys = ["antiA", "antiB", "a1cells", "bcells", "antiD", "ctl"]
+
+    def _is_blank(v: str) -> bool:
+        v = _safe_str(v)
+        return v in ("", "Not Done")
+
+    all_blank = all(_is_blank(raw.get(k, "Not Done")) for k in required_keys)
+    any_filled = any(not _is_blank(raw.get(k, "Not Done")) for k in required_keys)
+
+    if all_blank:
+        return {
+            "abo_final": "—",
+            "rhd_final": "—",
+            "discrepancy": False,
+            "invalid": False,
+            "status": "empty",
+            "notes": []
+        }
+
+    # If user started entering but not complete: do not label as discrepancy; show incomplete guidance.
+    incomplete = any(_is_blank(raw.get(k, "Not Done")) for k in required_keys)
+    if incomplete:
+        notes.append("ABO/RhD entry is incomplete. Complete the required fields to compute a reliable result.")
+        return {
+            "abo_final": "Incomplete entry",
+            "rhd_final": "Incomplete entry",
+            "discrepancy": False,
+            "invalid": False,
+            "status": "incomplete",
+            "notes": notes
+        }
+
+    # -----------------------------
+    # Start interpretation
+    # -----------------------------
     ctl = _safe_str(raw.get("ctl", "Not Done"))
     if ctl in ("+1", "+2", "+3", "+4", "Mixed-field", "Hemolysis"):
         invalid = True
         discrepancy = True
-        notes.append("Control is POSITIVE → INVALID test. Repeat ABO/Rh typing and investigate rouleaux/cold interference or technique issues.")
+        notes.append("Control is POSITIVE → test is INVALID. Repeat ABO/Rh typing with proper technique.")
 
-    # -------------------------
-    # 2) RhD interpretation
-    # -------------------------
+    # RhD
     antiD = _safe_str(raw.get("antiD", "Not Done"))
     if antiD in ("Not Done", ""):
         rhd_final = "Unknown"
-        discrepancy = True
-        notes.append("RhD not performed (Not Done). Complete RhD typing before final reporting when required.")
     elif antiD == "0":
         rhd_final = "RhD Negative"
     elif antiD == "+4":
@@ -784,126 +829,131 @@ def interpret_abo_rhd(
     else:
         rhd_final = "RhD Inconclusive / Weak D suspected"
         discrepancy = True
-        notes.append("Anti-D is weaker than expected or mixed-field/hemolysis → manage as RhD NEGATIVE for transfusion until resolved; follow your Weak D/RhD discrepancy SOP.")
+        notes.append(
+            "Anti-D is weaker than expected or shows mixed-field/hemolysis → treat as RhD NEGATIVE for transfusion and RhIG eligibility per policy; consider molecular testing if available."
+        )
 
-    # -------------------------
-    # 3) ABO interpretation
-    # -------------------------
+    # ABO
     if is_neonate:
-        # Neonate: forward only (reverse unreliable)
         antiA = _safe_str(raw.get("antiA", "Not Done"))
         antiB = _safe_str(raw.get("antiB", "Not Done"))
-        antiAB = _safe_str(raw.get("antiAB", "Not Done"))
-
         abo_guess = _abo_from_forward_only(antiA, antiB)
-        abo_final = f"Most probable: {abo_guess}" if abo_guess else "Most probable: Unknown"
 
-        # Neonate forward strength rule (policy-oriented): <2+ or mixed-field => special situation / discrepancy
-        if antiA in ("Not Done", "") or antiB in ("Not Done", ""):
+        # Flag weak/mixed-field forward as discrepancy but still provide most probable ABO
+        if antiA in ("+1", "+2", "Mixed-field") or antiB in ("+1", "+2", "Mixed-field"):
             discrepancy = True
-            notes.append("Forward ABO not fully performed. Complete Anti-A and Anti-B testing if required.")
-        if antiA in ("+1", "Mixed-field") or antiB in ("+1", "Mixed-field"):
-            discrepancy = True
-            notes.append("Neonate forward reactions are weak/mixed-field (<2+ or MF). Treat as special situation; repeat/confirm per policy and clinical context.")
-        # Anti-AB is supportive; if discordant with Anti-A/Anti-B, flag
-        if antiAB not in ("Not Done", ""):
-            # If antiAB is 0 while either Anti-A or Anti-B is positive, or vice versa
-            if (_is_pos_any(antiA) or _is_pos_any(antiB)) and (antiAB == "0"):
-                discrepancy = True
-                notes.append("Anti-AB is non-reactive while Anti-A/Anti-B are reactive → repeat and investigate technique/reagent issues.")
-            if (not _is_pos_any(antiA) and not _is_pos_any(antiB)) and _is_pos_any(antiAB):
-                discrepancy = True
-                notes.append("Anti-AB reactive while Anti-A/Anti-B are non-reactive → repeat and investigate.")
+            notes.append(
+                "Weak/mixed-field A/B reactions can occur in neonates; report as 'most probable' and plan confirmation at 6 months (or per local policy)."
+            )
 
-        # DAT (neonate) informational
+        abo_final = f"Most probable: {abo_guess}" if abo_guess != "Unknown" else "Most probable: Unknown"
+
+        # DAT note (neonate)
         dat = _safe_str(raw.get("dat", "Not Done"))
         if dat in ("+1", "+2", "+3", "+4", "Mixed-field", "Hemolysis"):
-            notes.append("DAT is POSITIVE. In neonates this may reflect maternal IgG coating; interpret ABO cautiously and ensure proper specimen handling.")
+            notes.append("DAT is POSITIVE. In neonates, consider maternal IgG coating; interpret ABO cautiously and ensure proper specimen handling.")
 
-        # Purpose reminder
         if purpose == "RhIG":
-            notes.append("Purpose: RhIG eligibility / newborn pathway → RhD should be performed with DVI+ (per policy/workflow).")
+            notes.append("Purpose: RhIG eligibility (DVI+ card per your policy).")
         else:
-            notes.append("Purpose: Transfusion → RhD performed with DVI− (per policy/workflow).")
+            notes.append("Purpose: Transfusion (DVI− card per your policy).")
 
     else:
-        # Adult/child ≥4 months: forward + reverse required
         antiA = _safe_str(raw.get("antiA", "Not Done"))
         antiB = _safe_str(raw.get("antiB", "Not Done"))
         rev_a1 = _safe_str(raw.get("a1cells", "Not Done"))
         rev_b  = _safe_str(raw.get("bcells", "Not Done"))
 
+        # Determine forward ABO (any positive)
         fwd_abo = _abo_from_forward_only(antiA, antiB)
-        abo_final = fwd_abo if fwd_abo else "Unknown"
 
-        # Forward strength rule: expected ≥3+ when positive
-        if (antiA in ("+1", "+2", "Mixed-field")) or (antiB in ("+1", "+2", "Mixed-field")):
+        # Forward expected >=3+ (policy). If positive but <3+, flag.
+        if antiA in ("+1", "+2", "Mixed-field") or antiB in ("+1", "+2", "Mixed-field"):
             discrepancy = True
-            notes.append("Forward grouping shows weak/mixed-field reactions (<3+). Start ABO discrepancy workup per policy.")
+            notes.append("Forward grouping shows weak/mixed-field reactions (<3+). Initiate ABO discrepancy workup per policy.")
 
-        # Reverse must be performed
-        if rev_a1 in ("Not Done", "") or rev_b in ("Not Done", ""):
+        # Pattern mismatch
+        if not _abo_mapping_consistent(fwd_abo, rev_a1, rev_b):
             discrepancy = True
-            notes.append("Reverse grouping is incomplete. For patients ≥4 months, reverse grouping is required per policy.")
+            notes.append("Forward and reverse grouping are inconsistent → ABO DISCREPANCY.")
+
+            # Subgroup / Anti-A1 clue:
+            # Forward A (Anti-A positive) with unexpected A1 cell reaction in reverse + expected B-cell reaction
+            # suggests Anti-A1 in A2/A-subgroup (most classic), but keep it as workup guidance.
+            if fwd_abo == "A" and _is_pos_any(rev_a1) and _is_pos_any(rev_b):
+                notes.append(
+                    "Forward group A with unexpected reactivity to A1 cells in reverse suggests Anti-A1 (often in A2/A subgroup). Confirm with Anti-A1 lectin, repeat reverse with A2 cells, and review history; keep as DISCREPANCY until resolved."
+                )
+            if fwd_abo == "AB" and (_is_pos_any(rev_a1) or _is_pos_any(rev_b)):
+                notes.append(
+                    "Forward group AB with reverse reactivity may suggest ABO subgroup, cold antibody, or technical error. Repeat and investigate per policy; keep as DISCREPANCY until resolved."
+                )
+
         else:
-            # Pattern match (any positive)
-            if not _abo_mapping_consistent(fwd_abo, rev_a1, rev_b):
+            # Even if consistent, ensure reverse strength meets expectation (>=2+ when positive expected)
+            a1_should_pos = (fwd_abo in ("B", "O"))
+            b_should_pos  = (fwd_abo in ("A", "O"))
+
+            if a1_should_pos and (rev_a1 in ("0", "+1")):
                 discrepancy = True
-                notes.append("Forward and reverse grouping are inconsistent → ABO DISCREPANCY (initiate full workup).")
-            else:
-                # Strength rule for reverse: expected ≥2+ when positive
-                a1_should_pos = (fwd_abo in ("B", "O"))
-                b_should_pos  = (fwd_abo in ("A", "O"))
+                notes.append(
+                    "Reverse grouping is weaker than expected (<2+). Consider hypogammaglobulinemia, age-related low isoagglutinins, recent transfusion, or plasma abnormalities; follow policy."
+                )
+            if b_should_pos and (rev_b in ("0", "+1")):
+                discrepancy = True
+                notes.append(
+                    "Reverse grouping is weaker than expected (<2+). Consider hypogammaglobulinemia, age-related low isoagglutinins, recent transfusion, or plasma abnormalities; follow policy."
+                )
 
-                if a1_should_pos and (rev_a1 in ("0", "+1")):
-                    discrepancy = True
-                    notes.append("Reverse grouping is weaker than expected (<2+) where positivity is expected. Consider low isoagglutinins/age/immunosuppression/recent transfusion; follow policy.")
-                if b_should_pos and (rev_b in ("0", "+1")):
-                    discrepancy = True
-                    notes.append("Reverse grouping is weaker than expected (<2+) where positivity is expected. Consider low isoagglutinins/age/immunosuppression/recent transfusion; follow policy.")
-                # If reverse is unexpectedly positive but weak
-                a1_should_neg = (fwd_abo in ("A", "AB"))
-                b_should_neg  = (fwd_abo in ("B", "AB"))
-                if a1_should_neg and _is_pos_any(rev_a1):
-                    discrepancy = True
-                    notes.append("Unexpected reverse reactivity with A1 cells → consider cold agglutinin/alloantibody or subgroup; work up per policy.")
-                if b_should_neg and _is_pos_any(rev_b):
-                    discrepancy = True
-                    notes.append("Unexpected reverse reactivity with B cells → consider cold agglutinin/alloantibody or subgroup; work up per policy.")
+            # Anti-A1 clue even when overall mapping is "consistent" by simple rules:
+            # Some workflows treat any A1-cell positivity in an A forward as discrepancy even if B-cells are strongly positive.
+            if fwd_abo == "A" and _is_pos_any(rev_a1) and _is_pos_any(rev_b):
+                discrepancy = True
+                notes.append(
+                    "Forward A with reverse A1-cell positivity is not expected. Consider Anti-A1 (A2/A subgroup) and investigate (Anti-A1 lectin / A2 cells / repeat)."
+                )
 
-        # Link to antibody screen
+        # Link to antibody screen if reverse extra reactions and screen is positive
         if discrepancy and screen_any_positive:
-            notes.append("Antibody screen is POSITIVE. If reverse grouping has unexpected reactivity, consider alloantibody/cold interference; correlate with antibody ID and history per SOP.")
+            notes.append(
+                "Antibody screen is POSITIVE. If reverse grouping shows unexpected reactivity, consider alloantibody/cold interference; review antibody ID history and use appropriate antigen-negative reagent cells per SOP."
+            )
 
-        # Mixed-field guidance
+        # Mixed-field -> transfusion / transplant
         if antiA == "Mixed-field" or antiB == "Mixed-field" or rev_a1 == "Mixed-field" or rev_b == "Mixed-field":
-            notes.append("Mixed-field pattern: consider recent transfusion, stem cell transplant/chimerism, or sample issue. Manage and confirm per policy.")
+            notes.append(
+                "Mixed-field pattern: consider recent transfusion, stem cell transplant/chimerism, or sample issue. For transfused patients, confirm ABO ≥3 months after last transfusion (or per policy)."
+            )
 
-    # -------------------------
-    # 4) Global 'all wells reactive' hint (rouleaux/cold) when control is positive
-    # -------------------------
-    if is_neonate:
-        all_pos_keys = ["antiA", "antiB", "antiAB", "antiD", "ctl"]
-    else:
+        abo_final = fwd_abo if fwd_abo else "Unknown"
+        if discrepancy and not invalid:
+            # still show best estimate to help paperwork, but label discrepancy
+            abo_final = f"{abo_final} (Discrepancy)"
+
+    # Rouleaux/cold auto suspicion in ABO: everything positive including control
+    if not is_neonate:
         all_pos_keys = ["antiA", "antiB", "antiD", "ctl", "a1cells", "bcells"]
+    else:
+        all_pos_keys = ["antiA", "antiB", "antiAB", "antiD", "ctl"]
 
     all_pos = True
     for k in all_pos_keys:
         if not _is_pos_any(_safe_str(raw.get(k, "0"))):
             all_pos = False
             break
+
     if all_pos and _is_pos_any(ctl):
         discrepancy = True
-        notes.append("All wells including control are reactive → consider rouleaux or cold autoantibody interference. Repeat with saline replacement / prewarm as appropriate per SOP.")
-
-    if discrepancy and not invalid and (not is_neonate):
-        abo_final = f"{abo_final} (Discrepancy)"
+        notes.append(
+            "All wells including control are reactive → consider rouleaux or cold autoantibody interference. Repeat with saline replacement / prewarm as appropriate per SOP."
+        )
 
     return {
         "abo_final": abo_final,
         "rhd_final": rhd_final,
         "discrepancy": bool(discrepancy),
         "invalid": bool(invalid),
+        "status": "complete",
         "notes": notes
     }
 
@@ -944,8 +994,6 @@ def render_history_report(payload: dict):
     dat = payload.get("dat", {}) or {}
     interp = payload.get("interpretation", {}) or {}
     selected = payload.get("selected_cells", []) or []
-
-    case_comment = _safe_str(payload.get("case_comment",""))
 
     demo = payload.get("demographics", {}) or {}
     abo = payload.get("abo", {}) or {}
@@ -993,198 +1041,7 @@ def render_history_report(payload: dict):
         chips.append(f"<span class='chip chip-warn'>DAT C3d: {dat_c3d or '—'}</span>")
         chips.append(f"<span class='chip chip-warn'>DAT Control: {dat_ctl or '—'}</span>")
 
-    st.markdown(f"""
-    <div class="report-card">
-        <div class="report-title">Case History Report</div>
-        <div class="report-sub">Saved at: <b>{saved_at or '—'}</b> &nbsp;|&nbsp; Run Date: <b>{run_dt or '—'}</b></div>
-        <div>{''.join(chips)}</div>
-    </div>
-    """, unsafe_allow_html=True)
 
-    if case_comment:
-        st.markdown(f"<div class='clinical-info'><b>Case Comment</b><br>{case_comment}</div>", unsafe_allow_html=True)
-
-    c1, c2, c3, c4 = st.columns(4)
-    with c1:
-        st.markdown(f"<div class='kv'><b>Patient Name</b><br>{name or '—'}</div>", unsafe_allow_html=True)
-    with c2:
-        st.markdown(f"<div class='kv'><b>MRN</b><br>{mrn or '—'}</div>", unsafe_allow_html=True)
-    with c3:
-        st.markdown(f"<div class='kv'><b>Sex</b><br>{sex or '—'}</div>", unsafe_allow_html=True)
-    with c4:
-        st.markdown(f"<div class='kv'><b>Age (Y/M/D)</b><br>{age_y or '—'} / {age_m or '—'} / {age_d or '—'}</div>", unsafe_allow_html=True)
-
-    st.write("")
-    a1, a2, a3 = st.columns(3)
-    with a1:
-        st.markdown(f"<div class='kv'><b>Tech / Operator</b><br>{tech or '—'}</div>", unsafe_allow_html=True)
-    with a2:
-        st.markdown(f"<div class='kv'><b>ID Panel Lot</b><br>{lot_p or '—'}</div>", unsafe_allow_html=True)
-    with a3:
-        st.markdown(f"<div class='kv'><b>Screen Lot</b><br>{lot_s or '—'}</div>", unsafe_allow_html=True)
-
-    # ABO raw
-    st.write("")
-    st.subheader("ABO / RhD / DAT")
-    abo_raw = abo.get("raw", {}) or {}
-    if abo_raw:
-        st.json(abo_raw, expanded=False)
-
-    notes = abo.get("notes", []) or []
-    if notes:
-        st.markdown(
-            "<div class='clinical-alert'><b>ABO Discrepancy Notes</b><ul style='margin-top:6px;'>" +
-            "".join([f"<li>{_safe_str(n)}</li>" for n in notes]) +
-            "</ul></div>",
-            unsafe_allow_html=True
-        )
-
-    # Phenotype
-    st.write("")
-    st.subheader("Patient Phenotype (if available)")
-    if pheno:
-        ph_dict = pheno.get("results", {}) or {}
-        if ph_dict:
-            # render in a compact table
-            rows = [{"Antigen": k, "Result": v} for k,v in ph_dict.items()]
-            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-        else:
-            st.write("—")
-    else:
-        st.write("—")
-
-    # Reactions
-    st.write("")
-    st.subheader("Antibody ID — Reactions Summary")
-    screen_rx = inputs.get("screen_reactions", {}) or {}
-    panel_rx  = inputs.get("panel_reactions", {}) or {}
-
-    sr_df = pd.DataFrame([{
-        "Screen I": screen_rx.get("I",""),
-        "Screen II": screen_rx.get("II",""),
-        "Screen III": screen_rx.get("III",""),
-    }])
-    st.markdown("**Screening Cells**")
-    st.dataframe(sr_df, use_container_width=True, hide_index=True)
-
-    pr_rows = []
-    for i in range(1, 12):
-        pr_rows.append({"Cell": f"Panel #{i}", "Reaction": panel_rx.get(str(i), panel_rx.get(i, ""))})
-    pr_df = pd.DataFrame(pr_rows)
-    st.markdown("**Panel Cells (1–11)**")
-    st.dataframe(pr_df, use_container_width=True, hide_index=True)
-
-    # Interpretation
-    st.write("")
-    st.subheader("Antibody ID — Interpretation / Results")
-    pattern = _safe_str(interp.get("pattern",""))
-    if pattern:
-        st.info(f"Pattern pathway: {pattern}")
-
-    best_combo = interp.get("best_combo", None)
-    if best_combo is not None:
-        st.markdown("**Primary Suggested Combination (best fit)**")
-        st.write(_fmt_antibody_list(best_combo))
-
-    confirmed = interp.get("confirmed", [])
-    resolved  = interp.get("resolved", [])
-    needs_work = interp.get("needs_work", [])
-    supported_bg = interp.get("supported_bg", [])
-    not_ex_sig = interp.get("not_excluded_sig", [])
-    not_ex_cold = interp.get("not_excluded_cold", [])
-    no_disc = interp.get("no_discriminating", [])
-
-    b1, b2, b3 = st.columns(3)
-    with b1:
-        st.markdown(f"<div class='kv'><b>Confirmed</b><br>{_fmt_antibody_list(confirmed)}</div>", unsafe_allow_html=True)
-    with b2:
-        st.markdown(f"<div class='kv'><b>Resolved (not fully confirmed)</b><br>{_fmt_antibody_list(resolved)}</div>", unsafe_allow_html=True)
-    with b3:
-        st.markdown(f"<div class='kv'><b>Needs work / Interference</b><br>{_fmt_antibody_list(needs_work)}</div>", unsafe_allow_html=True)
-
-    if supported_bg:
-        st.warning("Background suspected (not confirmed): " + _fmt_antibody_list(supported_bg))
-    if not_ex_sig:
-        st.warning("Clinically significant NOT excluded: " + _fmt_antibody_list(not_ex_sig))
-    if not_ex_cold:
-        st.info("Cold/insignificant NOT excluded: " + _fmt_antibody_list(not_ex_cold))
-    if no_disc:
-        st.warning("No discriminating cells available for: " + _fmt_antibody_list(no_disc))
-
-    # Selected cells
-    st.write("")
-    st.subheader("Selected Cells Added (if any)")
-    if selected:
-        try:
-            sc_df = pd.DataFrame(selected)
-            cols = [c for c in ["id", "res"] if c in sc_df.columns]
-            if cols:
-                st.dataframe(sc_df[cols], use_container_width=True, hide_index=True)
-            else:
-                st.dataframe(sc_df, use_container_width=True, hide_index=True)
-        except Exception:
-            st.write(selected)
-    else:
-        st.write("— None —")
-
-# =============================================================================
-# 4.4) SUPERVISOR: Copy/Paste Parser (Option A: 26 columns in AGS order)
-# =============================================================================
-def _token_to_01(tok: str) -> int:
-    s = str(tok).strip().lower()
-    if s in ("", "0", "neg", "negative", "nt", "n/t", "na", "n/a", "-", "—"):
-        return 0
-    if "+" in s:
-        return 1
-    if s in ("1", "1+", "2", "2+", "3", "3+", "4", "4+", "pos", "positive", "w", "wk", "weak", "w+", "wf"):
-        return 1
-    for ch in s:
-        if ch.isdigit() and ch != "0":
-            return 1
-    return 0
-
-def parse_paste_table(txt: str, expected_rows: int, id_prefix: str, id_list=None):
-    rows = [r for r in str(txt).strip().splitlines() if r.strip()]
-    data = []
-
-    if id_list is None:
-        id_list = [f"{id_prefix}{i+1}" for i in range(expected_rows)]
-
-    for i in range(min(expected_rows, len(rows))):
-        parts = rows[i].split("\t")
-        vals = [_token_to_01(p) for p in parts]
-
-        if len(vals) > len(AGS):
-            vals = vals[-len(AGS):]
-        while len(vals) < len(AGS):
-            vals.append(0)
-
-        d = {"ID": id_list[i]}
-        for j, ag in enumerate(AGS):
-            d[ag] = int(vals[j])
-        data.append(d)
-
-    df = pd.DataFrame(data)
-    if len(df) < expected_rows:
-        for k in range(len(df), expected_rows):
-            d = {"ID": id_list[k], **{ag: 0 for ag in AGS}}
-            df = pd.concat([df, pd.DataFrame([d])], ignore_index=True)
-
-    return df, f"Parsed {min(expected_rows, len(rows))} row(s). Expecting {expected_rows}."
-
-def _checkbox_column_config():
-    return {
-        ag: st.column_config.CheckboxColumn(
-            ag,
-            help="Tick = Antigen Present (1). Untick = Absent (0).",
-            default=False
-        )
-        for ag in AGS
-    }
-
-# =============================================================================
-# 5) SIDEBAR (Menu + Reset)
-# =============================================================================
 RESET_KEYS = [
     # demographics
     "pt_name","pt_mrn","pt_sex","age_y","age_m","age_d","tech_nm","run_dt",
@@ -1990,6 +1847,18 @@ else:
                         st.success("Resolved (separable): " + ", ".join([f"Anti-{a}" for a in resolved]))
                     if needs_work:
                         st.warning("Suggested but NOT separable yet (DO NOT confirm): " + ", ".join([f"Anti-{a}" for a in needs_work]))
+
+                    # Auto rule-out summary (does NOT change the main conclusion)
+                    auto_ruled = sorted(list(rule_out(in_p, in_s, st.session_state.ext)))
+                    auto_ruled = [ag for ag in auto_ruled if ag not in best]
+                    if auto_ruled:
+                        st.markdown("**Ruled out (auto) based on nonreactive antigen-positive cells:**")
+                        for ag in auto_ruled:
+                            dc = discriminating_cells_for(ag, cells)
+                            if dc:
+                                st.write(f"• Anti-{ag} ruled out by: " + ", ".join(dc))
+                            else:
+                                st.write(f"• Anti-{ag} ruled out")
 
                     # Confirmation (rule of three) on discriminating cells
                     st.write("---")
