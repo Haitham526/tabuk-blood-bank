@@ -819,16 +819,6 @@ def interpret_abo_rhd(
                         discrepancy = True
                         notes.append("Reverse grouping is weaker than expected (<2+). Consider hypogammaglobulinemia, age-related low isoagglutinins, recent transfusion, or plasma abnormalities; follow policy.")
 
-        # Specific pattern hints (example: A subgroup with anti-A1)
-        rev_a1_s = _grade_to_strength(rev_a1)
-        rev_b_s = _grade_to_strength(rev_b)
-        if fwd_abo == "A" and (rev_a1_s >= 1) and (rev_b_s >= 2):
-            notes.append((
-                "Pattern suggests anti-A1 (A2/A2B subgroup): forward looks like group A, but A1 cells react in reverse (may be weak 1+). "
-                "Suggested workup: repeat reverse at RT then 37°C, review history/transfusion, test with anti-A1 lectin (Dolichos biflorus) or A1 reagent. "
-                "Until resolved, consider issuing group O RBCs and AB plasma per policy."
-            ))
-
         # Link to antibody screen if reverse extra reactions and screen is positive
         if discrepancy and screen_any_positive:
             notes.append("Antibody screen is POSITIVE. If reverse grouping shows unexpected reactivity, consider alloantibody/cold interference; review antibody ID history and use appropriate antigen-negative reagent cells per SOP.")
@@ -1423,31 +1413,6 @@ else:
             }
 
     # ----------------------------------------------------------------------
-
-    # --- Immediate ABO/RhD interpretation (right after ABO entry)
-    abo_interp_quick = interpret_abo_rhd(abo_raw, is_neonate=is_neonate, screen_any_positive=False)
-    if abo_interp_quick["ready"]:
-        if abo_interp_quick["discrepancy"]:
-            st.markdown(f"""
-            <div class='clinical-warn'>
-            ⚠️ <b>ABO DISCREPANCY / SPECIAL SITUATION</b><br>
-            Current computed result: <b>ABO: {abo_interp_quick['abo_final']}</b> | <b>RhD: {abo_interp_quick['rhd_final']}</b><br>
-            </div>
-            """, unsafe_allow_html=True)
-            with st.expander("🧩 ABO Discrepancy — Guidance (How to report the result?)", expanded=True):
-                st.markdown(
-                    "<div class='clinical-alert'><b>How to report the result?</b><ul style='margin-top:6px;'>" +
-                    "".join([f"<li>{_safe_str(n)}</li>" for n in abo_interp_quick["notes"]]) +
-                    "</ul></div>",
-                    unsafe_allow_html=True
-                )
-        else:
-            st.markdown(f"""
-            <div class='clinical-ok'>
-            ✅ <b>ABO/RhD result is consistent</b>: <b>ABO: {abo_interp_quick['abo_final']}</b> | <b>RhD: {abo_interp_quick['rhd_final']}</b>
-            </div>
-            """, unsafe_allow_html=True)
-
     # Phenotype section (collapsed)
     # ----------------------------------------------------------------------
     with st.expander("🧬 Patient Phenotype (optional)", expanded=False):
@@ -1591,12 +1556,15 @@ else:
     )
 
     if abo_interp["discrepancy"]:
-        st.markdown(
-            "<div class='clinical-warn'>⚠️ <b>ABO discrepancy detected</b> (see the ABO section above for full guidance).</div>",
-            unsafe_allow_html=True
-        )
+        st.markdown(f"""
+        <div class='clinical-danger'>
+        ⚠️ <b>ABO DISCREPANCY / SPECIAL SITUATION</b><br>
+        Current computed result: <b>ABO: {abo_interp['abo_final']}</b> | <b>RhD: {abo_interp['rhd_final']}</b><br>
+        Open the discrepancy guidance below.
+        </div>
+        """, unsafe_allow_html=True)
 
-        with st.expander("🧩 ABO Discrepancy — Guidance (How to report the result?)", expanded=False):
+        with st.expander("🧩 ABO Discrepancy — Guidance (How to report the result?)", expanded=True):
             st.markdown(
                 "<div class='clinical-alert'><b>How to report the result?</b><ul style='margin-top:6px;'>" +
                 "".join([f"<li>{_safe_str(n)}</li>" for n in abo_interp["notes"]]) +
