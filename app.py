@@ -728,20 +728,66 @@ def interpret_abo_rhd(
       Adult: antiA, antiB, antiD, ctl, a1cells, bcells
       Neonate: antiA, antiB, antiAB, antiD, ctl, dat
     Returns:
-      {abo_final, rhd_final, discrepancy(bool), invalid(bool), notes(list[str])}
+      {
+        abo_final, rhd_final,
+        discrepancy(bool), invalid(bool),
+        status: "empty" | "incomplete" | "complete",
+        notes(list[str])
+      }
     """
-    notes = []
+    notes: List[str] = []
     discrepancy = False
     invalid = False
 
-    ctl = _safe_str(raw.get("ctl","Not Done"))
-    if ctl in ("+1","+2","+3","+4","Mixed-field","Hemolysis"):
+    # -----------------------------
+    # Entry gating (avoid "discrepancy" on blank screen)
+    # -----------------------------
+    if is_neonate:
+        required_keys = ["antiA", "antiB", "antiD", "ctl"]  # antiAB/DAT are optional for gating
+    else:
+        required_keys = ["antiA", "antiB", "a1cells", "bcells", "antiD", "ctl"]
+
+    def _is_blank(v: str) -> bool:
+        v = _safe_str(v)
+        return v in ("", "Not Done")
+
+    all_blank = all(_is_blank(raw.get(k, "Not Done")) for k in required_keys)
+    any_filled = any(not _is_blank(raw.get(k, "Not Done")) for k in required_keys)
+
+    if all_blank:
+        return {
+            "abo_final": "—",
+            "rhd_final": "—",
+            "discrepancy": False,
+            "invalid": False,
+            "status": "empty",
+            "notes": []
+        }
+
+    # If user started entering but not complete: do not label as discrepancy; show incomplete guidance.
+    incomplete = any(_is_blank(raw.get(k, "Not Done")) for k in required_keys)
+    if incomplete:
+        notes.append("ABO/RhD entry is incomplete. Complete the required fields to compute a reliable result.")
+        return {
+            "abo_final": "Incomplete entry",
+            "rhd_final": "Incomplete entry",
+            "discrepancy": False,
+            "invalid": False,
+            "status": "incomplete",
+            "notes": notes
+        }
+
+    # -----------------------------
+    # Start interpretation
+    # -----------------------------
+    ctl = _safe_str(raw.get("ctl", "Not Done"))
+    if ctl in ("+1", "+2", "+3", "+4", "Mixed-field", "Hemolysis"):
         invalid = True
         discrepancy = True
         notes.append("Control is POSITIVE → test is INVALID. Repeat ABO/Rh typing with proper technique.")
 
     # RhD
-    antiD = _safe_str(raw.get("antiD","Not Done"))
+    antiD = _safe_str(raw.get("antiD", "Not Done"))
     if antiD in ("Not Done", ""):
         rhd_final = "Unknown"
     elif antiD == "0":
@@ -751,30 +797,29 @@ def interpret_abo_rhd(
     else:
         rhd_final = "RhD Inconclusive / Weak D suspected"
         discrepancy = True
-        notes.append("Anti-D is weaker than expected or shows mixed-field/hemolysis → treat as RhD NEGATIVE for transfusion and RhIG eligibility per policy; consider molecular testing if available.")
+        notes.append(
+            "Anti-D is weaker than expected or shows mixed-field/hemolysis → treat as RhD NEGATIVE for transfusion and RhIG eligibility per policy; consider molecular testing if available."
+        )
 
     # ABO
     if is_neonate:
-        antiA = _safe_str(raw.get("antiA","Not Done"))
-        antiB = _safe_str(raw.get("antiB","Not Done"))
+        antiA = _safe_str(raw.get("antiA", "Not Done"))
+        antiB = _safe_str(raw.get("antiB", "Not Done"))
         abo_guess = _abo_from_forward_only(antiA, antiB)
 
         # Flag weak/mixed-field forward as discrepancy but still provide most probable ABO
-        if antiA in ("+1","+2","Mixed-field") or antiB in ("+1","+2","Mixed-field"):
+        if antiA in ("+1", "+2", "Mixed-field") or antiB in ("+1", "+2", "Mixed-field"):
             discrepancy = True
-            notes.append("Weak/mixed-field A/B reactions can occur in neonates; report as 'most probable' and plan confirmation at 6 months (or per local policy).")
-        if antiA == "Not Done" or antiB == "Not Done":
-            discrepancy = True
-            notes.append("Forward ABO not fully performed (Not Done). Complete testing if required.")
+            notes.append(
+                "Weak/mixed-field A/B reactions can occur in neonates; report as 'most probable' and plan confirmation at 6 months (or per local policy)."
+            )
+
         abo_final = f"Most probable: {abo_guess}" if abo_guess != "Unknown" else "Most probable: Unknown"
 
         # DAT note (neonate)
-        dat = _safe_str(raw.get("dat","Not Done"))
-        if dat in ("+1","+2","+3","+4","Mixed-field","Hemolysis"):
+        dat = _safe_str(raw.get("dat", "Not Done"))
+        if dat in ("+1", "+2", "+3", "+4", "Mixed-field", "Hemolysis"):
             notes.append("DAT is POSITIVE. In neonates, consider maternal IgG coating; interpret ABO cautiously and ensure proper specimen handling.")
-        if dat in ("Not Done",""):
-            # allowed
-            pass
 
         if purpose == "RhIG":
             notes.append("Purpose: RhIG eligibility (DVI+ card per your policy).")
@@ -782,50 +827,71 @@ def interpret_abo_rhd(
             notes.append("Purpose: Transfusion (DVI− card per your policy).")
 
     else:
-        antiA = _safe_str(raw.get("antiA","Not Done"))
-        antiB = _safe_str(raw.get("antiB","Not Done"))
-        rev_a1 = _safe_str(raw.get("a1cells","Not Done"))
-        rev_b  = _safe_str(raw.get("bcells","Not Done"))
+        antiA = _safe_str(raw.get("antiA", "Not Done"))
+        antiB = _safe_str(raw.get("antiB", "Not Done"))
+        rev_a1 = _safe_str(raw.get("a1cells", "Not Done"))
+        rev_b  = _safe_str(raw.get("bcells", "Not Done"))
 
         # Determine forward ABO (any positive)
         fwd_abo = _abo_from_forward_only(antiA, antiB)
 
-        # Discrepancy thresholds
         # Forward expected >=3+ (policy). If positive but <3+, flag.
-        if antiA in ("+1","+2","Mixed-field") or antiB in ("+1","+2","Mixed-field"):
+        if antiA in ("+1", "+2", "Mixed-field") or antiB in ("+1", "+2", "Mixed-field"):
             discrepancy = True
             notes.append("Forward grouping shows weak/mixed-field reactions (<3+). Initiate ABO discrepancy workup per policy.")
-        # Reverse expected >=2+ if positive. If 0/+1 where expected pos, flag.
-        # We first compute expected pattern, then check if reverse is weak.
-        if fwd_abo in ("A","B","O") or fwd_abo == "AB":
-            # If reverse results are not done, discrepancy
-            if rev_a1 in ("Not Done","") or rev_b in ("Not Done",""):
+
+        # Pattern mismatch
+        if not _abo_mapping_consistent(fwd_abo, rev_a1, rev_b):
+            discrepancy = True
+            notes.append("Forward and reverse grouping are inconsistent → ABO DISCREPANCY.")
+
+            # Subgroup / Anti-A1 clue:
+            # Forward A (Anti-A positive) with unexpected A1 cell reaction in reverse + expected B-cell reaction
+            # suggests Anti-A1 in A2/A-subgroup (most classic), but keep it as workup guidance.
+            if fwd_abo == "A" and _is_pos_any(rev_a1) and _is_pos_any(rev_b):
+                notes.append(
+                    "Forward group A with unexpected reactivity to A1 cells in reverse suggests Anti-A1 (often in A2/A subgroup). Confirm with Anti-A1 lectin, repeat reverse with A2 cells, and review history; keep as DISCREPANCY until resolved."
+                )
+            if fwd_abo == "AB" and (_is_pos_any(rev_a1) or _is_pos_any(rev_b)):
+                notes.append(
+                    "Forward group AB with reverse reactivity may suggest ABO subgroup, cold antibody, or technical error. Repeat and investigate per policy; keep as DISCREPANCY until resolved."
+                )
+
+        else:
+            # Even if consistent, ensure reverse strength meets expectation (>=2+ when positive expected)
+            a1_should_pos = (fwd_abo in ("B", "O"))
+            b_should_pos  = (fwd_abo in ("A", "O"))
+
+            if a1_should_pos and (rev_a1 in ("0", "+1")):
                 discrepancy = True
-                notes.append("Reverse grouping not fully performed. For patients >4 months, reverse grouping is required per policy.")
-            else:
-                # If pattern mismatch
-                if not _abo_mapping_consistent(fwd_abo, rev_a1, rev_b):
-                    discrepancy = True
-                    notes.append("Forward and reverse grouping are inconsistent → ABO DISCREPANCY.")
-                else:
-                    # Even if consistent, ensure reverse strength meets expectation (>=2+ when positive expected)
-                    # Determine which reverse should be positive
-                    a1_should_pos = (fwd_abo in ("B","O"))
-                    b_should_pos  = (fwd_abo in ("A","O"))
-                    if a1_should_pos and (rev_a1 in ("0","+1")):
-                        discrepancy = True
-                        notes.append("Reverse grouping is weaker than expected (<2+). Consider hypogammaglobulinemia, age-related low isoagglutinins, recent transfusion, or plasma abnormalities; follow policy.")
-                    if b_should_pos and (rev_b in ("0","+1")):
-                        discrepancy = True
-                        notes.append("Reverse grouping is weaker than expected (<2+). Consider hypogammaglobulinemia, age-related low isoagglutinins, recent transfusion, or plasma abnormalities; follow policy.")
+                notes.append(
+                    "Reverse grouping is weaker than expected (<2+). Consider hypogammaglobulinemia, age-related low isoagglutinins, recent transfusion, or plasma abnormalities; follow policy."
+                )
+            if b_should_pos and (rev_b in ("0", "+1")):
+                discrepancy = True
+                notes.append(
+                    "Reverse grouping is weaker than expected (<2+). Consider hypogammaglobulinemia, age-related low isoagglutinins, recent transfusion, or plasma abnormalities; follow policy."
+                )
+
+            # Anti-A1 clue even when overall mapping is "consistent" by simple rules:
+            # Some workflows treat any A1-cell positivity in an A forward as discrepancy even if B-cells are strongly positive.
+            if fwd_abo == "A" and _is_pos_any(rev_a1) and _is_pos_any(rev_b):
+                discrepancy = True
+                notes.append(
+                    "Forward A with reverse A1-cell positivity is not expected. Consider Anti-A1 (A2/A subgroup) and investigate (Anti-A1 lectin / A2 cells / repeat)."
+                )
 
         # Link to antibody screen if reverse extra reactions and screen is positive
         if discrepancy and screen_any_positive:
-            notes.append("Antibody screen is POSITIVE. If reverse grouping shows unexpected reactivity, consider alloantibody/cold interference; review antibody ID history and use appropriate antigen-negative reagent cells per SOP.")
+            notes.append(
+                "Antibody screen is POSITIVE. If reverse grouping shows unexpected reactivity, consider alloantibody/cold interference; review antibody ID history and use appropriate antigen-negative reagent cells per SOP."
+            )
 
         # Mixed-field -> transfusion / transplant
         if antiA == "Mixed-field" or antiB == "Mixed-field" or rev_a1 == "Mixed-field" or rev_b == "Mixed-field":
-            notes.append("Mixed-field pattern: consider recent transfusion, stem cell transplant/chimerism, or sample issue. For transfused patients, confirm ABO ≥3 months after last transfusion (or per policy).")
+            notes.append(
+                "Mixed-field pattern: consider recent transfusion, stem cell transplant/chimerism, or sample issue. For transfused patients, confirm ABO ≥3 months after last transfusion (or per policy)."
+            )
 
         abo_final = fwd_abo if fwd_abo else "Unknown"
         if discrepancy and not invalid:
@@ -834,23 +900,28 @@ def interpret_abo_rhd(
 
     # Rouleaux/cold auto suspicion in ABO: everything positive including control
     if not is_neonate:
-        all_pos_keys = ["antiA","antiB","antiD","ctl","a1cells","bcells"]
+        all_pos_keys = ["antiA", "antiB", "antiD", "ctl", "a1cells", "bcells"]
     else:
-        all_pos_keys = ["antiA","antiB","antiAB","antiD","ctl"]
+        all_pos_keys = ["antiA", "antiB", "antiAB", "antiD", "ctl"]
+
     all_pos = True
     for k in all_pos_keys:
-        if not _is_pos_any(_safe_str(raw.get(k,"0"))):
+        if not _is_pos_any(_safe_str(raw.get(k, "0"))):
             all_pos = False
             break
+
     if all_pos and _is_pos_any(ctl):
         discrepancy = True
-        notes.append("All wells including control are reactive → consider rouleaux or cold autoantibody interference. Repeat with saline replacement / prewarm as appropriate per SOP.")
+        notes.append(
+            "All wells including control are reactive → consider rouleaux or cold autoantibody interference. Repeat with saline replacement / prewarm as appropriate per SOP."
+        )
 
     return {
         "abo_final": abo_final,
         "rhd_final": rhd_final,
         "discrepancy": bool(discrepancy),
         "invalid": bool(invalid),
+        "status": "complete",
         "notes": notes
     }
 
@@ -1413,6 +1484,73 @@ else:
             }
 
     # ----------------------------------------------------------------------
+# Display ABO result (computed) + discrepancy expander if needed
+# (Shown immediately after ABO entry to keep it close to the event)
+# ----------------------------------------------------------------------
+# NOTE: Screen reactivity widgets appear later; we read session_state safely here.
+screen_any_positive = any(
+    _safe_str(st.session_state.get(k, "0")) not in ("0", "Not Done", "")
+    for k in ["rx_sI", "rx_sII", "rx_sIII"]
+)
+
+purpose_val = "Transfusion"
+if is_neonate:
+    purpose_val = "RhIG" if _safe_str(st.session_state.get("abo_purpose", "Transfusion")) == "RhIG" else "Transfusion"
+
+abo_interp = interpret_abo_rhd(
+    is_neonate=is_neonate,
+    purpose=("RhIG" if purpose_val == "RhIG" else "Transfusion"),
+    raw=abo_raw,
+    screen_any_positive=screen_any_positive
+)
+
+if abo_interp.get("status") == "empty":
+    st.markdown("""
+    <div class='clinical-info'>
+    🧾 <b>ABO/RhD</b>: Enter grades above to compute the final interpretation.
+    </div>
+    """, unsafe_allow_html=True)
+
+elif abo_interp.get("status") == "incomplete":
+    st.markdown(f"""
+    <div class='clinical-alert'>
+    ⚠️ <b>ABO/RhD entry is incomplete</b><br>
+    {abo_interp.get('abo_final','')} | {abo_interp.get('rhd_final','')}<br>
+    Complete the required fields to enable discrepancy logic and final result.
+    </div>
+    """, unsafe_allow_html=True)
+
+    with st.expander("🧩 ABO Entry Help (Required fields)", expanded=False):
+        if is_neonate:
+            st.write("Neonate mode: Anti-A, Anti-B, Anti-D, and Control are required for interpretation (Anti-AB and DAT are supportive).")
+        else:
+            st.write("Adult/Child mode: Anti-A, Anti-B, Anti-D, Control, A1 cells, and B cells are required per your policy.")
+
+elif abo_interp["discrepancy"]:
+    st.markdown(f"""
+    <div class='clinical-danger'>
+    ⚠️ <b>ABO DISCREPANCY / SPECIAL SITUATION</b><br>
+    Current computed result: <b>ABO: {abo_interp['abo_final']}</b> | <b>RhD: {abo_interp['rhd_final']}</b><br>
+    Open the discrepancy guidance below.
+    </div>
+    """, unsafe_allow_html=True)
+
+    with st.expander("🧩 ABO Discrepancy — Guidance (How to report the result?)", expanded=True):
+        st.markdown(
+            "<div class='clinical-alert'><b>How to report the result?</b><ul style='margin-top:6px;'>" +
+            "".join([f"<li>{_safe_str(n)}</li>" for n in abo_interp.get("notes", [])]) +
+            "</ul></div>",
+            unsafe_allow_html=True
+        )
+
+else:
+    st.markdown(f"""
+    <div class='clinical-info'>
+    ✅ <b>ABO/RhD result is consistent</b>: <b>ABO: {abo_interp['abo_final']}</b> | <b>RhD: {abo_interp['rhd_final']}</b>
+    </div>
+    """, unsafe_allow_html=True)
+
+# ----------------------------------------------------------------------
     # Phenotype section (collapsed)
     # ----------------------------------------------------------------------
     with st.expander("🧬 Patient Phenotype (optional)", expanded=False):
@@ -1539,44 +1677,6 @@ else:
                 "recent_tx": recent_tx,
             }
             st.session_state.analysis_ready = True
-
-    # ----------------------------------------------------------------------
-    # Display ABO result (computed) + discrepancy expander if needed
-    # ----------------------------------------------------------------------
-    screen_any_positive = any(_safe_str(st.session_state.get(k,"0")) not in ("0","Not Done","") for k in ["rx_sI","rx_sII","rx_sIII"])
-    purpose_val = "Transfusion"
-    if is_neonate:
-        purpose_val = "RhIG" if _safe_str(st.session_state.get("abo_purpose","Transfusion")) == "RhIG" else "Transfusion"
-
-    abo_interp = interpret_abo_rhd(
-        is_neonate=is_neonate,
-        purpose=("RhIG" if purpose_val=="RhIG" else "Transfusion"),
-        raw=abo_raw,
-        screen_any_positive=screen_any_positive
-    )
-
-    if abo_interp["discrepancy"]:
-        st.markdown(f"""
-        <div class='clinical-danger'>
-        ⚠️ <b>ABO DISCREPANCY / SPECIAL SITUATION</b><br>
-        Current computed result: <b>ABO: {abo_interp['abo_final']}</b> | <b>RhD: {abo_interp['rhd_final']}</b><br>
-        Open the discrepancy guidance below.
-        </div>
-        """, unsafe_allow_html=True)
-
-        with st.expander("🧩 ABO Discrepancy — Guidance (How to report the result?)", expanded=True):
-            st.markdown(
-                "<div class='clinical-alert'><b>How to report the result?</b><ul style='margin-top:6px;'>" +
-                "".join([f"<li>{_safe_str(n)}</li>" for n in abo_interp["notes"]]) +
-                "</ul></div>",
-                unsafe_allow_html=True
-            )
-    else:
-        st.markdown(f"""
-        <div class='clinical-info'>
-        ✅ <b>ABO/RhD result is consistent</b>: <b>ABO: {abo_interp['abo_final']}</b> | <b>RhD: {abo_interp['rhd_final']}</b>
-        </div>
-        """, unsafe_allow_html=True)
 
     # ----------------------------------------------------------------------
     # Antibody analysis output + Save (single Save button)
