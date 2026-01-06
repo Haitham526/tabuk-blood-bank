@@ -1,0 +1,109 @@
+{
+  "patient": {
+    "name": "BBB",
+    "mrn": "111"
+  },
+  "demographics": {
+    "sex": "F",
+    "age_y": 30,
+    "age_m": 0,
+    "age_d": 0
+  },
+  "tech": "51599657",
+  "run_dt": "2026-01-06",
+  "saved_at": "2026-01-06 11:10:23",
+  "lots": {
+    "panel": "45161.35.x   Exp:19-01-2026",
+    "screen": "45184.49.x   Exp:19-01-2026"
+  },
+  "abo": {
+    "raw": {
+      "mode": "adult",
+      "antiA": "0",
+      "antiB": "0",
+      "antiD": "0",
+      "ctl": "0",
+      "a1cells": "+4",
+      "bcells": "+4"
+    },
+    "abo_final": "O",
+    "rhd_final": "RhD Negative",
+    "discrepancy": false,
+    "invalid": false,
+    "notes": []
+  },
+  "phenotype": {
+    "results": {
+      "C": "Not Detected",
+      "c": "Detected",
+      "E": "Not Detected",
+      "e": "Detected",
+      "K": "Not Detected",
+      "Rh_ctl": "Not Detected",
+      "P1": "Not Done",
+      "Lea": "Not Done",
+      "Leb": "Not Done",
+      "Lua": "Not Done",
+      "Lub": "Not Done",
+      "EX_ctl1": "Not Done",
+      "k": "Not Done",
+      "Kpa": "Not Done",
+      "Kpb": "Not Done",
+      "Jka": "Not Done",
+      "Jkb": "Not Done",
+      "EX_ctl2": "Not Done",
+      "M": "Not Done",
+      "N": "Not Done",
+      "S": "Not Done",
+      "s": "Not Done",
+      "Fya": "Not Done",
+      "Fyb": "Not Done"
+    }
+  },
+  "inputs": {
+    "panel_reactions": {
+      "1": "+2",
+      "2": "+2",
+      "3": "+2",
+      "4": "0",
+      "5": "0",
+      "6": "0",
+      "7": "0",
+      "8": "+2",
+      "9": "0",
+      "10": "0",
+      "11": "0"
+    },
+    "screen_reactions": {
+      "I": "+2",
+      "II": "+3",
+      "III": "0"
+    },
+    "AC": "Negative",
+    "recent_tx": false
+  },
+  "all_rx": false,
+  "dat": {
+    "igg": "",
+    "c3d": "",
+    "control": ""
+  },
+  "selected_cells": [],
+  "interpretation": {
+    "best_combo": [
+      "D"
+    ],
+    "resolved": [
+      "D"
+    ],
+    "needs_work": [],
+    "confirmed": [
+      "D"
+    ],
+    "supported_bg": [],
+    "not_excluded_sig": [],
+    "not_excluded_cold": [],
+    "no_discriminating": []
+  },
+  "conclusion_short": "Confirmed: Anti-D"
+}
