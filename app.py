@@ -635,6 +635,21 @@ def discriminating_cells_for(target: str, active_not_excluded: set, cells: list)
         disc.append(c)
     return disc
 
+
+def ruleout_evidence_cells(ag: str, cells: list):
+    """Return labels of NONreactive antigen-positive cells used to rule out an antibody."""
+    ev = []
+    for c in cells:
+        if not is_nonreactive(c.get('rx', 0)):
+            continue
+        if not ph_has(c, ag):
+            continue
+        # For dosage-sensitive antigens, prefer homozygous expression for rule-out evidence
+        if ag in DOSAGE and not is_homozygous(c, ag):
+            continue
+        ev.append(cell_label(c))
+    return ev
+
 def background_auto_resolution(background_list: list, active_not_excluded: set, cells: list):
     auto_ruled_out = {}
     supported = {}
@@ -1854,7 +1869,7 @@ else:
                     if auto_ruled:
                         st.markdown("**Ruled out (auto) based on nonreactive antigen-positive cells:**")
                         for ag in auto_ruled:
-                            dc = discriminating_cells_for(ag, cells)
+                            dc = ruleout_evidence_cells(ag, cells)
                             if dc:
                                 st.write(f"• Anti-{ag} ruled out by: " + ", ".join(dc))
                             else:
