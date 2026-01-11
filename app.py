@@ -1110,30 +1110,33 @@ def build_how_to_report(
     # RhD inconclusive / weak D suspected
     rhd_final = _safe_str(abo_interp.get("rhd_final",""))
     if rhd_final.startswith("RhD Inconclusive"):
-        lines.append(
-            "RhD typing is inconclusive / Weak D suspected. A partial/weak D phenotype cannot be excluded. "
-            "RHD molecular testing is required for definitive confirmation and is not available at our facility. "
-            "Until resolved, manage the patient as RhD negative for transfusion purposes (issue RhD-negative RBC units when clinically indicated). "
-            "For Rh immune globulin (RhIG) eligibility, manage as RhD negative per policy until confirmatory testing is available."
-        )
+        lines.append("RhD typing is INCONCLUSIVE / weak D suspected.")
+        lines.append("Interpretation note: a partial D phenotype cannot be excluded. Definitive classification requires RHD genotyping, which is not available at our facility.")
+        lines.append("Transfusion safety: manage as RhD NEGATIVE (issue D− RBCs) until confirmed.")
+        lines.append("RhIG note: when RhIG eligibility is clinically relevant (pregnancy, postpartum, newborn), manage as RhD NEGATIVE per local policy unless confirmatory testing is available.")
+        lines.append("")
 
     # Weak forward antigens (any age): provide a reporting comment. In neonates, include an
     # administrative "most probable" statement with strict transfusion safety guidance.
     antiA_wf = _safe_str(raw.get("antiA","Not Done"))
     antiB_wf = _safe_str(raw.get("antiB","Not Done"))
-    weak_forward = (antiA_wf in ("+1","+2")) or (antiB_wf in ("+1","+2"))
+    antiAB_wf = _safe_str(raw.get("antiAB","Not Done"))
+    weak_forward = (antiA_wf in ("+1","+2")) or (antiB_wf in ("+1","+2")) or (antiAB_wf in ("+1","+2"))
 
     if weak_forward:
         abo_guess = _safe_str(abo_interp.get("abo_final",""))
-        abo_guess_clean = abo_guess.replace("(Discrepancy)","").strip() or "Unknown"
+        # Normalize strings like: "Most probable: A", "ABO: A", "A (Discrepancy)"
+        abo_guess_clean = re.sub(r"\(.*?\)", "", abo_guess).strip()
+        abo_guess_clean = re.sub(r"^(ABO\s*:\s*)", "", abo_guess_clean, flags=re.IGNORECASE).strip()
+        abo_guess_clean = re.sub(r"^(Most\s+probable\s*:\s*)", "", abo_guess_clean, flags=re.IGNORECASE).strip()
+        abo_guess_clean = abo_guess_clean or "Unknown"
 
         if is_neonate:
-            lines.append(
-                f"Neonatal ABO grouping: the current pattern suggests the patient is most likely {abo_guess_clean}; "
-                "however the result is not definitive due to weak antigen expression / discrepancy. "
-                "This interpretation is for administrative purposes only and must be reconfirmed at ≥6 months of age (or per local policy). "
-                "Transfusion guidance until confirmed: issue Group O RBCs and Group AB plasma/platelets."
-            )
+            lines.append("Forward grouping shows a WEAK reaction in a neonate (≤3–4 months) / cord sample pattern.")
+            lines.append(f"ABO group: MOST PROBABLE {abo_guess_clean} based on current testing (administrative only).")
+            lines.append("Action: repeat testing / recollect if indicated and CONFIRM ABO at ≥6 months of age (or per local policy).")
+            lines.append("Transfusion until confirmed: issue Group O RBCs and AB plasma/platelets (or per local policy).")
+            lines.append("")
         else:
             lines.append(
                 f"ABO grouping is inconclusive due to weak forward antigen reactions. Forward typing suggests {abo_guess_clean}, "
@@ -1146,7 +1149,7 @@ def build_how_to_report(
     antiB = _safe_str(raw.get("antiB","Not Done"))
     rev_a1 = _safe_str(raw.get("a1cells","Not Done"))
     rev_b  = _safe_str(raw.get("bcells","Not Done"))
-    mixed_field_present = "Mixed-field" in (antiA, antiB, rev_a1, rev_b)
+    mixed_field_present = "Mixed-field" in (antiA, antiB, _safe_str(raw.get("antiAB","")), rev_a1, rev_b, _safe_str(raw.get("ctl","")))
 
     if mixed_field_present:
         if recent_tx:
@@ -1868,12 +1871,22 @@ else:
                 else:
                     st.info("No specific rule was triggered by the current pattern. Continue with clerical/technical checks and clinical history.")
                 # Mixed-field history prompts (used for smarter reporting)
-                mf_present = "Mixed-field" in (
-                    _safe_str(st.session_state.get("abo_antiA","")),
-                    _safe_str(st.session_state.get("abo_antiB","")),
-                    _safe_str(st.session_state.get("abo_a1cells","")),
-                    _safe_str(st.session_state.get("abo_bcells",""))
-                )
+                mf_present = False
+                if abo_is_neonate:
+                    mf_present = "Mixed-field" in (
+                        _safe_str(st.session_state.get("abo_neonate_antiA","")),
+                        _safe_str(st.session_state.get("abo_neonate_antiB","")),
+                        _safe_str(st.session_state.get("abo_neonate_antiAB","")),
+                        _safe_str(st.session_state.get("abo_neonate_ctl","")),
+                    )
+                else:
+                    mf_present = "Mixed-field" in (
+                        _safe_str(st.session_state.get("abo_adult_antiA","")),
+                        _safe_str(st.session_state.get("abo_adult_antiB","")),
+                        _safe_str(st.session_state.get("abo_adult_a1","")),
+                        _safe_str(st.session_state.get("abo_adult_b","")),
+                        _safe_str(st.session_state.get("abo_adult_ctl","")),
+                    )
                 colh1, colh2 = st.columns(2)
                 with colh1:
                     st.checkbox("History: recent transfusion?", key="abo_recent_tx", value=bool(st.session_state.get("abo_recent_tx", False)), disabled=not mf_present)
@@ -1882,13 +1895,15 @@ else:
 
                 # How to report (copy/paste into HIS/EMR)
                 report_text = build_how_to_report(
-                    is_neonate=is_neonate,
+                    is_neonate=abo_is_neonate,
                     abo_interp=abo_interp,
                     raw={
-                        "antiA": st.session_state.get("abo_antiA","Not Done"),
-                        "antiB": st.session_state.get("abo_antiB","Not Done"),
-                        "a1cells": st.session_state.get("abo_a1cells","Not Done"),
-                        "bcells": st.session_state.get("abo_bcells","Not Done"),
+                        "antiA": st.session_state.get("abo_neonate_antiA" if abo_is_neonate else "abo_adult_antiA", "Not Done"),
+                        "antiB": st.session_state.get("abo_neonate_antiB" if abo_is_neonate else "abo_adult_antiB", "Not Done"),
+                        "antiAB": (st.session_state.get("abo_neonate_antiAB", "Not Done") if abo_is_neonate else "Not Done"),
+                        "a1cells": (st.session_state.get("abo_adult_a1", "Not Done") if not abo_is_neonate else "Not Done"),
+                        "bcells": (st.session_state.get("abo_adult_b", "Not Done") if not abo_is_neonate else "Not Done"),
+                        "ctl": st.session_state.get("abo_neonate_ctl" if abo_is_neonate else "abo_adult_ctl", "Not Done"),
                     },
                     screen_any_positive=bool(st.session_state.get("abo_screen_any_positive", False)),
                     mixed_field_history={"recent_tx": bool(st.session_state.get("abo_recent_tx", False)), "hsct_bm": bool(st.session_state.get("abo_hsct_bm", False))}
