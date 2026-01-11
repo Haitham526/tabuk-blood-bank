@@ -761,7 +761,7 @@ def interpret_abo_rhd(
         abo_guess = _abo_from_forward_only(antiA, antiB)
 
         # Flag weak/mixed-field forward as discrepancy but still provide most probable ABO
-        if antiA in ("+1","+2","Mixed-field") or antiB in ("+1","+2","Mixed-field"):
+        if antiA in ("+1","+2") or antiB in ("+1","+2"):
             discrepancy = True
             notes.append("Weak/mixed-field A/B reactions can occur in neonates; report as 'most probable' and plan confirmation at 6 months (or per local policy).")
         if antiA == "Not Done" or antiB == "Not Done":
@@ -793,7 +793,7 @@ def interpret_abo_rhd(
 
         # Discrepancy thresholds
         # Forward expected >=3+ (policy). If positive but <3+, flag.
-        if antiA in ("+1","+2","Mixed-field") or antiB in ("+1","+2","Mixed-field"):
+        if antiA in ("+1","+2") or antiB in ("+1","+2"):
             discrepancy = True
             notes.append("Forward grouping shows weak/mixed-field reactions (<3+). Initiate ABO discrepancy workup per policy.")
         # Reverse expected >=2+ if positive. If 0/+1 where expected pos, flag.
@@ -943,7 +943,7 @@ def build_abo_guidance(
         )
 
     # 1) Forward weak/missing antigens
-    if antiA in ("+1","+2","Mixed-field") or antiB in ("+1","+2","Mixed-field"):
+    if antiA in ("+1","+2") or antiB in ("+1","+2"):
         bullets = [
             "Incubate at room temperature (RT) for 15–30 minutes, then repeat forward grouping.",
             "If still weak, consider enzyme-treated cells (if available) per SOP.",
@@ -954,7 +954,7 @@ def build_abo_guidance(
                 "How to report (administrative only): Patient blood group is MOST PROBABLE based on current testing; there is a discrepancy due to weak antigen expression and it must be reconfirmed at 6 months of age (or per local policy).",
                 "Transfusion safety until confirmed: transfuse Group O RBCs and AB plasma/platelets."
             ]
-        add("Weak/Missing Antigens (Forward grouping is weak or mixed-field)", bullets)
+        add("Weak/Missing Antigens (Forward grouping is weak)", bullets)
 
     # 2) Mixed-field emphasis (history-driven)
     if "Mixed-field" in (antiA, antiB, rev_a1, rev_b):
