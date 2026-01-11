@@ -955,11 +955,6 @@ def build_abo_guidance(
             "If still weak, consider enzyme-treated cells (if available) per SOP.",
             "If needed, perform adsorption/elution or refer to a reference lab per SOP."
         ]
-        if is_neonate:
-            bullets += [
-                "How to report (administrative only): Patient blood group is MOST PROBABLE based on current testing; there is a discrepancy due to weak antigen expression and it must be reconfirmed at 6 months of age (or per local policy).",
-                "Transfusion safety until confirmed: transfuse Group O RBCs and AB plasma/platelets."
-            ]
         add("Weak/Missing Antigens (Forward grouping is weak)", bullets)
 
     # 2) Mixed-field emphasis (history-driven)
@@ -1126,7 +1121,7 @@ def build_how_to_report(
     if is_neonate:
         antiA = _safe_str(raw.get("antiA","Not Done"))
         antiB = _safe_str(raw.get("antiB","Not Done"))
-        if antiA in ("+1","+2","Mixed-field") or antiB in ("+1","+2","Mixed-field"):
+        if antiA in ("+1","+2") or antiB in ("+1","+2"):
             abo_guess = _safe_str(abo_interp.get("abo_final",""))
             # Ensure we don't echo "(Discrepancy)" in admin line
             abo_guess_clean = abo_guess.replace("(Discrepancy)","").strip()
@@ -1134,7 +1129,7 @@ def build_how_to_report(
                 abo_guess_clean = "Unknown"
             lines.append(
                 f"Neonatal ABO grouping: the current pattern suggests the patient is most likely {abo_guess_clean}; "
-                "however the result is not definitive due to weak/mixed-field antigen expression. "
+                "however the result is not definitive due to weak antigen expression. "
                 "This interpretation is for administrative purposes only and must be reconfirmed at ≥6 months of age (or per local policy). "
                 "Transfusion guidance until confirmed: issue Group O RBCs and Group AB plasma/platelets."
             )
