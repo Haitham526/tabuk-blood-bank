@@ -299,6 +299,35 @@ def load_case_payload(mrn: str, case_id: str) -> Optional[dict]:
 # =============================================================================
 st.set_page_config(page_title="MCH Tabuk - Serology Expert", layout="wide", page_icon="🩸")
 
+# ------------------------------
+# UI Theme (expander headers)
+# ------------------------------
+if "ui_theme" not in st.session_state:
+    # Default theme (recommended)
+    st.session_state.ui_theme = "Burgundy / White"
+
+def _get_theme_vars(name: str) -> dict:
+    name = (name or "").strip().lower()
+    if name.startswith("navy"):
+        return {
+            "sec_bg": "#0B1B3A",
+            "sec_bg_hover": "#112A57",
+            "sec_fg": "#B9F5FF",
+            "sec_border": "rgba(11, 27, 58, 0.35)",
+            "sec_shadow": "0 6px 16px rgba(11, 27, 58, 0.10)",
+        }
+    # Burgundy / Wine
+    return {
+        "sec_bg": "#5A0F1A",
+        "sec_bg_hover": "#721425",
+        "sec_fg": "#FFFFFF",
+        "sec_border": "rgba(90, 15, 26, 0.30)",
+        "sec_shadow": "0 6px 16px rgba(90, 15, 26, 0.10)",
+    }
+
+THEME_VARS = _get_theme_vars(st.session_state.ui_theme)
+
+
 st.markdown("""
 <style>
     .hospital-logo { color: #8B0000; text-align: center; border-bottom: 5px solid #8B0000; padding-bottom: 5px; font-family: 'Arial'; }
@@ -355,6 +384,52 @@ st.markdown("""
     div[data-testid="stDataEditor"] table { width: 100% !important; }
 </style>
 """, unsafe_allow_html=True)
+
+st.markdown(
+    f"""
+    <style>
+    :root {{
+        --sec-bg: {THEME_VARS["sec_bg"]};
+        --sec-bg-hover: {THEME_VARS["sec_bg_hover"]};
+        --sec-fg: {THEME_VARS["sec_fg"]};
+        --sec-border: {THEME_VARS["sec_border"]};
+        --sec-shadow: {THEME_VARS["sec_shadow"]};
+    }}
+
+    /* Elegant expander headers */
+    div[data-testid="stExpander"] details {{
+        border: 1px solid var(--sec-border) !important;
+        border-radius: 16px !important;
+        overflow: hidden !important;
+        box-shadow: var(--sec-shadow) !important;
+        background: #FFFFFF !important;
+    }}
+    div[data-testid="stExpander"] details > summary {{
+        background: var(--sec-bg) !important;
+        padding: 12px 16px !important;
+    }}
+    div[data-testid="stExpander"] details > summary:hover {{
+        background: var(--sec-bg-hover) !important;
+    }}
+    div[data-testid="stExpander"] details > summary p {{
+        color: var(--sec-fg) !important;
+        font-weight: 800 !important;
+        letter-spacing: 0.2px;
+    }}
+    div[data-testid="stExpander"] details > summary svg {{
+        color: var(--sec-fg) !important;
+        fill: var(--sec-fg) !important;
+    }}
+
+    /* Slightly tighter spacing inside expanders */
+    div[data-testid="stExpander"] .stMarkdown, div[data-testid="stExpander"] .stText {{
+        margin-top: 0.25rem;
+    }}
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 
 st.markdown("""
 <div class='dr-signature no-print'>
@@ -1492,6 +1567,10 @@ with st.sidebar:
     # Use your custom icon file if you want later; for now keep a stable URL
     st.image("https://cdn-icons-png.flaticon.com/512/2966/2966327.png", width=60)
     nav = st.radio("Menu", ["Workstation", "Supervisor"], key="nav_menu")
+    st.markdown("---")
+    st.radio("Theme", ["Burgundy / White", "Navy / Cyan"], key="ui_theme")
+    THEME_VARS = _get_theme_vars(st.session_state.ui_theme)  # refresh after selection
+
     if st.button("RESET DATA", key="btn_reset"):
         st.session_state.ext = []
         for k in RESET_KEYS:
@@ -1985,402 +2064,403 @@ else:
     # ----------------------------------------------------------------------
     # MAIN FORM: Antibody Identification
     # ----------------------------------------------------------------------
-    with st.form("main_form", clear_on_submit=False):
-        st.write("### Antibody Identification — Reaction Entry")
-        L, R = st.columns([1, 2.5])
-
-        with L:
-            st.write("Controls")
-            ac_res = st.radio("Auto Control (AC)", ["Negative", "Positive"], key="rx_ac")
-
-            recent_tx = st.checkbox("Recent transfusion (≤ 4 weeks)?", value=False, key="recent_tx")
-
-            if recent_tx:
-                st.markdown("""
-                <div class='clinical-danger'>
-                🩸 <b>RECENT TRANSFUSION FLAGGED</b><br>
-                ⚠️ Consider <b>DHTR</b> / anamnestic alloantibody response if compatible with clinical picture.<br>
-                <ul>
-                  <li>Review Hb trend, hemolysis markers (bilirubin/LDH/haptoglobin), DAT as indicated.</li>
-                  <li>Compare pre- vs post-transfusion samples if available.</li>
-                  <li>Escalate early if new alloantibody suspected.</li>
-                </ul>
-                </div>
-                """, unsafe_allow_html=True)
-
-            st.write("Screening")
-            s_I   = st.selectbox("Scn I", GRADES, key="rx_sI")
-            s_II  = st.selectbox("Scn II", GRADES, key="rx_sII")
-            s_III = st.selectbox("Scn III", GRADES, key="rx_sIII")
-
-        with R:
-            st.write("Panel Reactions")
-            g1, g2 = st.columns(2)
-            with g1:
-                p1 = st.selectbox("1", GRADES, key="rx_p1")
-                p2 = st.selectbox("2", GRADES, key="rx_p2")
-                p3 = st.selectbox("3", GRADES, key="rx_p3")
-                p4 = st.selectbox("4", GRADES, key="rx_p4")
-                p5 = st.selectbox("5", GRADES, key="rx_p5")
-                p6 = st.selectbox("6", GRADES, key="rx_p6")
-            with g2:
-                p7  = st.selectbox("7", GRADES, key="rx_p7")
-                p8  = st.selectbox("8", GRADES, key="rx_p8")
-                p9  = st.selectbox("9", GRADES, key="rx_p9")
-                p10 = st.selectbox("10", GRADES, key="rx_p10")
-                p11 = st.selectbox("11", GRADES, key="rx_p11")
-
-        run_btn = st.form_submit_button("🚀 Run Analysis", use_container_width=True)
-
-    # ----------------------------------------------------------------------
-    # Run Analysis
-    # ----------------------------------------------------------------------
-    if run_btn:
-        if not st.session_state.lot_p or not st.session_state.lot_s:
-            st.error("⛔ Lots not configured by Supervisor.")
-            st.session_state.analysis_ready = False
-            st.session_state.analysis_payload = None
-        else:
-            in_p = {1:p1,2:p2,3:p3,4:p4,5:p5,6:p6,7:p7,8:p8,9:p9,10:p10,11:p11}
-            in_s = {"I": s_I, "II": s_II, "III": s_III}
-
-            st.session_state.analysis_payload = {
-                "in_p": in_p,
-                "in_s": in_s,
-                "ac_res": ac_res,
-                "recent_tx": recent_tx,
-            }
-            st.session_state.analysis_ready = True
-
+    with st.expander("🧪 Antibody Identification", expanded=False):
+        with st.form("main_form", clear_on_submit=False):
+            st.write("### Antibody Identification — Reaction Entry")
+            L, R = st.columns([1, 2.5])
     
+            with L:
+                st.write("Controls")
+                ac_res = st.radio("Auto Control (AC)", ["Negative", "Positive"], key="rx_ac")
+    
+                recent_tx = st.checkbox("Recent transfusion (≤ 4 weeks)?", value=False, key="recent_tx")
+    
+                if recent_tx:
+                    st.markdown("""
+                    <div class='clinical-danger'>
+                    🩸 <b>RECENT TRANSFUSION FLAGGED</b><br>
+                    ⚠️ Consider <b>DHTR</b> / anamnestic alloantibody response if compatible with clinical picture.<br>
+                    <ul>
+                      <li>Review Hb trend, hemolysis markers (bilirubin/LDH/haptoglobin), DAT as indicated.</li>
+                      <li>Compare pre- vs post-transfusion samples if available.</li>
+                      <li>Escalate early if new alloantibody suspected.</li>
+                    </ul>
+                    </div>
+                    """, unsafe_allow_html=True)
+    
+                st.write("Screening")
+                s_I   = st.selectbox("Scn I", GRADES, key="rx_sI")
+                s_II  = st.selectbox("Scn II", GRADES, key="rx_sII")
+                s_III = st.selectbox("Scn III", GRADES, key="rx_sIII")
+    
+            with R:
+                st.write("Panel Reactions")
+                g1, g2 = st.columns(2)
+                with g1:
+                    p1 = st.selectbox("1", GRADES, key="rx_p1")
+                    p2 = st.selectbox("2", GRADES, key="rx_p2")
+                    p3 = st.selectbox("3", GRADES, key="rx_p3")
+                    p4 = st.selectbox("4", GRADES, key="rx_p4")
+                    p5 = st.selectbox("5", GRADES, key="rx_p5")
+                    p6 = st.selectbox("6", GRADES, key="rx_p6")
+                with g2:
+                    p7  = st.selectbox("7", GRADES, key="rx_p7")
+                    p8  = st.selectbox("8", GRADES, key="rx_p8")
+                    p9  = st.selectbox("9", GRADES, key="rx_p9")
+                    p10 = st.selectbox("10", GRADES, key="rx_p10")
+                    p11 = st.selectbox("11", GRADES, key="rx_p11")
+    
+            run_btn = st.form_submit_button("🚀 Run Analysis", use_container_width=True)
+    
+        # ----------------------------------------------------------------------
+        # Run Analysis
+        # ----------------------------------------------------------------------
+        if run_btn:
+            if not st.session_state.lot_p or not st.session_state.lot_s:
+                st.error("⛔ Lots not configured by Supervisor.")
+                st.session_state.analysis_ready = False
+                st.session_state.analysis_payload = None
+            else:
+                in_p = {1:p1,2:p2,3:p3,4:p4,5:p5,6:p6,7:p7,8:p8,9:p9,10:p10,11:p11}
+                in_s = {"I": s_I, "II": s_II, "III": s_III}
+    
+                st.session_state.analysis_payload = {
+                    "in_p": in_p,
+                    "in_s": in_s,
+                    "ac_res": ac_res,
+                    "recent_tx": recent_tx,
+                }
+                st.session_state.analysis_ready = True
+    
+        
+        # ----------------------------------------------------------------------
+        # ABO interpretation is shown inside the ABO expander after confirmation.
+        # (No auto-interpretation here to avoid premature discrepancy flags.)
+        # ----------------------------------------------------------------------
     # ----------------------------------------------------------------------
-    # ABO interpretation is shown inside the ABO expander after confirmation.
-    # (No auto-interpretation here to avoid premature discrepancy flags.)
-    # ----------------------------------------------------------------------
-# ----------------------------------------------------------------------
-    # Antibody analysis output + Save (single Save button)
-    # ----------------------------------------------------------------------
-    conclusion_short = ""
-    details = {}
-    all_rx = False
-    dat_igg = ""
-    dat_c3d = ""
-    dat_ctl = ""
-
-    if st.session_state.analysis_ready and st.session_state.analysis_payload:
-        in_p = st.session_state.analysis_payload["in_p"]
-        in_s = st.session_state.analysis_payload["in_s"]
-        ac_res = st.session_state.analysis_payload["ac_res"]
-        recent_tx = st.session_state.analysis_payload["recent_tx"]
-
-        ac_negative = (ac_res == "Negative")
-        all_rx = all_reactive_pattern(in_p, in_s)
-
-        # PAN-REACTIVE LOGIC
-        if all_rx and ac_negative:
-            tx_note = ""
-            if recent_tx:
-                tx_note = """
-                <li style="color:#7a0000;"><b>Recent transfusion ≤ 4 weeks</b>: strongly consider <b>DHTR</b> / anamnestic alloantibody response if clinically compatible; compare pre/post samples and review hemolysis markers.</li>
-                """
-
-            st.markdown(f"""
-            <div class='clinical-danger'>
-            ⚠️ <b>Pan-reactive pattern with NEGATIVE autocontrol</b><br>
-            <b>Most consistent with:</b>
-            <ul>
-              <li><b>Alloantibody to a High-Incidence (High-Frequency) Antigen</b></li>
-              <li><b>OR multiple alloantibodies</b> not separable with the current cells</li>
-            </ul>
-            <b>Action / Workflow (priority):</b>
-            <ol>
-              <li><b>STOP</b> routine single-specificity interpretation (rule-out/rule-in is not valid here).</li>
-              <li>Immediate referral to <b>Blood Bank Physician / Reference Lab</b>.</li>
-              <li>Request <b>patient extended phenotype / genotype</b> (pre-transfusion if available).</li>
-              <li>Start <b>rare compatible unit search</b> (regional/national resources).</li>
-              <li><b>First-degree relatives donors</b>: consider typing/testing as potential compatible donors when clinically appropriate.</li>
-              <li>Use <b>additional panels / different lots</b> + <b>selected cells</b> to separate multiple alloantibodies if suspected.</li>
-              {tx_note}
-            </ol>
-            </div>
-            """, unsafe_allow_html=True)
-
-            st.markdown("""
-            <div class='clinical-info'>
-            🔎 <b>Note:</b> Routine specificity engine is intentionally paused for this pattern.
-            </div>
-            """, unsafe_allow_html=True)
-
-            conclusion_short = "Pan-reactive + AC Negative (High-incidence / multiple allo suspected)"
-            details = {"pattern": "pan_reactive_ac_negative"}
-
-        elif all_rx and (not ac_negative):
-            st.markdown("""
-            <div class='clinical-danger'>
-            ⚠️ <b>Pan-reactive pattern with POSITIVE autocontrol</b><br>
-            Requires <b>Monospecific DAT</b> pathway (IgG / C3d / Control) before any alloantibody claims.
-            </div>
-            """, unsafe_allow_html=True)
-
-            st.subheader("Monospecific DAT Entry (Required)")
-            c1, c2, c3 = st.columns(3)
-            dat_igg = c1.selectbox("DAT IgG", YN3, key="dat_igg")
-            dat_c3d = c2.selectbox("DAT C3d", YN3, key="dat_c3d")
-            dat_ctl = c3.selectbox("DAT Control", YN3, key="dat_ctl")
-
-            if dat_ctl == "Positive":
+        # Antibody analysis output + Save (single Save button)
+        # ----------------------------------------------------------------------
+        conclusion_short = ""
+        details = {}
+        all_rx = False
+        dat_igg = ""
+        dat_c3d = ""
+        dat_ctl = ""
+    
+        if st.session_state.analysis_ready and st.session_state.analysis_payload:
+            in_p = st.session_state.analysis_payload["in_p"]
+            in_s = st.session_state.analysis_payload["in_s"]
+            ac_res = st.session_state.analysis_payload["ac_res"]
+            recent_tx = st.session_state.analysis_payload["recent_tx"]
+    
+            ac_negative = (ac_res == "Negative")
+            all_rx = all_reactive_pattern(in_p, in_s)
+    
+            # PAN-REACTIVE LOGIC
+            if all_rx and ac_negative:
+                tx_note = ""
+                if recent_tx:
+                    tx_note = """
+                    <li style="color:#7a0000;"><b>Recent transfusion ≤ 4 weeks</b>: strongly consider <b>DHTR</b> / anamnestic alloantibody response if clinically compatible; compare pre/post samples and review hemolysis markers.</li>
+                    """
+    
+                st.markdown(f"""
+                <div class='clinical-danger'>
+                ⚠️ <b>Pan-reactive pattern with NEGATIVE autocontrol</b><br>
+                <b>Most consistent with:</b>
+                <ul>
+                  <li><b>Alloantibody to a High-Incidence (High-Frequency) Antigen</b></li>
+                  <li><b>OR multiple alloantibodies</b> not separable with the current cells</li>
+                </ul>
+                <b>Action / Workflow (priority):</b>
+                <ol>
+                  <li><b>STOP</b> routine single-specificity interpretation (rule-out/rule-in is not valid here).</li>
+                  <li>Immediate referral to <b>Blood Bank Physician / Reference Lab</b>.</li>
+                  <li>Request <b>patient extended phenotype / genotype</b> (pre-transfusion if available).</li>
+                  <li>Start <b>rare compatible unit search</b> (regional/national resources).</li>
+                  <li><b>First-degree relatives donors</b>: consider typing/testing as potential compatible donors when clinically appropriate.</li>
+                  <li>Use <b>additional panels / different lots</b> + <b>selected cells</b> to separate multiple alloantibodies if suspected.</li>
+                  {tx_note}
+                </ol>
+                </div>
+                """, unsafe_allow_html=True)
+    
+                st.markdown("""
+                <div class='clinical-info'>
+                🔎 <b>Note:</b> Routine specificity engine is intentionally paused for this pattern.
+                </div>
+                """, unsafe_allow_html=True)
+    
+                conclusion_short = "Pan-reactive + AC Negative (High-incidence / multiple allo suspected)"
+                details = {"pattern": "pan_reactive_ac_negative"}
+    
+            elif all_rx and (not ac_negative):
                 st.markdown("""
                 <div class='clinical-danger'>
-                ⛔ <b>DAT Control is POSITIVE</b> → invalid run / control failure.<br>
-                Repeat DAT before interpretation.
+                ⚠️ <b>Pan-reactive pattern with POSITIVE autocontrol</b><br>
+                Requires <b>Monospecific DAT</b> pathway (IgG / C3d / Control) before any alloantibody claims.
                 </div>
                 """, unsafe_allow_html=True)
-            elif dat_igg == "Not Done" or dat_c3d == "Not Done":
-                st.markdown("""
-                <div class='clinical-alert'>
-                ⚠️ Please perform <b>Monospecific DAT (IgG & C3d)</b> to proceed.
-                </div>
-                """, unsafe_allow_html=True)
-            else:
-                if dat_igg == "Positive":
-                    ads = "Auto-adsorption (ONLY if NOT recently transfused)" if not recent_tx else "Allo-adsorption (recent transfusion → avoid auto-adsorption)"
-                    st.markdown(f"""
-                    <div class='clinical-info'>
-                    ✅ <b>DAT IgG POSITIVE</b> (C3d: {dat_c3d}) → consistent with <b>Warm Autoantibody / WAIHA</b>.<br><br>
-                    <b>Recommended Workflow:</b>
-                    <ol>
-                      <li>Consider <b>eluate</b> when indicated.</li>
-                      <li>Perform <b>adsorption</b>: <b>{ads}</b> to unmask alloantibodies.</li>
-                      <li>Patient <b>phenotype/genotype</b> (pre-transfusion preferred).</li>
-                      <li>Transfuse per policy (antigen-matched / least-incompatible as appropriate).</li>
-                    </ol>
-                    </div>
-                    """, unsafe_allow_html=True)
-
-                elif dat_igg == "Negative" and dat_c3d == "Positive":
+    
+                st.subheader("Monospecific DAT Entry (Required)")
+                c1, c2, c3 = st.columns(3)
+                dat_igg = c1.selectbox("DAT IgG", YN3, key="dat_igg")
+                dat_c3d = c2.selectbox("DAT C3d", YN3, key="dat_c3d")
+                dat_ctl = c3.selectbox("DAT Control", YN3, key="dat_ctl")
+    
+                if dat_ctl == "Positive":
                     st.markdown("""
-                    <div class='clinical-info'>
-                    ✅ <b>DAT IgG NEGATIVE + C3d POSITIVE</b> → complement-mediated process (e.g., cold autoantibody).<br><br>
-                    <b>Recommended Workflow:</b>
-                    <ol>
-                      <li>Evaluate cold interference (pre-warm / thermal amplitude) per SOP.</li>
-                      <li>Repeat as needed at 37°C.</li>
-                      <li>Refer if clinically significant transfusion requirement.</li>
-                    </ol>
+                    <div class='clinical-danger'>
+                    ⛔ <b>DAT Control is POSITIVE</b> → invalid run / control failure.<br>
+                    Repeat DAT before interpretation.
                     </div>
                     """, unsafe_allow_html=True)
-
-                else:
+                elif dat_igg == "Not Done" or dat_c3d == "Not Done":
                     st.markdown("""
                     <div class='clinical-alert'>
-                    ⚠️ <b>AC POSITIVE but DAT IgG & C3d NEGATIVE</b> → consider in-vitro interference/technique issue (rouleaux, cold at RT, reagent effects).<br><br>
-                    <b>Recommended Actions:</b>
-                    <ol>
-                      <li>Repeat with proper technique; saline replacement if rouleaux suspected.</li>
-                      <li>Pre-warm/37°C repeat if cold suspected.</li>
-                      <li>If unresolved → refer.</li>
-                    </ol>
+                    ⚠️ Please perform <b>Monospecific DAT (IgG & C3d)</b> to proceed.
                     </div>
                     """, unsafe_allow_html=True)
-
-            st.markdown("""
-            <div class='clinical-info'>
-            🔎 <b>Note:</b> Routine specificity engine remains paused in pan-reactive cases until DAT pathway is addressed.
-            </div>
-            """, unsafe_allow_html=True)
-
-            conclusion_short = "Pan-reactive + AC Positive (DAT pathway)"
-            details = {"pattern": "pan_reactive_ac_positive"}
-
-        else:
-            cells = get_cells(in_p, in_s, st.session_state.ext)
-            ruled = rule_out(in_p, in_s, st.session_state.ext)
-            candidates = [a for a in AGS if a not in ruled and a not in IGNORED_AGS]
-            best = find_best_combo(candidates, cells, max_size=3)
-
-            st.subheader("Conclusion (Step 1: Rule-out / Rule-in)")
-
-            if not best:
-                st.error("No resolved specificity from current data. Proceed with Selected Cells / Enhancement.")
-                poss_sig = [a for a in candidates if a not in INSIGNIFICANT_AGS][:12]
-                poss_cold = [a for a in candidates if a in INSIGNIFICANT_AGS][:6]
-                if poss_sig or poss_cold:
-                    st.markdown("### ⚠️ Not excluded yet (Needs more work — DO NOT confirm now):")
-                    if poss_sig:
-                        st.write("**Clinically significant possibilities:** " + ", ".join([f"Anti-{x}" for x in poss_sig]))
-                    if poss_cold:
-                        st.info("Cold/Insignificant possibilities: " + ", ".join([f"Anti-{x}" for x in poss_cold]))
-
-                conclusion_short = "No resolved specificity (needs selected cells / more work)"
-                details = {"best_combo": None, "candidates_not_excluded": candidates}
-
+                else:
+                    if dat_igg == "Positive":
+                        ads = "Auto-adsorption (ONLY if NOT recently transfused)" if not recent_tx else "Allo-adsorption (recent transfusion → avoid auto-adsorption)"
+                        st.markdown(f"""
+                        <div class='clinical-info'>
+                        ✅ <b>DAT IgG POSITIVE</b> (C3d: {dat_c3d}) → consistent with <b>Warm Autoantibody / WAIHA</b>.<br><br>
+                        <b>Recommended Workflow:</b>
+                        <ol>
+                          <li>Consider <b>eluate</b> when indicated.</li>
+                          <li>Perform <b>adsorption</b>: <b>{ads}</b> to unmask alloantibodies.</li>
+                          <li>Patient <b>phenotype/genotype</b> (pre-transfusion preferred).</li>
+                          <li>Transfuse per policy (antigen-matched / least-incompatible as appropriate).</li>
+                        </ol>
+                        </div>
+                        """, unsafe_allow_html=True)
+    
+                    elif dat_igg == "Negative" and dat_c3d == "Positive":
+                        st.markdown("""
+                        <div class='clinical-info'>
+                        ✅ <b>DAT IgG NEGATIVE + C3d POSITIVE</b> → complement-mediated process (e.g., cold autoantibody).<br><br>
+                        <b>Recommended Workflow:</b>
+                        <ol>
+                          <li>Evaluate cold interference (pre-warm / thermal amplitude) per SOP.</li>
+                          <li>Repeat as needed at 37°C.</li>
+                          <li>Refer if clinically significant transfusion requirement.</li>
+                        </ol>
+                        </div>
+                        """, unsafe_allow_html=True)
+    
+                    else:
+                        st.markdown("""
+                        <div class='clinical-alert'>
+                        ⚠️ <b>AC POSITIVE but DAT IgG & C3d NEGATIVE</b> → consider in-vitro interference/technique issue (rouleaux, cold at RT, reagent effects).<br><br>
+                        <b>Recommended Actions:</b>
+                        <ol>
+                          <li>Repeat with proper technique; saline replacement if rouleaux suspected.</li>
+                          <li>Pre-warm/37°C repeat if cold suspected.</li>
+                          <li>If unresolved → refer.</li>
+                        </ol>
+                        </div>
+                        """, unsafe_allow_html=True)
+    
+                st.markdown("""
+                <div class='clinical-info'>
+                🔎 <b>Note:</b> Routine specificity engine remains paused in pan-reactive cases until DAT pathway is addressed.
+                </div>
+                """, unsafe_allow_html=True)
+    
+                conclusion_short = "Pan-reactive + AC Positive (DAT pathway)"
+                details = {"pattern": "pan_reactive_ac_positive"}
+    
             else:
-                sep_map = separability_map(best, cells)
-                resolved = [a for a in best if sep_map.get(a, False)]
-                needs_work = [a for a in best if not sep_map.get(a, False)]
-
-                if resolved:
-                    st.success("Resolved (pattern explained & separable): " + ", ".join([f"Anti-{a}" for a in resolved]))
-                if needs_work:
-                    st.warning("Pattern suggests these, but NOT separable yet (DO NOT confirm): " +
-                               ", ".join([f"Anti-{a}" for a in needs_work]))
-
-                remaining_other = [a for a in candidates if a not in best]
-                other_sig = [a for a in remaining_other if a not in INSIGNIFICANT_AGS]
-                other_cold = [a for a in remaining_other if a in INSIGNIFICANT_AGS]
-
-                active_not_excluded = set(resolved + needs_work + other_sig + other_cold)
-
-                auto_ruled_out, supported_bg, inconclusive_bg, no_disc_bg = background_auto_resolution(
-                    background_list=other_sig + other_cold,
-                    active_not_excluded=active_not_excluded,
-                    cells=cells
-                )
-
-                other_sig_final = [a for a in other_sig if a not in auto_ruled_out]
-                other_cold_final = [a for a in other_cold if a not in auto_ruled_out]
-
-                if auto_ruled_out:
-                    st.markdown("### ✅ Auto Rule-out (from available discriminating cells):")
-                    for ag, labs in auto_ruled_out.items():
-                        st.write(f"- **Anti-{ag} ruled out** (discriminating cell(s) NEGATIVE): " + ", ".join(labs))
-
-                if supported_bg:
-                    st.markdown("### ⚠️ Background antibodies suggested by discriminating cells (NOT confirmed yet):")
-                    for ag, labs in supported_bg.items():
-                        st.write(f"- **Anti-{ag} suspected** (discriminating cell(s) POSITIVE): " + ", ".join(labs))
-
-                if inconclusive_bg:
-                    st.markdown("### ⚠️ Inconclusive background (mixed discriminating results):")
-                    for ag, labs in inconclusive_bg.items():
-                        st.write(f"- **Anti-{ag} inconclusive** (mixed results): " + ", ".join(labs))
-
-                if other_sig_final or other_cold_final or no_disc_bg:
-                    st.markdown("### ⚠️ Not excluded yet (background possibilities):")
-                    if other_sig_final:
-                        st.write("**Clinically significant:** " + ", ".join([f"Anti-{x}" for x in other_sig_final]))
-                    if other_cold_final:
-                        st.info("Cold/Insignificant: " + ", ".join([f"Anti-{x}" for x in other_cold_final]))
-                    if no_disc_bg:
-                        st.warning("No discriminating cells available in current panel/screen for: " +
-                                   ", ".join([f"Anti-{x}" for x in no_disc_bg]))
-
-                st.write("---")
-                st.subheader("Confirmation (Rule of Three) — Resolved & Separable only")
-
-                confirmation = {}
-                confirmed = set()
-                needs_more_for_confirmation = set()
-
-                if not resolved:
-                    st.info("No antibody is separable yet → DO NOT apply Rule of Three. Add discriminating selected cells.")
+                cells = get_cells(in_p, in_s, st.session_state.ext)
+                ruled = rule_out(in_p, in_s, st.session_state.ext)
+                candidates = [a for a in AGS if a not in ruled and a not in IGNORED_AGS]
+                best = find_best_combo(candidates, cells, max_size=3)
+    
+                st.subheader("Conclusion (Step 1: Rule-out / Rule-in)")
+    
+                if not best:
+                    st.error("No resolved specificity from current data. Proceed with Selected Cells / Enhancement.")
+                    poss_sig = [a for a in candidates if a not in INSIGNIFICANT_AGS][:12]
+                    poss_cold = [a for a in candidates if a in INSIGNIFICANT_AGS][:6]
+                    if poss_sig or poss_cold:
+                        st.markdown("### ⚠️ Not excluded yet (Needs more work — DO NOT confirm now):")
+                        if poss_sig:
+                            st.write("**Clinically significant possibilities:** " + ", ".join([f"Anti-{x}" for x in poss_sig]))
+                        if poss_cold:
+                            st.info("Cold/Insignificant possibilities: " + ", ".join([f"Anti-{x}" for x in poss_cold]))
+    
+                    conclusion_short = "No resolved specificity (needs selected cells / more work)"
+                    details = {"best_combo": None, "candidates_not_excluded": candidates}
+    
                 else:
-                    for a in resolved:
-                        full, mod, p_cnt, n_cnt = check_rule_three_only_on_discriminating(a, best, cells)
-                        confirmation[a] = (full, mod, p_cnt, n_cnt)
-                        if full or mod:
-                            confirmed.add(a)
-                        else:
-                            needs_more_for_confirmation.add(a)
-
-                    for a in resolved:
-                        full, mod, p_cnt, n_cnt = confirmation[a]
-                        if full:
-                            st.write(f"✅ **Anti-{a} CONFIRMED**: Full Rule (3+3) met on discriminating cells (P:{p_cnt} / N:{n_cnt})")
-                        elif mod:
-                            st.write(f"✅ **Anti-{a} CONFIRMED**: Modified Rule (2+3) met on discriminating cells (P:{p_cnt} / N:{n_cnt})")
-                        else:
-                            st.write(f"⚠️ **Anti-{a} NOT confirmed yet**: need more discriminating cells (P:{p_cnt} / N:{n_cnt})")
-
-                if confirmed:
-                    st.markdown(patient_antigen_negative_reminder(sorted(list(confirmed)), strong=True), unsafe_allow_html=True)
-                elif resolved:
-                    st.markdown(patient_antigen_negative_reminder(sorted(list(resolved)), strong=False), unsafe_allow_html=True)
-
-                d_present = ("D" in confirmed) or ("D" in resolved) or ("D" in needs_work)
-                c_present = ("C" in confirmed) or ("C" in resolved) or ("C" in needs_work) or ("C" in supported_bg) or ("C" in other_sig_final)
-                if d_present and c_present:
-                    strong = ("D" in confirmed and "C" in confirmed)
-                    st.markdown(anti_g_alert_html(strong=strong), unsafe_allow_html=True)
-
-                st.write("---")
-
-                targets_needing_selected = list(dict.fromkeys(
-                    needs_work +
-                    list(needs_more_for_confirmation) +
-                    list(supported_bg.keys()) +
-                    other_sig_final
-                ))
-
-                if targets_needing_selected:
-                    st.markdown("### 🧪 Selected Cells (Only if needed to resolve interference / exclude / confirm)")
-                    for a in targets_needing_selected:
-                        active_set_now = set(resolved + needs_work + other_sig_final + list(supported_bg.keys()))
-
-                        if a in needs_work:
-                            st.warning(f"Anti-{a}: **Interference / not separable** → need {a}+ cells NEGATIVE for other active suspects.")
-                        elif a in other_sig_final:
-                            st.warning(f"Anti-{a}: **Clinically significant background NOT excluded** → need discriminating cells to exclude/confirm.")
-                        elif a in supported_bg:
-                            st.info(f"Anti-{a}: **Suggested by discriminating POSITIVE cell(s)** → requires confirmation (rule-of-three / additional discriminating cells).")
-                        else:
-                            st.info(f"Anti-{a}: **Not confirmed yet** → need more discriminating cells.")
-
-                        sugg = suggest_selected_cells(a, list(active_set_now))
-                        if sugg:
-                            for lab, note in sugg[:12]:
-                                st.write(f"- {lab}  <span class='cell-hint'>{note}</span>", unsafe_allow_html=True)
-                        else:
-                            st.write("- No suitable discriminating cell in current inventory → use another lot / external selected cells.")
-
-                    enz = enzyme_hint_if_needed(targets_needing_selected)
-                    if enz:
-                        st.info("💡 " + enz)
-                else:
-                    st.success("No Selected Cells needed: all resolved antibodies are confirmed AND no clinically significant background remains unexcluded.")
-
-                confirmed_list = sorted(list(confirmed)) if isinstance(confirmed, set) else []
-                resolved_list = resolved if isinstance(resolved, list) else []
-                needs_work_list = needs_work if isinstance(needs_work, list) else []
-                supported_list = sorted(list(supported_bg.keys())) if isinstance(supported_bg, dict) else []
-
-                if confirmed_list:
-                    conclusion_short = "Confirmed: " + ", ".join([f"Anti-{x}" for x in confirmed_list])
-                elif resolved_list:
-                    conclusion_short = "Resolved (not fully confirmed): " + ", ".join([f"Anti-{x}" for x in resolved_list])
-                else:
-                    conclusion_short = "Unresolved / Needs more work"
-
-                details = {
-                    "best_combo": list(best),
-                    "resolved": resolved_list,
-                    "needs_work": needs_work_list,
-                    "confirmed": confirmed_list,
-                    "supported_bg": supported_list,
-                    "not_excluded_sig": other_sig_final if isinstance(other_sig_final, list) else [],
-                    "not_excluded_cold": other_cold_final if isinstance(other_cold_final, list) else [],
-                    "no_discriminating": no_disc_bg if isinstance(no_disc_bg, list) else []
-                }
-
-    # ----------------------------------------------------------------------
-    # Selected cells expander (unchanged)
-    # ----------------------------------------------------------------------
-    with st.expander("➕ Add Selected Cell (From Library)"):
-        ex_id = st.text_input("ID", key="ex_id")
-        ex_res = st.selectbox("Reaction", GRADES, key="ex_res")
-        ag_cols = st.columns(6)
-        new_ph = {}
-        for i, ag in enumerate(AGS):
-            new_ph[ag] = 1 if ag_cols[i%6].checkbox(ag, key=f"ex_{ag}") else 0
-
-        if st.button("Confirm Add", key="btn_add_ex"):
-            st.session_state.ext.append({"id": ex_id.strip() if ex_id else "", "res": normalize_grade(ex_res), "ph": new_ph})
-            st.success("Added! Re-run Analysis.")
-
-    if st.session_state.ext:
-        st.table(pd.DataFrame(st.session_state.ext)[["id","res"]])
-
-    # ----------------------------------------------------------------------
+                    sep_map = separability_map(best, cells)
+                    resolved = [a for a in best if sep_map.get(a, False)]
+                    needs_work = [a for a in best if not sep_map.get(a, False)]
+    
+                    if resolved:
+                        st.success("Resolved (pattern explained & separable): " + ", ".join([f"Anti-{a}" for a in resolved]))
+                    if needs_work:
+                        st.warning("Pattern suggests these, but NOT separable yet (DO NOT confirm): " +
+                                   ", ".join([f"Anti-{a}" for a in needs_work]))
+    
+                    remaining_other = [a for a in candidates if a not in best]
+                    other_sig = [a for a in remaining_other if a not in INSIGNIFICANT_AGS]
+                    other_cold = [a for a in remaining_other if a in INSIGNIFICANT_AGS]
+    
+                    active_not_excluded = set(resolved + needs_work + other_sig + other_cold)
+    
+                    auto_ruled_out, supported_bg, inconclusive_bg, no_disc_bg = background_auto_resolution(
+                        background_list=other_sig + other_cold,
+                        active_not_excluded=active_not_excluded,
+                        cells=cells
+                    )
+    
+                    other_sig_final = [a for a in other_sig if a not in auto_ruled_out]
+                    other_cold_final = [a for a in other_cold if a not in auto_ruled_out]
+    
+                    if auto_ruled_out:
+                        st.markdown("### ✅ Auto Rule-out (from available discriminating cells):")
+                        for ag, labs in auto_ruled_out.items():
+                            st.write(f"- **Anti-{ag} ruled out** (discriminating cell(s) NEGATIVE): " + ", ".join(labs))
+    
+                    if supported_bg:
+                        st.markdown("### ⚠️ Background antibodies suggested by discriminating cells (NOT confirmed yet):")
+                        for ag, labs in supported_bg.items():
+                            st.write(f"- **Anti-{ag} suspected** (discriminating cell(s) POSITIVE): " + ", ".join(labs))
+    
+                    if inconclusive_bg:
+                        st.markdown("### ⚠️ Inconclusive background (mixed discriminating results):")
+                        for ag, labs in inconclusive_bg.items():
+                            st.write(f"- **Anti-{ag} inconclusive** (mixed results): " + ", ".join(labs))
+    
+                    if other_sig_final or other_cold_final or no_disc_bg:
+                        st.markdown("### ⚠️ Not excluded yet (background possibilities):")
+                        if other_sig_final:
+                            st.write("**Clinically significant:** " + ", ".join([f"Anti-{x}" for x in other_sig_final]))
+                        if other_cold_final:
+                            st.info("Cold/Insignificant: " + ", ".join([f"Anti-{x}" for x in other_cold_final]))
+                        if no_disc_bg:
+                            st.warning("No discriminating cells available in current panel/screen for: " +
+                                       ", ".join([f"Anti-{x}" for x in no_disc_bg]))
+    
+                    st.write("---")
+                    st.subheader("Confirmation (Rule of Three) — Resolved & Separable only")
+    
+                    confirmation = {}
+                    confirmed = set()
+                    needs_more_for_confirmation = set()
+    
+                    if not resolved:
+                        st.info("No antibody is separable yet → DO NOT apply Rule of Three. Add discriminating selected cells.")
+                    else:
+                        for a in resolved:
+                            full, mod, p_cnt, n_cnt = check_rule_three_only_on_discriminating(a, best, cells)
+                            confirmation[a] = (full, mod, p_cnt, n_cnt)
+                            if full or mod:
+                                confirmed.add(a)
+                            else:
+                                needs_more_for_confirmation.add(a)
+    
+                        for a in resolved:
+                            full, mod, p_cnt, n_cnt = confirmation[a]
+                            if full:
+                                st.write(f"✅ **Anti-{a} CONFIRMED**: Full Rule (3+3) met on discriminating cells (P:{p_cnt} / N:{n_cnt})")
+                            elif mod:
+                                st.write(f"✅ **Anti-{a} CONFIRMED**: Modified Rule (2+3) met on discriminating cells (P:{p_cnt} / N:{n_cnt})")
+                            else:
+                                st.write(f"⚠️ **Anti-{a} NOT confirmed yet**: need more discriminating cells (P:{p_cnt} / N:{n_cnt})")
+    
+                    if confirmed:
+                        st.markdown(patient_antigen_negative_reminder(sorted(list(confirmed)), strong=True), unsafe_allow_html=True)
+                    elif resolved:
+                        st.markdown(patient_antigen_negative_reminder(sorted(list(resolved)), strong=False), unsafe_allow_html=True)
+    
+                    d_present = ("D" in confirmed) or ("D" in resolved) or ("D" in needs_work)
+                    c_present = ("C" in confirmed) or ("C" in resolved) or ("C" in needs_work) or ("C" in supported_bg) or ("C" in other_sig_final)
+                    if d_present and c_present:
+                        strong = ("D" in confirmed and "C" in confirmed)
+                        st.markdown(anti_g_alert_html(strong=strong), unsafe_allow_html=True)
+    
+                    st.write("---")
+    
+                    targets_needing_selected = list(dict.fromkeys(
+                        needs_work +
+                        list(needs_more_for_confirmation) +
+                        list(supported_bg.keys()) +
+                        other_sig_final
+                    ))
+    
+                    if targets_needing_selected:
+                        st.markdown("### 🧪 Selected Cells (Only if needed to resolve interference / exclude / confirm)")
+                        for a in targets_needing_selected:
+                            active_set_now = set(resolved + needs_work + other_sig_final + list(supported_bg.keys()))
+    
+                            if a in needs_work:
+                                st.warning(f"Anti-{a}: **Interference / not separable** → need {a}+ cells NEGATIVE for other active suspects.")
+                            elif a in other_sig_final:
+                                st.warning(f"Anti-{a}: **Clinically significant background NOT excluded** → need discriminating cells to exclude/confirm.")
+                            elif a in supported_bg:
+                                st.info(f"Anti-{a}: **Suggested by discriminating POSITIVE cell(s)** → requires confirmation (rule-of-three / additional discriminating cells).")
+                            else:
+                                st.info(f"Anti-{a}: **Not confirmed yet** → need more discriminating cells.")
+    
+                            sugg = suggest_selected_cells(a, list(active_set_now))
+                            if sugg:
+                                for lab, note in sugg[:12]:
+                                    st.write(f"- {lab}  <span class='cell-hint'>{note}</span>", unsafe_allow_html=True)
+                            else:
+                                st.write("- No suitable discriminating cell in current inventory → use another lot / external selected cells.")
+    
+                        enz = enzyme_hint_if_needed(targets_needing_selected)
+                        if enz:
+                            st.info("💡 " + enz)
+                    else:
+                        st.success("No Selected Cells needed: all resolved antibodies are confirmed AND no clinically significant background remains unexcluded.")
+    
+                    confirmed_list = sorted(list(confirmed)) if isinstance(confirmed, set) else []
+                    resolved_list = resolved if isinstance(resolved, list) else []
+                    needs_work_list = needs_work if isinstance(needs_work, list) else []
+                    supported_list = sorted(list(supported_bg.keys())) if isinstance(supported_bg, dict) else []
+    
+                    if confirmed_list:
+                        conclusion_short = "Confirmed: " + ", ".join([f"Anti-{x}" for x in confirmed_list])
+                    elif resolved_list:
+                        conclusion_short = "Resolved (not fully confirmed): " + ", ".join([f"Anti-{x}" for x in resolved_list])
+                    else:
+                        conclusion_short = "Unresolved / Needs more work"
+    
+                    details = {
+                        "best_combo": list(best),
+                        "resolved": resolved_list,
+                        "needs_work": needs_work_list,
+                        "confirmed": confirmed_list,
+                        "supported_bg": supported_list,
+                        "not_excluded_sig": other_sig_final if isinstance(other_sig_final, list) else [],
+                        "not_excluded_cold": other_cold_final if isinstance(other_cold_final, list) else [],
+                        "no_discriminating": no_disc_bg if isinstance(no_disc_bg, list) else []
+                    }
+    
+        # ----------------------------------------------------------------------
+        # Selected cells expander (unchanged)
+        # ----------------------------------------------------------------------
+        with st.expander("➕ Add Selected Cell (From Library)"):
+            ex_id = st.text_input("ID", key="ex_id")
+            ex_res = st.selectbox("Reaction", GRADES, key="ex_res")
+            ag_cols = st.columns(6)
+            new_ph = {}
+            for i, ag in enumerate(AGS):
+                new_ph[ag] = 1 if ag_cols[i%6].checkbox(ag, key=f"ex_{ag}") else 0
+    
+            if st.button("Confirm Add", key="btn_add_ex"):
+                st.session_state.ext.append({"id": ex_id.strip() if ex_id else "", "res": normalize_grade(ex_res), "ph": new_ph})
+                st.success("Added! Re-run Analysis.")
+    
+        if st.session_state.ext:
+            st.table(pd.DataFrame(st.session_state.ext)[["id","res"]])
+    
+        # ----------------------------------------------------------------------
     # SINGLE SAVE (saves everything: demographics + ABO + phenotype + antibody ID)
     # ----------------------------------------------------------------------
     st.write("---")
