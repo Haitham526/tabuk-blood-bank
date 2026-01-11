@@ -1117,21 +1117,28 @@ def build_how_to_report(
             "For Rh immune globulin (RhIG) eligibility, manage as RhD negative per policy until confirmatory testing is available."
         )
 
-    # Neonate administrative reporting for weak forward antigens
-    if is_neonate:
-        antiA = _safe_str(raw.get("antiA","Not Done"))
-        antiB = _safe_str(raw.get("antiB","Not Done"))
-        if antiA in ("+1","+2") or antiB in ("+1","+2"):
-            abo_guess = _safe_str(abo_interp.get("abo_final",""))
-            # Ensure we don't echo "(Discrepancy)" in admin line
-            abo_guess_clean = abo_guess.replace("(Discrepancy)","").strip()
-            if not abo_guess_clean:
-                abo_guess_clean = "Unknown"
+    # Weak forward antigens (any age): provide a reporting comment. In neonates, include an
+    # administrative "most probable" statement with strict transfusion safety guidance.
+    antiA_wf = _safe_str(raw.get("antiA","Not Done"))
+    antiB_wf = _safe_str(raw.get("antiB","Not Done"))
+    weak_forward = (antiA_wf in ("+1","+2")) or (antiB_wf in ("+1","+2"))
+
+    if weak_forward:
+        abo_guess = _safe_str(abo_interp.get("abo_final",""))
+        abo_guess_clean = abo_guess.replace("(Discrepancy)","").strip() or "Unknown"
+
+        if is_neonate:
             lines.append(
                 f"Neonatal ABO grouping: the current pattern suggests the patient is most likely {abo_guess_clean}; "
-                "however the result is not definitive due to weak antigen expression. "
+                "however the result is not definitive due to weak antigen expression / discrepancy. "
                 "This interpretation is for administrative purposes only and must be reconfirmed at ≥6 months of age (or per local policy). "
                 "Transfusion guidance until confirmed: issue Group O RBCs and Group AB plasma/platelets."
+            )
+        else:
+            lines.append(
+                f"ABO grouping is inconclusive due to weak forward antigen reactions. Forward typing suggests {abo_guess_clean}, "
+                "however the ABO group cannot be confirmed at this stage. Repeat testing and resolve per SOP. "
+                "Until confirmed, manage as ABO unknown for transfusion purposes (issue Group O RBCs and Group AB plasma/platelets per policy)."
             )
 
     # Mixed-field reporting (adult/child or neonate)
@@ -1886,9 +1893,11 @@ else:
                     screen_any_positive=bool(st.session_state.get("abo_screen_any_positive", False)),
                     mixed_field_history={"recent_tx": bool(st.session_state.get("abo_recent_tx", False)), "hsct_bm": bool(st.session_state.get("abo_hsct_bm", False))}
                 )
-                if report_text:
-                    st.markdown("<div class='clinical-alert'><b>How to report (copy/paste):</b></div>", unsafe_allow_html=True)
+                st.markdown("<div class='clinical-alert'><b>How to report (copy/paste):</b></div>", unsafe_allow_html=True)
+                if report_text.strip():
                     st.code(report_text, language="text")
+                else:
+                    st.code("No automated reporting template matched this pattern. Please enter a comment below (or follow local policy).", language="text")
 
 
                 # Manual confirmation + comment (saved with the case)
