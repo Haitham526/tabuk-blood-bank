@@ -1,3 +1,23 @@
+def normalize_rx(rx):
+    """Normalize a reaction grade (rx) to a comparable token."""
+    if rx is None:
+        return "0"
+    if isinstance(rx, (int, float)):
+        return "0" if rx <= 0 else f"{int(rx)}+"
+    s = str(rx).strip().lower()
+    if s in {"", "0", "0+", "-", "neg", "negative", "nonreactive", "nr"}:
+        return "0"
+    s = s.replace(" ", "")
+    if s in {"w", "w+", "weak", "wk", "wk+"}:
+        return "w+"
+    if re.fullmatch(r"[1-4]", s):
+        return s + "+"
+    return s
+
+def is_nonreactive(rx):
+    """True if rx represents non-reactive / negative."""
+    return normalize_rx(rx) == "0"
+
 import streamlit as st
 import pandas as pd
 from datetime import date, datetime, timedelta
@@ -352,6 +372,18 @@ st.markdown("""
     .dr-name { color: #8B0000; font-size: 15px; font-weight: bold; display: block;}
     .dr-title { color: #333; font-size: 11px; }
     div[data-testid="stDataEditor"] table { width: 100% !important; }
+
+.workflow-card{
+  border:1px solid rgba(0,0,0,0.08);
+  border-radius:16px;
+  padding:14px 16px;
+  background:rgba(255,255,255,0.85);
+  box-shadow:0 10px 24px rgba(0,0,0,0.06);
+  max-width:680px;
+  margin:0 auto 10px auto;
+}
+.workflow-title{font-weight:700; font-size:1.05rem; margin-bottom:6px;}
+.workflow-steps{margin:0 0 0 18px; padding:0; line-height:1.6;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -408,6 +440,27 @@ if "analysis_ready" not in st.session_state:
     st.session_state.analysis_ready = False
 if "analysis_payload" not in st.session_state:
     st.session_state.analysis_payload = None
+
+# =============================================================================
+# 3.1) WORKSTATION NAV + CONFIRMATION STATE
+# =============================================================================
+if "ws_section" not in st.session_state:
+    st.session_state.ws_section = "HOME"   # HOME / ABO / ABID / PHENO / REPORT
+
+# Confirmations (must be explicit before conclusions/workups)
+if "abo_confirmed" not in st.session_state:
+    st.session_state.abo_confirmed = False
+if "abo_workup_confirmed" not in st.session_state:
+    st.session_state.abo_workup_confirmed = False
+
+if "abid_pending_confirm" not in st.session_state:
+    st.session_state.abid_pending_confirm = False
+if "abid_confirmed" not in st.session_state:
+    st.session_state.abid_confirmed = False
+
+# Global case comment (always available)
+if "case_comment" not in st.session_state:
+    st.session_state.case_comment = ""
 
 # =============================================================================
 # 4) HELPERS / ENGINE
@@ -602,17 +655,48 @@ def enzyme_hint_if_needed(targets_needing_help: list):
         return f"Enzyme option may help (destroys/weakens: {', '.join(hits)}). Use only per SOP and interpret carefully."
     return None
 
-def discriminating_cells_for(target: str, active_not_excluded: set, cells: list):
-    others = [x for x in active_not_excluded if x != target]
-    disc = []
+def discriminating_cells_for(target_ag, *args):
+    """Return a list of discriminating cells for a target antigen.
+
+    Supports:
+      - discriminating_cells_for(target_ag, cells)
+      - discriminating_cells_for(target_ag, active_not_excluded, cells)
+    """
+    if len(args) == 1:
+        active_not_excluded = set()
+        cells = args[0]
+    elif len(args) == 2:
+        active_not_excluded = args[0] or set()
+        cells = args[1]
+    else:
+        raise TypeError("discriminating_cells_for(target_ag, cells) or discriminating_cells_for(target_ag, active_not_excluded, cells)")
+
+    out = []
     for c in cells:
-        ph = c["ph"]
-        if not ph_has(ph, target):
+        ag_map = c.get("ag", {})
+        if ag_map.get(target_ag) != 1:
             continue
-        if any(ph_has(ph, o) for o in others):
+        if not is_nonreactive(c.get("rx", 0)):
             continue
-        disc.append(c)
-    return disc
+        if active_not_excluded:
+            other_pos = [ag for ag in active_not_excluded if ag != target_ag and ag_map.get(ag) == 1]
+            if other_pos:
+                continue
+        out.append(c)
+    return out
+def ruleout_evidence_cells(ag: str, cells: list):
+    """Return labels of NONreactive antigen-positive cells used to rule out an antibody."""
+    ev = []
+    for c in cells:
+        if not is_nonreactive(c.get('rx', 0)):
+            continue
+        if not ph_has(c, ag):
+            continue
+        # For dosage-sensitive antigens, prefer homozygous expression for rule-out evidence
+        if ag in DOSAGE and not is_homozygous(c, ag):
+            continue
+        ev.append(cell_label(c))
+    return ev
 
 def background_auto_resolution(background_list: list, active_not_excluded: set, cells: list):
     auto_ruled_out = {}
@@ -717,146 +801,163 @@ def _abo_mapping_consistent(forward_abo: str, rev_a1: str, rev_b: str) -> bool:
         return a1_pos and b_pos
     return False
 
+
+
+def _abo_inputs_blank(raw: Dict[str, str]) -> bool:
+    """True if all ABO/RhD/DAT fields are still 'Not Done' (prevents false discrepancy alerts on empty form)."""
+    mode = _safe_str(raw.get("mode", ""))
+    if mode == "neonate":
+        keys = ["antiA","antiB","antiAB","antiD","ctl","dat"]
+    else:
+        keys = ["antiA","antiB","antiD","ctl","a1cells","bcells"]
+    return all(_safe_str(raw.get(k, "Not Done")) in ("", "Not Done") for k in keys)
+
 def interpret_abo_rhd(
     is_neonate: bool,
     purpose: str,
     raw: Dict[str, str],
     screen_any_positive: bool
 ) -> Dict[str, Any]:
-    """
-    raw keys:
-      Adult: antiA, antiB, antiD, ctl, a1cells, bcells
-      Neonate: antiA, antiB, antiAB, antiD, ctl, dat
-    Returns:
-      {abo_final, rhd_final, discrepancy(bool), invalid(bool), notes(list[str])}
-    """
-    notes = []
-    discrepancy = False
-    invalid = False
+    """ABO/RhD interpretation + discrepancy guidance based on policy-driven logic.
 
-    ctl = _safe_str(raw.get("ctl","Not Done"))
-    if ctl in ("+1","+2","+3","+4","Mixed-field","Hemolysis"):
-        invalid = True
-        discrepancy = True
-        notes.append("Control is POSITIVE → test is INVALID. Repeat ABO/Rh typing with proper technique.")
+    Inputs (raw keys):
+      Adult: antiA, antiB, antiD, ctl, a1cells, bcells
+      Neonate: antiA, antiB, antiD, ctl, dat (reverse not expected)
+
+    Returns dict:
+      {
+        "fwd_group": "A/B/AB/O/Indeterminate",
+        "rh": "Positive/Negative/Indeterminate",
+        "status": "OK"/"DISCREPANCY",
+        "summary": str,
+        "notes": [str, ...]
+      }
+    """
+    notes: List[str] = []
+    status = "OK"
+
+    # Pull + normalize
+    antiA = normalize_rx(raw.get("antiA"))
+    antiB = normalize_rx(raw.get("antiB"))
+    antiD = normalize_rx(raw.get("antiD"))
+    ctl   = normalize_rx(raw.get("ctl"))
+    a1    = normalize_rx(raw.get("a1cells"))
+    bcell = normalize_rx(raw.get("bcells"))
+    dat   = normalize_rx(raw.get("dat"))
+
+    def pos(x): return x != "0"
+    def neg(x): return x == "0"
+
+    # Control check
+    if pos(ctl):
+        status = "DISCREPANCY"
+        notes.append("Forward control is reactive. Consider autoagglutination, sample issues, or reagent/technique problems before assigning ABO/RhD.")
+
+    # Forward ABO group (basic)
+    if pos(antiA) and neg(antiB):
+        fwd_group = "A"
+    elif neg(antiA) and pos(antiB):
+        fwd_group = "B"
+    elif pos(antiA) and pos(antiB):
+        fwd_group = "AB"
+    elif neg(antiA) and neg(antiB):
+        fwd_group = "O"
+    else:
+        fwd_group = "Indeterminate"
+        status = "DISCREPANCY"
+        notes.append("Forward ABO pattern is indeterminate. Repeat testing and verify sample/reagents.")
 
     # RhD
-    antiD = _safe_str(raw.get("antiD","Not Done"))
-    if antiD in ("Not Done", ""):
-        rhd_final = "Unknown"
-    elif antiD == "0":
-        rhd_final = "RhD Negative"
-    elif antiD == "+4":
-        rhd_final = "RhD Positive"
+    if pos(antiD):
+        rh = "Positive"
+    elif neg(antiD) and neg(ctl):
+        rh = "Negative"
     else:
-        rhd_final = "RhD Inconclusive / Weak D suspected"
-        discrepancy = True
-        notes.append("Anti-D is weaker than expected or shows mixed-field/hemolysis → treat as RhD NEGATIVE for transfusion and RhIG eligibility per policy; consider molecular testing if available.")
-
-    # ABO
-    if is_neonate:
-        antiA = _safe_str(raw.get("antiA","Not Done"))
-        antiB = _safe_str(raw.get("antiB","Not Done"))
-        abo_guess = _abo_from_forward_only(antiA, antiB)
-
-        # Flag weak/mixed-field forward as discrepancy but still provide most probable ABO
-        if antiA in ("+1","+2","Mixed-field") or antiB in ("+1","+2","Mixed-field"):
-            discrepancy = True
-            notes.append("Weak/mixed-field A/B reactions can occur in neonates; report as 'most probable' and plan confirmation at 6 months (or per local policy).")
-        if antiA == "Not Done" or antiB == "Not Done":
-            discrepancy = True
-            notes.append("Forward ABO not fully performed (Not Done). Complete testing if required.")
-        abo_final = f"Most probable: {abo_guess}" if abo_guess != "Unknown" else "Most probable: Unknown"
-
-        # DAT note (neonate)
-        dat = _safe_str(raw.get("dat","Not Done"))
-        if dat in ("+1","+2","+3","+4","Mixed-field","Hemolysis"):
-            notes.append("DAT is POSITIVE. In neonates, consider maternal IgG coating; interpret ABO cautiously and ensure proper specimen handling.")
-        if dat in ("Not Done",""):
-            # allowed
+        rh = "Indeterminate"
+        if neg(antiD) is False and pos(ctl):
             pass
-
-        if purpose == "RhIG":
-            notes.append("Purpose: RhIG eligibility (DVI+ card per your policy).")
         else:
-            notes.append("Purpose: Transfusion (DVI− card per your policy).")
+            status = "DISCREPANCY"
+            notes.append("RhD result is indeterminate. Repeat RhD per method and consider weak D testing as applicable.")
 
-    else:
-        antiA = _safe_str(raw.get("antiA","Not Done"))
-        antiB = _safe_str(raw.get("antiB","Not Done"))
-        rev_a1 = _safe_str(raw.get("a1cells","Not Done"))
-        rev_b  = _safe_str(raw.get("bcells","Not Done"))
+    # DAT note (neonate card may include DAT)
+    if pos(dat):
+        notes.append("DAT is positive: autoantibodies or recent transfusion may complicate forward grouping and antibody workup.")
 
-        # Determine forward ABO (any positive)
-        fwd_abo = _abo_from_forward_only(antiA, antiB)
-
-        # Discrepancy thresholds
-        # Forward expected >=3+ (policy). If positive but <3+, flag.
-        if antiA in ("+1","+2","Mixed-field") or antiB in ("+1","+2","Mixed-field"):
-            discrepancy = True
-            notes.append("Forward grouping shows weak/mixed-field reactions (<3+). Initiate ABO discrepancy workup per policy.")
-        # Reverse expected >=2+ if positive. If 0/+1 where expected pos, flag.
-        # We first compute expected pattern, then check if reverse is weak.
-        if fwd_abo in ("A","B","O") or fwd_abo == "AB":
-            # If reverse results are not done, discrepancy
-            if rev_a1 in ("Not Done","") or rev_b in ("Not Done",""):
-                discrepancy = True
-                notes.append("Reverse grouping not fully performed. For patients >4 months, reverse grouping is required per policy.")
-            else:
-                # If pattern mismatch
-                if not _abo_mapping_consistent(fwd_abo, rev_a1, rev_b):
-                    discrepancy = True
-                    notes.append("Forward and reverse grouping are inconsistent → ABO DISCREPANCY.")
-                else:
-                    # Even if consistent, ensure reverse strength meets expectation (>=2+ when positive expected)
-                    # Determine which reverse should be positive
-                    a1_should_pos = (fwd_abo in ("B","O"))
-                    b_should_pos  = (fwd_abo in ("A","O"))
-                    if a1_should_pos and (rev_a1 in ("0","+1")):
-                        discrepancy = True
-                        notes.append("Reverse grouping is weaker than expected (<2+). Consider hypogammaglobulinemia, age-related low isoagglutinins, recent transfusion, or plasma abnormalities; follow policy.")
-                    if b_should_pos and (rev_b in ("0","+1")):
-                        discrepancy = True
-                        notes.append("Reverse grouping is weaker than expected (<2+). Consider hypogammaglobulinemia, age-related low isoagglutinins, recent transfusion, or plasma abnormalities; follow policy.")
-
-        # Link to antibody screen if reverse extra reactions and screen is positive
-        if discrepancy and screen_any_positive:
-            notes.append("Antibody screen is POSITIVE. If reverse grouping shows unexpected reactivity, consider alloantibody/cold interference; review antibody ID history and use appropriate antigen-negative reagent cells per SOP.")
-
-        # Mixed-field -> transfusion / transplant
-        if antiA == "Mixed-field" or antiB == "Mixed-field" or rev_a1 == "Mixed-field" or rev_b == "Mixed-field":
-            notes.append("Mixed-field pattern: consider recent transfusion, stem cell transplant/chimerism, or sample issue. For transfused patients, confirm ABO ≥3 months after last transfusion (or per policy).")
-
-        abo_final = fwd_abo if fwd_abo else "Unknown"
-        if discrepancy and not invalid:
-            # still show best estimate to help paperwork, but label discrepancy
-            abo_final = f"{abo_final} (Discrepancy)"
-
-    # Rouleaux/cold auto suspicion in ABO: everything positive including control
+    # Reverse logic (adults only)
     if not is_neonate:
-        all_pos_keys = ["antiA","antiB","antiD","ctl","a1cells","bcells"]
+        reverse_expected = None
+        reverse_ok = True
+
+        if fwd_group == "A":
+            reverse_expected = "Expected: A1 cells nonreactive, B cells reactive."
+            reverse_ok = (neg(a1) and pos(bcell))
+        elif fwd_group == "B":
+            reverse_expected = "Expected: A1 cells reactive, B cells nonreactive."
+            reverse_ok = (pos(a1) and neg(bcell))
+        elif fwd_group == "AB":
+            reverse_expected = "Expected: A1 cells nonreactive, B cells nonreactive."
+            reverse_ok = (neg(a1) and neg(bcell))
+        elif fwd_group == "O":
+            reverse_expected = "Expected: A1 cells reactive, B cells reactive."
+            reverse_ok = (pos(a1) and pos(bcell))
+        else:
+            reverse_expected = "Reverse expectation cannot be determined until forward type is resolved."
+            reverse_ok = False
+
+        if not reverse_ok:
+            status = "DISCREPANCY"
+            notes.append(f"Reverse grouping does not match forward ({reverse_expected}).")
+
+            # Determine if issue is missing expected vs extra unexpected
+            missing_expected = False
+            extra_unexpected = False
+
+            if fwd_group == "A":
+                # should: B reactive, A1 nonreactive
+                if neg(bcell):
+                    missing_expected = True
+                if pos(a1):
+                    extra_unexpected = True
+            elif fwd_group == "B":
+                # should: A1 reactive, B nonreactive
+                if neg(a1):
+                    missing_expected = True
+                if pos(bcell):
+                    extra_unexpected = True
+            elif fwd_group == "AB":
+                extra_unexpected = (pos(a1) or pos(bcell))
+            elif fwd_group == "O":
+                missing_expected = (neg(a1) or neg(bcell))
+
+            if missing_expected:
+                notes.append("Possible causes of missing/weak reverse antibodies include: very young/elderly, immunosuppression, hypogammaglobulinemia, recent transfusion, or massive transfusion. Verify history and repeat testing as needed.")
+
+            if extra_unexpected:
+                if fwd_group == "A" and pos(a1):
+                    notes.append("Unexpected reaction with A1 cells in a forward group A patient suggests possible A subgroup (e.g., A2 with anti-A1) or cold-reactive antibodies. Consider A1 lectin/A2 cells testing and evaluate at RT vs 37°C per policy.")
+                else:
+                    notes.append("Unexpected reverse reactivity may be due to cold autoantibodies, rouleaux/protein effects, passive antibodies (IVIG/plasma products), or an alloantibody reacting with reagent cells. Follow discrepancy workup per policy.")
+
+            if screen_any_positive:
+                notes.append("Antibody screen/panel is positive: an alloantibody may be contributing to unexpected reverse reactions. Consider reagent cells lacking implicated antigen(s) and apply appropriate techniques per policy (e.g., pre-warm, saline replacement).")
+
     else:
-        all_pos_keys = ["antiA","antiB","antiAB","antiD","ctl"]
-    all_pos = True
-    for k in all_pos_keys:
-        if not _is_pos_any(_safe_str(raw.get(k,"0"))):
-            all_pos = False
-            break
-    if all_pos and _is_pos_any(ctl):
-        discrepancy = True
-        notes.append("All wells including control are reactive → consider rouleaux or cold autoantibody interference. Repeat with saline replacement / prewarm as appropriate per SOP.")
+        # Neonate: reverse grouping not expected
+        notes.append("Neonate/Newborn card: reverse grouping is not expected to be reliable; interpret primarily from forward typing and clinical context per policy.")
+
+    summary = f"Forward ABO: {fwd_group} | RhD: {rh}"
+    if status == "DISCREPANCY":
+        summary += " (Discrepancy)"
 
     return {
-        "abo_final": abo_final,
-        "rhd_final": rhd_final,
-        "discrepancy": bool(discrepancy),
-        "invalid": bool(invalid),
-        "notes": notes
+        "fwd_group": fwd_group,
+        "rh": rh,
+        "status": status,
+        "summary": summary,
+        "notes": notes,
+        "purpose": purpose
     }
-
-# =============================================================================
-# 4.2) Phenotype helpers + conflict alert
-# =============================================================================
 def _phenotype_get_antigen_state(ph: Dict[str, str], ag: str) -> str:
     return _safe_str(ph.get(ag, "Not Done"))
 
@@ -938,195 +1039,7 @@ def render_history_report(payload: dict):
         chips.append(f"<span class='chip chip-warn'>DAT C3d: {dat_c3d or '—'}</span>")
         chips.append(f"<span class='chip chip-warn'>DAT Control: {dat_ctl or '—'}</span>")
 
-    st.markdown(f"""
-    <div class="report-card">
-        <div class="report-title">Case History Report</div>
-        <div class="report-sub">Saved at: <b>{saved_at or '—'}</b> &nbsp;|&nbsp; Run Date: <b>{run_dt or '—'}</b></div>
-        <div>{''.join(chips)}</div>
-    </div>
-    """, unsafe_allow_html=True)
 
-    c1, c2, c3, c4 = st.columns(4)
-    with c1:
-        st.markdown(f"<div class='kv'><b>Patient Name</b><br>{name or '—'}</div>", unsafe_allow_html=True)
-    with c2:
-        st.markdown(f"<div class='kv'><b>MRN</b><br>{mrn or '—'}</div>", unsafe_allow_html=True)
-    with c3:
-        st.markdown(f"<div class='kv'><b>Sex</b><br>{sex or '—'}</div>", unsafe_allow_html=True)
-    with c4:
-        st.markdown(f"<div class='kv'><b>Age (Y/M/D)</b><br>{age_y or '—'} / {age_m or '—'} / {age_d or '—'}</div>", unsafe_allow_html=True)
-
-    st.write("")
-    a1, a2, a3 = st.columns(3)
-    with a1:
-        st.markdown(f"<div class='kv'><b>Tech / Operator</b><br>{tech or '—'}</div>", unsafe_allow_html=True)
-    with a2:
-        st.markdown(f"<div class='kv'><b>ID Panel Lot</b><br>{lot_p or '—'}</div>", unsafe_allow_html=True)
-    with a3:
-        st.markdown(f"<div class='kv'><b>Screen Lot</b><br>{lot_s or '—'}</div>", unsafe_allow_html=True)
-
-    # ABO raw
-    st.write("")
-    st.subheader("ABO / RhD / DAT")
-    abo_raw = abo.get("raw", {}) or {}
-    if abo_raw:
-        st.json(abo_raw, expanded=False)
-
-    notes = abo.get("notes", []) or []
-    if notes:
-        st.markdown(
-            "<div class='clinical-alert'><b>ABO Discrepancy Notes</b><ul style='margin-top:6px;'>" +
-            "".join([f"<li>{_safe_str(n)}</li>" for n in notes]) +
-            "</ul></div>",
-            unsafe_allow_html=True
-        )
-
-    # Phenotype
-    st.write("")
-    st.subheader("Patient Phenotype (if available)")
-    if pheno:
-        ph_dict = pheno.get("results", {}) or {}
-        if ph_dict:
-            # render in a compact table
-            rows = [{"Antigen": k, "Result": v} for k,v in ph_dict.items()]
-            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-        else:
-            st.write("—")
-    else:
-        st.write("—")
-
-    # Reactions
-    st.write("")
-    st.subheader("Antibody ID — Reactions Summary")
-    screen_rx = inputs.get("screen_reactions", {}) or {}
-    panel_rx  = inputs.get("panel_reactions", {}) or {}
-
-    sr_df = pd.DataFrame([{
-        "Screen I": screen_rx.get("I",""),
-        "Screen II": screen_rx.get("II",""),
-        "Screen III": screen_rx.get("III",""),
-    }])
-    st.markdown("**Screening Cells**")
-    st.dataframe(sr_df, use_container_width=True, hide_index=True)
-
-    pr_rows = []
-    for i in range(1, 12):
-        pr_rows.append({"Cell": f"Panel #{i}", "Reaction": panel_rx.get(str(i), panel_rx.get(i, ""))})
-    pr_df = pd.DataFrame(pr_rows)
-    st.markdown("**Panel Cells (1–11)**")
-    st.dataframe(pr_df, use_container_width=True, hide_index=True)
-
-    # Interpretation
-    st.write("")
-    st.subheader("Antibody ID — Interpretation / Results")
-    pattern = _safe_str(interp.get("pattern",""))
-    if pattern:
-        st.info(f"Pattern pathway: {pattern}")
-
-    best_combo = interp.get("best_combo", None)
-    if best_combo is not None:
-        st.markdown("**Primary Suggested Combination (best fit)**")
-        st.write(_fmt_antibody_list(best_combo))
-
-    confirmed = interp.get("confirmed", [])
-    resolved  = interp.get("resolved", [])
-    needs_work = interp.get("needs_work", [])
-    supported_bg = interp.get("supported_bg", [])
-    not_ex_sig = interp.get("not_excluded_sig", [])
-    not_ex_cold = interp.get("not_excluded_cold", [])
-    no_disc = interp.get("no_discriminating", [])
-
-    b1, b2, b3 = st.columns(3)
-    with b1:
-        st.markdown(f"<div class='kv'><b>Confirmed</b><br>{_fmt_antibody_list(confirmed)}</div>", unsafe_allow_html=True)
-    with b2:
-        st.markdown(f"<div class='kv'><b>Resolved (not fully confirmed)</b><br>{_fmt_antibody_list(resolved)}</div>", unsafe_allow_html=True)
-    with b3:
-        st.markdown(f"<div class='kv'><b>Needs work / Interference</b><br>{_fmt_antibody_list(needs_work)}</div>", unsafe_allow_html=True)
-
-    if supported_bg:
-        st.warning("Background suspected (not confirmed): " + _fmt_antibody_list(supported_bg))
-    if not_ex_sig:
-        st.warning("Clinically significant NOT excluded: " + _fmt_antibody_list(not_ex_sig))
-    if not_ex_cold:
-        st.info("Cold/insignificant NOT excluded: " + _fmt_antibody_list(not_ex_cold))
-    if no_disc:
-        st.warning("No discriminating cells available for: " + _fmt_antibody_list(no_disc))
-
-    # Selected cells
-    st.write("")
-    st.subheader("Selected Cells Added (if any)")
-    if selected:
-        try:
-            sc_df = pd.DataFrame(selected)
-            cols = [c for c in ["id", "res"] if c in sc_df.columns]
-            if cols:
-                st.dataframe(sc_df[cols], use_container_width=True, hide_index=True)
-            else:
-                st.dataframe(sc_df, use_container_width=True, hide_index=True)
-        except Exception:
-            st.write(selected)
-    else:
-        st.write("— None —")
-
-# =============================================================================
-# 4.4) SUPERVISOR: Copy/Paste Parser (Option A: 26 columns in AGS order)
-# =============================================================================
-def _token_to_01(tok: str) -> int:
-    s = str(tok).strip().lower()
-    if s in ("", "0", "neg", "negative", "nt", "n/t", "na", "n/a", "-", "—"):
-        return 0
-    if "+" in s:
-        return 1
-    if s in ("1", "1+", "2", "2+", "3", "3+", "4", "4+", "pos", "positive", "w", "wk", "weak", "w+", "wf"):
-        return 1
-    for ch in s:
-        if ch.isdigit() and ch != "0":
-            return 1
-    return 0
-
-def parse_paste_table(txt: str, expected_rows: int, id_prefix: str, id_list=None):
-    rows = [r for r in str(txt).strip().splitlines() if r.strip()]
-    data = []
-
-    if id_list is None:
-        id_list = [f"{id_prefix}{i+1}" for i in range(expected_rows)]
-
-    for i in range(min(expected_rows, len(rows))):
-        parts = rows[i].split("\t")
-        vals = [_token_to_01(p) for p in parts]
-
-        if len(vals) > len(AGS):
-            vals = vals[-len(AGS):]
-        while len(vals) < len(AGS):
-            vals.append(0)
-
-        d = {"ID": id_list[i]}
-        for j, ag in enumerate(AGS):
-            d[ag] = int(vals[j])
-        data.append(d)
-
-    df = pd.DataFrame(data)
-    if len(df) < expected_rows:
-        for k in range(len(df), expected_rows):
-            d = {"ID": id_list[k], **{ag: 0 for ag in AGS}}
-            df = pd.concat([df, pd.DataFrame([d])], ignore_index=True)
-
-    return df, f"Parsed {min(expected_rows, len(rows))} row(s). Expecting {expected_rows}."
-
-def _checkbox_column_config():
-    return {
-        ag: st.column_config.CheckboxColumn(
-            ag,
-            help="Tick = Antigen Present (1). Untick = Absent (0).",
-            default=False
-        )
-        for ag in AGS
-    }
-
-# =============================================================================
-# 5) SIDEBAR (Menu + Reset)
-# =============================================================================
 RESET_KEYS = [
     # demographics
     "pt_name","pt_mrn","pt_sex","age_y","age_m","age_d","tech_nm","run_dt",
@@ -1284,9 +1197,12 @@ if nav == "Supervisor":
                     st.error(f"❌ Save failed: {e}")
 
 # =============================================================================
-# 7) WORKSTATION PAGE
+# 7) WORKSTATION PAGE (Redesigned: card-look + partitions + confirm gates)
 # =============================================================================
 else:
+    # -----------------------------
+    # Header
+    # -----------------------------
     st.markdown("""
     <div class='hospital-logo'>
         <h2>Maternity & Children Hospital - Tabuk</h2>
@@ -1296,12 +1212,14 @@ else:
 
     lp_txt = st.session_state.lot_p if st.session_state.lot_p else "⚠️ REQUIRED"
     ls_txt = st.session_state.lot_s if st.session_state.lot_s else "⚠️ REQUIRED"
-    st.markdown(f"<div class='lot-bar'><span>ID Panel Lot: {lp_txt}</span> | <span>Screen Lot: {ls_txt}</span></div>",
-                unsafe_allow_html=True)
+    st.markdown(
+        f"<div class='lot-bar'><span>ID Panel Lot: {lp_txt}</span> | <span>Screen Lot: {ls_txt}</span></div>",
+        unsafe_allow_html=True
+    )
 
-    # ----------------------------------------------------------------------
-    # Demographics row (same line: Sex + Age Y/M/D + Tech)
-    # ----------------------------------------------------------------------
+    # -----------------------------
+    # Demographics (always visible)
+    # -----------------------------
     colw = st.columns([2.0, 1.4, 1.0, 0.7, 0.7, 0.7, 1.2, 1.2])
     _ = colw[0].text_input("Name", key="pt_name")
     _ = colw[1].text_input("MRN", key="pt_mrn")
@@ -1317,22 +1235,26 @@ else:
     age_d = int(st.session_state.get("age_d", 0) or 0)
     is_neonate = _age_is_neonate(age_y, age_m, age_d)
 
-    # ----------------------------------------------------------------------
-    # HISTORY LOOKUP (GitHub; MRN-based)
-    # ----------------------------------------------------------------------
-    mrn_now = _safe_str(st.session_state.get("pt_mrn",""))
+    # -----------------------------
+    # History lookup (always visible when MRN exists)
+    # -----------------------------
+    mrn_now = _safe_str(st.session_state.get("pt_mrn", ""))
+    hist_df = pd.DataFrame()
+    last_hist_abo = ""
+    last_hist_rhd = ""
     if mrn_now:
         try:
             hist_df = load_history_index_as_df(mrn_now)
+            if len(hist_df) > 0:
+                last_hist_abo = _safe_str(hist_df.iloc[0].get("abo_final",""))
+                last_hist_rhd = _safe_str(hist_df.iloc[0].get("rhd_final",""))
         except Exception as e:
-            hist_df = pd.DataFrame()
             st.error(f"History lookup failed: {e}")
 
         if len(hist_df) > 0:
             st.markdown(f"""
             <div class='clinical-alert'>
-            🧾 <b>History Found</b> — This patient has <b>{len(hist_df)}</b> previous record(s).  
-            Please review before interpretation.
+            🧾 <b>History Found</b> — This patient has <b>{len(hist_df)}</b> previous record(s). Please review before interpretation.
             </div>
             """, unsafe_allow_html=True)
 
@@ -1354,233 +1276,354 @@ else:
                     else:
                         render_history_report(payload)
 
-    # ----------------------------------------------------------------------
-    # ABO / RhD / DAT section (collapsed, opens when discrepancy)
-    # ----------------------------------------------------------------------
-    with st.expander("🧾 ABO / RhD / DAT (Enter by grade)", expanded=False):
-        if is_neonate:
-            st.markdown("""
-            <div class='clinical-info'>
-            👶 <b>Neonate mode (&lt; 4 months)</b>: Reverse grouping is typically unreliable.<br>
-            If purpose is <b>RhIG eligibility</b> → use <b>DVI+</b>. If purpose is <b>Transfusion</b> → use <b>DVI−</b> (per your policy).
-            </div>
-            """, unsafe_allow_html=True)
+    # -----------------------------
+    # Main navigation buttons (3D)
+    # -----------------------------
+    st.markdown("""
+    <style>
+      .nav3d-wrap [data-testid="stButton"] button{
+        width: 100%;
+        padding: 14px 14px;
+        border-radius: 14px;
+        font-weight: 800;
+        border: 1px solid rgba(0,0,0,0.12);
+        box-shadow: 0 10px 0 rgba(0,0,0,0.12);
+        transform: translateY(0);
+        transition: transform 0.08s ease, box-shadow 0.08s ease;
+      }
+      .nav3d-wrap [data-testid="stButton"] button:active{
+        transform: translateY(6px);
+        box-shadow: 0 4px 0 rgba(0,0,0,0.12);
+      }
+      .nav3d-small [data-testid="stButton"] button{
+        padding: 8px 12px;
+        border-radius: 12px;
+        font-weight: 700;
+        box-shadow: 0 7px 0 rgba(0,0,0,0.10);
+      }
+    </style>
+    """, unsafe_allow_html=True)
 
-            purpose = st.radio("Purpose", ["Transfusion", "RhIG"], horizontal=True, key="abo_purpose")
-            c1, c2, c3, c4, c5 = st.columns(5)
-            antiA = c1.selectbox("Anti-A", ABO_GRADES, key="abo_neonate_antiA")
-            antiB = c2.selectbox("Anti-B", ABO_GRADES, key="abo_neonate_antiB")
-            antiAB = c3.selectbox("Anti-AB", ABO_GRADES, key="abo_neonate_antiAB")
-            antiD = c4.selectbox("Anti-D", ABO_GRADES, key="abo_neonate_antiD")
-            ctl  = c5.selectbox("Control", ABO_GRADES, key="abo_neonate_ctl")
-            datg = st.selectbox("DAT (grade or Not Done)", ABO_GRADES, key="abo_neonate_dat")
+    nav_cols = st.columns(5)
+    with nav_cols[0]:
+        st.markdown("<div class='nav3d-wrap'>", unsafe_allow_html=True)
+        if st.button("🏠 Home", key="nav_home"):
+            st.session_state.ws_section = "HOME"
+        st.markdown("</div>", unsafe_allow_html=True)
 
-            abo_raw = {
+    with nav_cols[1]:
+        st.markdown("<div class='nav3d-wrap'>", unsafe_allow_html=True)
+        if st.button("🧾 ABO / RhD / DAT", key="nav_abo"):
+            st.session_state.ws_section = "ABO"
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    with nav_cols[2]:
+        st.markdown("<div class='nav3d-wrap'>", unsafe_allow_html=True)
+        if st.button("🧪 Screen & ID (LISS)", key="nav_abid"):
+            st.session_state.ws_section = "ABID"
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    with nav_cols[3]:
+        st.markdown("<div class='nav3d-wrap'>", unsafe_allow_html=True)
+        if st.button("🧬 Phenotype", key="nav_pheno"):
+            st.session_state.ws_section = "PHENO"
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    with nav_cols[4]:
+        st.markdown("<div class='nav3d-wrap'>", unsafe_allow_html=True)
+        if st.button("📄 Report / Save", key="nav_report"):
+            st.session_state.ws_section = "REPORT"
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    st.write("")
+
+    # -----------------------------
+    # Helper: build ABO raw dict from session_state (works even if section hidden)
+    # -----------------------------
+    def _build_abo_raw(is_neonate_flag: bool) -> Dict[str, str]:
+        if is_neonate_flag:
+            purpose = _safe_str(st.session_state.get("abo_purpose", "Transfusion")) or "Transfusion"
+            return {
                 "mode": "neonate",
-                "purpose": "RhIG" if purpose == "RhIG" else "Transfusion",
-                "antiA": antiA,
-                "antiB": antiB,
-                "antiAB": antiAB,
-                "antiD": antiD,
-                "ctl": ctl,
-                "dat": datg
+                "purpose": ("RhIG" if purpose == "RhIG" else "Transfusion"),
+                "antiA": _safe_str(st.session_state.get("abo_neonate_antiA", "Not Done")),
+                "antiB": _safe_str(st.session_state.get("abo_neonate_antiB", "Not Done")),
+                "antiAB": _safe_str(st.session_state.get("abo_neonate_antiAB", "Not Done")),
+                "antiD": _safe_str(st.session_state.get("abo_neonate_antiD", "Not Done")),
+                "ctl": _safe_str(st.session_state.get("abo_neonate_ctl", "Not Done")),
+                "dat": _safe_str(st.session_state.get("abo_neonate_dat", "Not Done")),
             }
         else:
-            st.markdown("""
-            <div class='clinical-info'>
-            👤 <b>Adult/Child mode (≥ 4 months)</b>: Forward + Reverse grouping are required per your policy.
-            </div>
-            """, unsafe_allow_html=True)
-
-            c1, c2, c3, c4 = st.columns(4)
-            antiA = c1.selectbox("Anti-A", ABO_GRADES, key="abo_adult_antiA")
-            antiB = c2.selectbox("Anti-B", ABO_GRADES, key="abo_adult_antiB")
-            antiD = c3.selectbox("Anti-D (DVI−)", ABO_GRADES, key="abo_adult_antiD")
-            ctl   = c4.selectbox("Control", ABO_GRADES, key="abo_adult_ctl")
-
-            r1, r2 = st.columns(2)
-            a1cells = r1.selectbox("A1 cells", ABO_GRADES, key="abo_adult_a1")
-            bcells  = r2.selectbox("B cells", ABO_GRADES, key="abo_adult_b")
-
-            abo_raw = {
+            return {
                 "mode": "adult",
-                "antiA": antiA,
-                "antiB": antiB,
-                "antiD": antiD,
-                "ctl": ctl,
-                "a1cells": a1cells,
-                "bcells": bcells
+                "antiA": _safe_str(st.session_state.get("abo_adult_antiA", "Not Done")),
+                "antiB": _safe_str(st.session_state.get("abo_adult_antiB", "Not Done")),
+                "antiD": _safe_str(st.session_state.get("abo_adult_antiD", "Not Done")),
+                "ctl": _safe_str(st.session_state.get("abo_adult_ctl", "Not Done")),
+                "a1cells": _safe_str(st.session_state.get("abo_adult_a1", "Not Done")),
+                "bcells": _safe_str(st.session_state.get("abo_adult_b", "Not Done")),
             }
 
-    # ----------------------------------------------------------------------
-    # Phenotype section (collapsed)
-    # ----------------------------------------------------------------------
-    with st.expander("🧬 Patient Phenotype (optional)", expanded=False):
-        st.caption("Use: Not Done / Not Detected / Detected. Control should be Not Detected.")
-        tab1, tab2 = st.tabs(["Rh phenotype (C/c/E/e/K)", "Extended phenotype"])
+    # Antibody screen positivity (used for ABO notes)
+    screen_any_positive = any(
+        _safe_str(st.session_state.get(k, "0")) not in ("0", "Not Done", "")
+        for k in ["rx_sI", "rx_sII", "rx_sIII"]
+    )
 
-        with tab1:
-            p1, p2, p3, p4, p5, p6 = st.columns(6)
-            ph_C  = p1.selectbox("C", PHENO_OPTS, key="ph_rh_C")
-            ph_c  = p2.selectbox("c", PHENO_OPTS, key="ph_rh_c")
-            ph_E  = p3.selectbox("E", PHENO_OPTS, key="ph_rh_E")
-            ph_e  = p4.selectbox("e", PHENO_OPTS, key="ph_rh_e")
-            ph_K  = p5.selectbox("K", PHENO_OPTS, key="ph_rh_K")
-            ph_ctl = p6.selectbox("Control", PHENO_OPTS, key="ph_rh_ctl")
+    abo_raw = _build_abo_raw(is_neonate)
 
-        with tab2:
-            st.markdown("**Card 1** (P1, Lea, Leb, Lua, Lub, Control)")
-            a1, a2, a3, a4, a5, a6 = st.columns(6)
-            ex_P1  = a1.selectbox("P1", PHENO_OPTS, key="ph_ex_P1")
-            ex_Lea = a2.selectbox("Lea", PHENO_OPTS, key="ph_ex_Lea")
-            ex_Leb = a3.selectbox("Leb", PHENO_OPTS, key="ph_ex_Leb")
-            ex_Lua = a4.selectbox("Lua", PHENO_OPTS, key="ph_ex_Lua")
-            ex_Lub = a5.selectbox("Lub", PHENO_OPTS, key="ph_ex_Lub")
-            ex_ctl1 = a6.selectbox("Control", PHENO_OPTS, key="ph_ex_ctl1")
-
-            st.markdown("**Card 2** (k, Kpa, Kpb, Jka, Jkb, Control)")
-            b1, b2, b3, b4, b5, b6 = st.columns(6)
-            ex_k   = b1.selectbox("k", PHENO_OPTS, key="ph_ex_k")
-            ex_Kpa = b2.selectbox("Kpa", PHENO_OPTS, key="ph_ex_Kpa")
-            ex_Kpb = b3.selectbox("Kpb", PHENO_OPTS, key="ph_ex_Kpb")
-            ex_Jka = b4.selectbox("Jka", PHENO_OPTS, key="ph_ex_Jka")
-            ex_Jkb = b5.selectbox("Jkb", PHENO_OPTS, key="ph_ex_Jkb")
-            ex_ctl2 = b6.selectbox("Control", PHENO_OPTS, key="ph_ex_ctl2")
-
-            st.markdown("**Card 3** (M, N, S, s, Fya, Fyb)")
-            c1, c2, c3, c4, c5, c6 = st.columns(6)
-            ex_M   = c1.selectbox("M", PHENO_OPTS, key="ph_ex_M")
-            ex_N   = c2.selectbox("N", PHENO_OPTS, key="ph_ex_N")
-            ex_S   = c3.selectbox("S", PHENO_OPTS, key="ph_ex_S")
-            ex_s   = c4.selectbox("s", PHENO_OPTS, key="ph_ex_s")
-            ex_Fya = c5.selectbox("Fya", PHENO_OPTS, key="ph_ex_Fya")
-            ex_Fyb = c6.selectbox("Fyb", PHENO_OPTS, key="ph_ex_Fyb")
-
-    def collect_phenotype_results() -> Dict[str, str]:
-        ph = {}
-        # Rh set
-        for ag,key in [("C","ph_rh_C"),("c","ph_rh_c"),("E","ph_rh_E"),("e","ph_rh_e"),("K","ph_rh_K"),("Rh_ctl","ph_rh_ctl")]:
-            ph[ag] = _safe_str(st.session_state.get(key,"Not Done"))
-        # Extended
-        for ag,key in [
-            ("P1","ph_ex_P1"),("Lea","ph_ex_Lea"),("Leb","ph_ex_Leb"),("Lua","ph_ex_Lua"),("Lub","ph_ex_Lub"),("EX_ctl1","ph_ex_ctl1"),
-            ("k","ph_ex_k"),("Kpa","ph_ex_Kpa"),("Kpb","ph_ex_Kpb"),("Jka","ph_ex_Jka"),("Jkb","ph_ex_Jkb"),("EX_ctl2","ph_ex_ctl2"),
-            ("M","ph_ex_M"),("N","ph_ex_N"),("S","ph_ex_S"),("s","ph_ex_s"),("Fya","ph_ex_Fya"),("Fyb","ph_ex_Fyb")
-        ]:
-            ph[ag] = _safe_str(st.session_state.get(key,"Not Done"))
-        return ph
-
-    # ----------------------------------------------------------------------
-    # MAIN FORM: Antibody Identification
-    # ----------------------------------------------------------------------
-    with st.form("main_form", clear_on_submit=False):
-        st.write("### Antibody Identification — Reaction Entry")
-        L, R = st.columns([1, 2.5])
-
-        with L:
-            st.write("Controls")
-            ac_res = st.radio("Auto Control (AC)", ["Negative", "Positive"], key="rx_ac")
-
-            recent_tx = st.checkbox("Recent transfusion (≤ 4 weeks)?", value=False, key="recent_tx")
-
-            if recent_tx:
-                st.markdown("""
-                <div class='clinical-danger'>
-                🩸 <b>RECENT TRANSFUSION FLAGGED</b><br>
-                ⚠️ Consider <b>DHTR</b> / anamnestic alloantibody response if compatible with clinical picture.<br>
-                <ul>
-                  <li>Review Hb trend, hemolysis markers (bilirubin/LDH/haptoglobin), DAT as indicated.</li>
-                  <li>Compare pre- vs post-transfusion samples if available.</li>
-                  <li>Escalate early if new alloantibody suspected.</li>
-                </ul>
-                </div>
-                """, unsafe_allow_html=True)
-
-            st.write("Screening")
-            s_I   = st.selectbox("Scn I", GRADES, key="rx_sI")
-            s_II  = st.selectbox("Scn II", GRADES, key="rx_sII")
-            s_III = st.selectbox("Scn III", GRADES, key="rx_sIII")
-
-        with R:
-            st.write("Panel Reactions")
-            g1, g2 = st.columns(2)
-            with g1:
-                p1 = st.selectbox("1", GRADES, key="rx_p1")
-                p2 = st.selectbox("2", GRADES, key="rx_p2")
-                p3 = st.selectbox("3", GRADES, key="rx_p3")
-                p4 = st.selectbox("4", GRADES, key="rx_p4")
-                p5 = st.selectbox("5", GRADES, key="rx_p5")
-                p6 = st.selectbox("6", GRADES, key="rx_p6")
-            with g2:
-                p7  = st.selectbox("7", GRADES, key="rx_p7")
-                p8  = st.selectbox("8", GRADES, key="rx_p8")
-                p9  = st.selectbox("9", GRADES, key="rx_p9")
-                p10 = st.selectbox("10", GRADES, key="rx_p10")
-                p11 = st.selectbox("11", GRADES, key="rx_p11")
-
-        run_btn = st.form_submit_button("🚀 Run Analysis", use_container_width=True)
-
-    # ----------------------------------------------------------------------
-    # Run Analysis
-    # ----------------------------------------------------------------------
-    if run_btn:
-        if not st.session_state.lot_p or not st.session_state.lot_s:
-            st.error("⛔ Lots not configured by Supervisor.")
-            st.session_state.analysis_ready = False
-            st.session_state.analysis_payload = None
-        else:
-            in_p = {1:p1,2:p2,3:p3,4:p4,5:p5,6:p6,7:p7,8:p8,9:p9,10:p10,11:p11}
-            in_s = {"I": s_I, "II": s_II, "III": s_III}
-
-            st.session_state.analysis_payload = {
-                "in_p": in_p,
-                "in_s": in_s,
-                "ac_res": ac_res,
-                "recent_tx": recent_tx,
-            }
-            st.session_state.analysis_ready = True
-
-    # ----------------------------------------------------------------------
-    # Display ABO result (computed) + discrepancy expander if needed
-    # ----------------------------------------------------------------------
-    screen_any_positive = any(_safe_str(st.session_state.get(k,"0")) not in ("0","Not Done","") for k in ["rx_sI","rx_sII","rx_sIII"])
     purpose_val = "Transfusion"
     if is_neonate:
-        purpose_val = "RhIG" if _safe_str(st.session_state.get("abo_purpose","Transfusion")) == "RhIG" else "Transfusion"
+        purpose_val = "RhIG" if _safe_str(st.session_state.get("abo_purpose", "Transfusion")) == "RhIG" else "Transfusion"
 
     abo_interp = interpret_abo_rhd(
         is_neonate=is_neonate,
-        purpose=("RhIG" if purpose_val=="RhIG" else "Transfusion"),
+        purpose=("RhIG" if purpose_val == "RhIG" else "Transfusion"),
         raw=abo_raw,
         screen_any_positive=screen_any_positive
     )
 
-    if abo_interp["discrepancy"]:
+    # History mismatch flag (gentle, but can drive discrepancy confirmation)
+    history_mismatch = False
+    if last_hist_abo and abo_interp.get("abo_final",""):
+        # Compare raw ABO letter (strip discrepancy text)
+        cur_abo_clean = _safe_str(abo_interp["abo_final"]).replace("(Discrepancy)", "").replace("Most probable:", "").strip()
+        hist_abo_clean = last_hist_abo.replace("(Discrepancy)", "").replace("Most probable:", "").strip()
+        if cur_abo_clean and hist_abo_clean and (cur_abo_clean[:1] != hist_abo_clean[:1]):
+            history_mismatch = True
+
+    # =============================
+    # HOME
+    # =============================
+    if st.session_state.ws_section == "HOME":
+        st.markdown("""
+<div class='workflow-card'>
+  <div class='workflow-title'>🧭 Workflow</div>
+  <ol class='workflow-steps'>
+    <li>Enter demographics + check history</li>
+    <li>Record ABO/RhD/DAT results</li>
+    <li>Enter Screen/Panel reactions</li>
+    <li>(Optional) Phenotype / extended phenotype</li>
+    <li>Generate report / save</li>
+  </ol>
+</div>
+""", unsafe_allow_html=True)
+
+        # Always available comment (global)
+        st.text_area("📝 Case Comment (always saved)", key="case_comment", height=90)
+
+        if history_mismatch:
+            st.markdown("""
+            <div class='clinical-danger'>
+            ⚠️ <b>History mismatch suspected</b>: Current draft ABO differs from last saved history. Confirm patient/sample ID and follow discrepancy workup.
+            </div>
+            """, unsafe_allow_html=True)
+
+    # =============================
+    # ABO / RhD / DAT
+    # =============================
+    if st.session_state.ws_section == "ABO":
+        st.subheader("🧾 ABO / RhD / DAT (Card-style entry)")
+
+        st.markdown("""
+        <style>
+          .chiprow{display:flex; gap:8px; flex-wrap:wrap; margin:8px 0 2px 0;}
+          .chip{padding:6px 10px; border-radius:999px; font-weight:800; font-size:12px; border:1px solid rgba(0,0,0,0.12); background:#fff;}
+        </style>
+        """, unsafe_allow_html=True)
+
+
+        # Card images (as references)
+        img_cols = st.columns([1.2, 2.8])
+        with img_cols[0]:
+            if is_neonate:
+                try:
+                    st.image("/mnt/data/Screenshot 2025-11-21 082715.png", caption="Neonate ABO card (DVI+ workflow)", use_container_width=True)
+                except Exception:
+                    pass
+            else:
+                try:
+                    st.image("/mnt/data/Screenshot 2025-11-20 190435.png", caption="Adult ABO card (Forward + Reverse)", use_container_width=True)
+                except Exception:
+                    pass
+        with img_cols[1]:
+            st.markdown("""
+            <div class='clinical-info'>
+            <b>Policy logic gates used</b><br>
+            • Control must be NEGATIVE. • Adults/children ≥4 months: Forward + Reverse required. • Neonates: Reverse unreliable (forward only).<br>
+            <i>System shows a DRAFT interpretation first — you must click Confirm before it is considered final.</i>
+            </div>
+            """, unsafe_allow_html=True)
+
+        # Entry UI
+        if is_neonate:
+            purpose = st.radio("Purpose", ["Transfusion", "RhIG"], horizontal=True, key="abo_purpose")
+            st.markdown("""<div class="chiprow"><span class="chip" style="background:#dbeafe;">Anti-A</span><span class="chip" style="background:#fef9c3;">Anti-B</span><span class="chip" style="background:#e5e7eb;">Anti-AB</span><span class="chip" style="background:#dcfce7;">Anti-D (DVI+)</span><span class="chip" style="background:#fee2e2;">Control</span></div>""", unsafe_allow_html=True)
+            c1, c2, c3, c4, c5 = st.columns(5)
+            _ = c1.selectbox("Anti-A", ABO_GRADES, key="abo_neonate_antiA")
+            _ = c2.selectbox("Anti-B", ABO_GRADES, key="abo_neonate_antiB")
+            _ = c3.selectbox("Anti-AB", ABO_GRADES, key="abo_neonate_antiAB")
+            _ = c4.selectbox("Anti-D", ABO_GRADES, key="abo_neonate_antiD")
+            _ = c5.selectbox("Control", ABO_GRADES, key="abo_neonate_ctl")
+            _ = st.selectbox("DAT (grade or Not Done)", ABO_GRADES, key="abo_neonate_dat")
+        else:
+            st.markdown("""<div class="chiprow"><span class="chip" style="background:#dbeafe;">Anti-A</span><span class="chip" style="background:#fef9c3;">Anti-B</span><span class="chip" style="background:#dcfce7;">Anti-D (DVI−)</span><span class="chip" style="background:#fee2e2;">Control</span></div>""", unsafe_allow_html=True)
+            c1, c2, c3, c4 = st.columns(4)
+            _ = c1.selectbox("Anti-A", ABO_GRADES, key="abo_adult_antiA")
+            _ = c2.selectbox("Anti-B", ABO_GRADES, key="abo_adult_antiB")
+            _ = c3.selectbox("Anti-D (DVI−)", ABO_GRADES, key="abo_adult_antiD")
+            _ = c4.selectbox("Control", ABO_GRADES, key="abo_adult_ctl")
+
+            st.markdown("""<div class="chiprow"><span class="chip" style="background:#f1f5f9;">A1 cells</span><span class="chip" style="background:#f1f5f9;">B cells</span></div>""", unsafe_allow_html=True)
+            r1, r2 = st.columns(2)
+            _ = r1.selectbox("A1 cells", ABO_GRADES, key="abo_adult_a1")
+            _ = r2.selectbox("B cells", ABO_GRADES, key="abo_adult_b")
+
+        # Recompute draft + reset confirmations when any ABO key changes
+        # (lightweight: user can click "Recompute Draft" explicitly)
+        if st.button("🔄 Recompute ABO/RhD Draft", key="btn_recompute_abo"):
+            st.session_state.abo_confirmed = False
+            st.session_state.abo_workup_confirmed = False
+            st.rerun()
+
+        # Draft interpretation
+        abo_raw = _build_abo_raw(is_neonate)
+        purpose_val = "Transfusion"
+        if is_neonate:
+            purpose_val = "RhIG" if _safe_str(st.session_state.get("abo_purpose", "Transfusion")) == "RhIG" else "Transfusion"
+
+        abo_interp = interpret_abo_rhd(
+            is_neonate=is_neonate,
+            purpose=("RhIG" if purpose_val == "RhIG" else "Transfusion"),
+            raw=abo_raw,
+            screen_any_positive=screen_any_positive
+        )
+
+        if history_mismatch:
+            st.markdown("""
+            <div class='clinical-danger'>
+            ⚠️ <b>History mismatch suspected</b> — verify patient/sample ID and proceed with discrepancy steps.
+            </div>
+            """, unsafe_allow_html=True)
+
         st.markdown(f"""
-        <div class='clinical-danger'>
-        ⚠️ <b>ABO DISCREPANCY / SPECIAL SITUATION</b><br>
-        Current computed result: <b>ABO: {abo_interp['abo_final']}</b> | <b>RhD: {abo_interp['rhd_final']}</b><br>
-        Open the discrepancy guidance below.
+        <div class='clinical-info'>
+        <b>DRAFT interpretation</b>: <b>ABO: {abo_interp['abo_final']}</b> | <b>RhD: {abo_interp['rhd_final']}</b><br>
+        <i>This is not final until you click Confirm below.</i>
         </div>
         """, unsafe_allow_html=True)
 
-        with st.expander("🧩 ABO Discrepancy — Guidance (How to report the result?)", expanded=True):
+        confirm_cols = st.columns([1, 1, 2])
+        with confirm_cols[0]:
+            if st.button("✅ Confirm ABO/RhD", type="primary", key="btn_confirm_abo"):
+                st.session_state.abo_confirmed = True
+        with confirm_cols[1]:
+            if st.button("❌ Unconfirm", key="btn_unconfirm_abo"):
+                st.session_state.abo_confirmed = False
+                st.session_state.abo_workup_confirmed = False
+        with confirm_cols[2]:
+            st.caption("Confirm is required before final report/save. If discrepancy is flagged, you must also confirm entering the workup section.")
+
+        # Discrepancy gate
+        if abo_interp["discrepancy"] and st.session_state.abo_confirmed:
+            st.markdown("""
+            <div class='clinical-danger'>
+            ⚠️ <b>Potential ABO/RhD discrepancy detected</b> (confirmed draft).<br>
+            You must explicitly choose to proceed to discrepancy workup before the system shows full guidance.
+            </div>
+            """, unsafe_allow_html=True)
+
+            st.markdown("<div class='nav3d-small'>", unsafe_allow_html=True)
+            if st.button("🧩 Proceed to ABO Discrepancy Workup", key="btn_abo_workup"):
+                st.session_state.abo_workup_confirmed = True
+            st.markdown("</div>", unsafe_allow_html=True)
+
+        if st.session_state.abo_workup_confirmed:
+            st.subheader("🧩 ABO Discrepancy Workup (Policy steps checklist)")
+            st.markdown("""
+            <div class='clinical-alert'>
+            Complete the checklist in order. This prevents premature reporting.
+            </div>
+            """, unsafe_allow_html=True)
+
+            ck1 = st.checkbox("1) Clerical check: patient ID / sample label / request form / historical ABO verified", key="abo_ck1")
+            ck2 = st.checkbox("2) Repeat testing: new aliquot / repeat centrifugation/reading / confirm reagent lot and card", key="abo_ck2")
+            ck3 = st.checkbox("3) Evaluate possible causes: recent transfusion, transplant/chimerism, cold auto/rouleaux, subgroups, weak isoagglutinins", key="abo_ck3")
+            ck4 = st.checkbox("4) If unresolved: escalate to BB physician / reference lab; document and manage emergency transfusion per policy", key="abo_ck4")
+
             st.markdown(
-                "<div class='clinical-alert'><b>How to report the result?</b><ul style='margin-top:6px;'>" +
+                "<div class='clinical-alert'><b>System guidance (based on results)</b><ul style='margin-top:6px;'>" +
                 "".join([f"<li>{_safe_str(n)}</li>" for n in abo_interp["notes"]]) +
                 "</ul></div>",
                 unsafe_allow_html=True
             )
-    else:
-        st.markdown(f"""
-        <div class='clinical-info'>
-        ✅ <b>ABO/RhD result is consistent</b>: <b>ABO: {abo_interp['abo_final']}</b> | <b>RhD: {abo_interp['rhd_final']}</b>
-        </div>
-        """, unsafe_allow_html=True)
 
-    # ----------------------------------------------------------------------
-    # Antibody analysis output + Save (single Save button)
-    # ----------------------------------------------------------------------
+            ready = ck1 and ck2 and ck3
+            if not ready:
+                st.warning("Workup checklist not complete → do NOT finalize ABO.")
+            else:
+                st.success("Checklist completed. You can proceed to final report, but keep documentation and approvals per policy.")
+
+        st.text_area("📝 ABO / Discrepancy Comment", key="abo_comment", height=80)
+
+    # =============================
+    # PHENOTYPE
+    # =============================
+    if st.session_state.ws_section == "PHENO":
+        st.subheader("🧬 Patient Phenotype (optional)")
+
+        try:
+            st.image("/mnt/data/Screenshot 2025-11-21 085029.png", caption="Rh phenotype card (C/c/E/e/K)", use_container_width=True)
+        except Exception:
+            pass
+
+        st.caption("Use: Not Done / Not Detected / Detected. Controls should be Not Detected.")
+        tab1, tab2 = st.tabs(["Rh phenotype (C/c/E/e/K)", "Extended phenotype"])
+
+        with tab1:
+            st.markdown("""<div class="chiprow"><span class="chip" style="background:#fee2e2;">C</span><span class="chip" style="background:#e9d5ff;">c</span><span class="chip" style="background:#fde68a;">E</span><span class="chip" style="background:#e5e7eb;">e</span><span class="chip" style="background:#dcfce7;">K</span><span class="chip" style="background:#fee2e2;">Control</span></div>""", unsafe_allow_html=True)
+            p1, p2, p3, p4, p5, p6 = st.columns(6)
+            _ = p1.selectbox("C", PHENO_OPTS, key="ph_rh_C")
+            _ = p2.selectbox("c", PHENO_OPTS, key="ph_rh_c")
+            _ = p3.selectbox("E", PHENO_OPTS, key="ph_rh_E")
+            _ = p4.selectbox("e", PHENO_OPTS, key="ph_rh_e")
+            _ = p5.selectbox("K", PHENO_OPTS, key="ph_rh_K")
+            _ = p6.selectbox("Control", PHENO_OPTS, key="ph_rh_ctl")
+
+        with tab2:
+            st.markdown("**Extended phenotype cards** (black/white in your system):")
+            st.markdown("**Card 1** (P1, Lea, Leb, Lua, Lub, Control)")
+            a1, a2, a3, a4, a5, a6 = st.columns(6)
+            _ = a1.selectbox("P1", PHENO_OPTS, key="ph_ex_P1")
+            _ = a2.selectbox("Lea", PHENO_OPTS, key="ph_ex_Lea")
+            _ = a3.selectbox("Leb", PHENO_OPTS, key="ph_ex_Leb")
+            _ = a4.selectbox("Lua", PHENO_OPTS, key="ph_ex_Lua")
+            _ = a5.selectbox("Lub", PHENO_OPTS, key="ph_ex_Lub")
+            _ = a6.selectbox("Control", PHENO_OPTS, key="ph_ex_ctl1")
+
+            st.markdown("**Card 2** (k, Kpa, Kpb, Jka, Jkb, Control)")
+            b1, b2, b3, b4, b5, b6 = st.columns(6)
+            _ = b1.selectbox("k", PHENO_OPTS, key="ph_ex_k")
+            _ = b2.selectbox("Kpa", PHENO_OPTS, key="ph_ex_Kpa")
+            _ = b3.selectbox("Kpb", PHENO_OPTS, key="ph_ex_Kpb")
+            _ = b4.selectbox("Jka", PHENO_OPTS, key="ph_ex_Jka")
+            _ = b5.selectbox("Jkb", PHENO_OPTS, key="ph_ex_Jkb")
+            _ = b6.selectbox("Control", PHENO_OPTS, key="ph_ex_ctl2")
+
+            st.markdown("**Card 3** (M, N, S, s, Fya, Fyb)")
+            c1, c2, c3, c4, c5, c6 = st.columns(6)
+            _ = c1.selectbox("M", PHENO_OPTS, key="ph_ex_M")
+            _ = c2.selectbox("N", PHENO_OPTS, key="ph_ex_N")
+            _ = c3.selectbox("S", PHENO_OPTS, key="ph_ex_S")
+            _ = c4.selectbox("s", PHENO_OPTS, key="ph_ex_s")
+            _ = c5.selectbox("Fya", PHENO_OPTS, key="ph_ex_Fya")
+            _ = c6.selectbox("Fyb", PHENO_OPTS, key="ph_ex_Fyb")
+
+        st.text_area("📝 Phenotype Comment", key="pheno_comment", height=80)
+
+    # =============================
+    # ANTIBODY SCREEN / ID (LISS)
+    # =============================
     conclusion_short = ""
     details = {}
     all_rx = False
@@ -1588,440 +1631,458 @@ else:
     dat_c3d = ""
     dat_ctl = ""
 
-    if st.session_state.analysis_ready and st.session_state.analysis_payload:
-        in_p = st.session_state.analysis_payload["in_p"]
-        in_s = st.session_state.analysis_payload["in_s"]
-        ac_res = st.session_state.analysis_payload["ac_res"]
-        recent_tx = st.session_state.analysis_payload["recent_tx"]
+    if st.session_state.ws_section == "ABID":
+        st.subheader("🧪 Antibody Screen & Identification (LISS / Coombs card)")
+        st.markdown("""<div class="clinical-info" style="border-left:10px solid #16a34a;"><b>LISS/Coombs card theme</b>: green banner to match the card color scheme you shared.</div>""", unsafe_allow_html=True)
 
-        ac_negative = (ac_res == "Negative")
-        all_rx = all_reactive_pattern(in_p, in_s)
+        try:
+            st.image("/mnt/data/Screenshot 2025-11-18 232955.png", caption="LISS/Coombs card reference", use_container_width=True)
+        except Exception:
+            pass
 
-        # PAN-REACTIVE LOGIC
-        if all_rx and ac_negative:
-            tx_note = ""
-            if recent_tx:
-                tx_note = """
-                <li style="color:#7a0000;"><b>Recent transfusion ≤ 4 weeks</b>: strongly consider <b>DHTR</b> / anamnestic alloantibody response if clinically compatible; compare pre/post samples and review hemolysis markers.</li>
-                """
+        st.markdown("""
+        <div class='clinical-info'>
+        <b>Confirm gate:</b> After you click <b>Run Analysis</b>, the system will ask you to confirm before showing conclusions.
+        </div>
+        """, unsafe_allow_html=True)
 
-            st.markdown(f"""
-            <div class='clinical-danger'>
-            ⚠️ <b>Pan-reactive pattern with NEGATIVE autocontrol</b><br>
-            <b>Most consistent with:</b>
-            <ul>
-              <li><b>Alloantibody to a High-Incidence (High-Frequency) Antigen</b></li>
-              <li><b>OR multiple alloantibodies</b> not separable with the current cells</li>
-            </ul>
-            <b>Action / Workflow (priority):</b>
-            <ol>
-              <li><b>STOP</b> routine single-specificity interpretation (rule-out/rule-in is not valid here).</li>
-              <li>Immediate referral to <b>Blood Bank Physician / Reference Lab</b>.</li>
-              <li>Request <b>patient extended phenotype / genotype</b> (pre-transfusion if available).</li>
-              <li>Start <b>rare compatible unit search</b> (regional/national resources).</li>
-              <li><b>First-degree relatives donors</b>: consider typing/testing as potential compatible donors when clinically appropriate.</li>
-              <li>Use <b>additional panels / different lots</b> + <b>selected cells</b> to separate multiple alloantibodies if suspected.</li>
-              {tx_note}
-            </ol>
-            </div>
-            """, unsafe_allow_html=True)
+        with st.form("main_form", clear_on_submit=False):
+            st.write("### Reaction Entry")
+            L, R = st.columns([1, 2.5])
 
+            with L:
+                st.write("Controls")
+                ac_res = st.radio("Auto Control (AC)", ["Negative", "Positive"], key="rx_ac")
+                recent_tx = st.checkbox("Recent transfusion (≤ 4 weeks)?", value=False, key="recent_tx")
+
+                if recent_tx:
+                    st.markdown("""
+                    <div class='clinical-danger'>
+                    🩸 <b>RECENT TRANSFUSION FLAGGED</b><br>
+                    Consider DHTR / anamnestic alloantibody response if clinically compatible.
+                    </div>
+                    """, unsafe_allow_html=True)
+
+                st.write("Screening")
+                s_I   = st.selectbox("Scn I", GRADES, key="rx_sI")
+                s_II  = st.selectbox("Scn II", GRADES, key="rx_sII")
+                s_III = st.selectbox("Scn III", GRADES, key="rx_sIII")
+
+            with R:
+                st.write("Panel Reactions")
+                g1, g2 = st.columns(2)
+                with g1:
+                    p1 = st.selectbox("1", GRADES, key="rx_p1")
+                    p2 = st.selectbox("2", GRADES, key="rx_p2")
+                    p3 = st.selectbox("3", GRADES, key="rx_p3")
+                    p4 = st.selectbox("4", GRADES, key="rx_p4")
+                    p5 = st.selectbox("5", GRADES, key="rx_p5")
+                    p6 = st.selectbox("6", GRADES, key="rx_p6")
+                with g2:
+                    p7  = st.selectbox("7", GRADES, key="rx_p7")
+                    p8  = st.selectbox("8", GRADES, key="rx_p8")
+                    p9  = st.selectbox("9", GRADES, key="rx_p9")
+                    p10 = st.selectbox("10", GRADES, key="rx_p10")
+                    p11 = st.selectbox("11", GRADES, key="rx_p11")
+
+            run_btn = st.form_submit_button("🚀 Run Analysis", use_container_width=True)
+
+        if run_btn:
+            if not st.session_state.lot_p or not st.session_state.lot_s:
+                st.error("⛔ Lots not configured by Supervisor.")
+                st.session_state.analysis_ready = False
+                st.session_state.analysis_payload = None
+                st.session_state.abid_pending_confirm = False
+                st.session_state.abid_confirmed = False
+            else:
+                in_p = {1:p1,2:p2,3:p3,4:p4,5:p5,6:p6,7:p7,8:p8,9:p9,10:p10,11:p11}
+                in_s = {"I": s_I, "II": s_II, "III": s_III}
+
+                st.session_state.analysis_payload = {
+                    "in_p": in_p,
+                    "in_s": in_s,
+                    "ac_res": ac_res,
+                    "recent_tx": recent_tx,
+                }
+                st.session_state.analysis_ready = True
+                st.session_state.abid_pending_confirm = True
+                st.session_state.abid_confirmed = False
+
+        # Confirm gate BEFORE conclusions
+        if st.session_state.abid_pending_confirm:
             st.markdown("""
-            <div class='clinical-info'>
-            🔎 <b>Note:</b> Routine specificity engine is intentionally paused for this pattern.
+            <div class='clinical-alert'>
+            ⚠️ <b>Confirm before conclusions</b><br>
+            The system is ready to generate an interpretation. Click Confirm to proceed.
             </div>
             """, unsafe_allow_html=True)
 
-            conclusion_short = "Pan-reactive + AC Negative (High-incidence / multiple allo suspected)"
-            details = {"pattern": "pan_reactive_ac_negative"}
+            cc1, cc2, _cc3 = st.columns([1, 1, 3])
+            with cc1:
+                if st.button("✅ Confirm generate conclusion", type="primary", key="btn_abid_confirm"):
+                    st.session_state.abid_pending_confirm = False
+                    st.session_state.abid_confirmed = True
+            with cc2:
+                if st.button("❌ Cancel (no conclusion)", key="btn_abid_cancel"):
+                    st.session_state.abid_pending_confirm = False
+                    st.session_state.abid_confirmed = False
 
-        elif all_rx and (not ac_negative):
-            st.markdown("""
-            <div class='clinical-danger'>
-            ⚠️ <b>Pan-reactive pattern with POSITIVE autocontrol</b><br>
-            Requires <b>Monospecific DAT</b> pathway (IgG / C3d / Control) before any alloantibody claims.
-            </div>
-            """, unsafe_allow_html=True)
+        # Run and display conclusions ONLY if confirmed
+        if st.session_state.abid_confirmed and st.session_state.analysis_ready and st.session_state.analysis_payload:
+            in_p = st.session_state.analysis_payload["in_p"]
+            in_s = st.session_state.analysis_payload["in_s"]
+            ac_res = st.session_state.analysis_payload["ac_res"]
+            recent_tx = st.session_state.analysis_payload["recent_tx"]
 
-            st.subheader("Monospecific DAT Entry (Required)")
-            c1, c2, c3 = st.columns(3)
-            dat_igg = c1.selectbox("DAT IgG", YN3, key="dat_igg")
-            dat_c3d = c2.selectbox("DAT C3d", YN3, key="dat_c3d")
-            dat_ctl = c3.selectbox("DAT Control", YN3, key="dat_ctl")
+            ac_negative = (ac_res == "Negative")
+            all_rx = all_reactive_pattern(in_p, in_s)
 
-            if dat_ctl == "Positive":
+            # PAN-REACTIVE LOGIC
+            if all_rx and ac_negative:
+                tx_note = ""
+                if recent_tx:
+                    tx_note = "<li style='color:#7a0000;'><b>Recent transfusion ≤ 4 weeks</b>: consider DHTR / anamnestic response; compare pre/post samples.</li>"
+
+                st.markdown(f"""
+                <div class='clinical-danger'>
+                ⚠️ <b>Pan-reactive pattern with NEGATIVE autocontrol</b><br>
+                <b>Most consistent with:</b>
+                <ul>
+                  <li><b>Alloantibody to a High-Incidence Antigen</b></li>
+                  <li><b>OR multiple alloantibodies</b> not separable with current cells</li>
+                </ul>
+                <b>Action / Workflow:</b>
+                <ol>
+                  <li><b>STOP</b> routine single-specificity interpretation.</li>
+                  <li>Refer to <b>BB physician / reference lab</b>.</li>
+                  <li>Request <b>extended phenotype / genotype</b> (pre-transfusion if possible).</li>
+                  <li>Start <b>rare compatible unit search</b>.</li>
+                  {tx_note}
+                </ol>
+                </div>
+                """, unsafe_allow_html=True)
+
+                conclusion_short = "Pan-reactive + AC Negative (High-incidence / multiple allo suspected)"
+                details = {"pattern": "pan_reactive_ac_negative"}
+
+            elif all_rx and (not ac_negative):
                 st.markdown("""
                 <div class='clinical-danger'>
-                ⛔ <b>DAT Control is POSITIVE</b> → invalid run / control failure.<br>
-                Repeat DAT before interpretation.
+                ⚠️ <b>Pan-reactive pattern with POSITIVE autocontrol</b><br>
+                Requires <b>Monospecific DAT</b> pathway before any alloantibody claims.
                 </div>
                 """, unsafe_allow_html=True)
-            elif dat_igg == "Not Done" or dat_c3d == "Not Done":
-                st.markdown("""
-                <div class='clinical-alert'>
-                ⚠️ Please perform <b>Monospecific DAT (IgG & C3d)</b> to proceed.
-                </div>
-                """, unsafe_allow_html=True)
-            else:
-                if dat_igg == "Positive":
-                    ads = "Auto-adsorption (ONLY if NOT recently transfused)" if not recent_tx else "Allo-adsorption (recent transfusion → avoid auto-adsorption)"
-                    st.markdown(f"""
-                    <div class='clinical-info'>
-                    ✅ <b>DAT IgG POSITIVE</b> (C3d: {dat_c3d}) → consistent with <b>Warm Autoantibody / WAIHA</b>.<br><br>
-                    <b>Recommended Workflow:</b>
-                    <ol>
-                      <li>Consider <b>eluate</b> when indicated.</li>
-                      <li>Perform <b>adsorption</b>: <b>{ads}</b> to unmask alloantibodies.</li>
-                      <li>Patient <b>phenotype/genotype</b> (pre-transfusion preferred).</li>
-                      <li>Transfuse per policy (antigen-matched / least-incompatible as appropriate).</li>
-                    </ol>
-                    </div>
-                    """, unsafe_allow_html=True)
 
-                elif dat_igg == "Negative" and dat_c3d == "Positive":
+                st.subheader("Monospecific DAT Entry (Required)")
+                c1, c2, c3 = st.columns(3)
+                dat_igg = c1.selectbox("DAT IgG", YN3, key="dat_igg")
+                dat_c3d = c2.selectbox("DAT C3d", YN3, key="dat_c3d")
+                dat_ctl = c3.selectbox("DAT Control", YN3, key="dat_ctl")
+
+                if dat_ctl == "Positive":
                     st.markdown("""
-                    <div class='clinical-info'>
-                    ✅ <b>DAT IgG NEGATIVE + C3d POSITIVE</b> → complement-mediated process (e.g., cold autoantibody).<br><br>
-                    <b>Recommended Workflow:</b>
-                    <ol>
-                      <li>Evaluate cold interference (pre-warm / thermal amplitude) per SOP.</li>
-                      <li>Repeat as needed at 37°C.</li>
-                      <li>Refer if clinically significant transfusion requirement.</li>
-                    </ol>
+                    <div class='clinical-danger'>
+                    ⛔ <b>DAT Control is POSITIVE</b> → invalid run / control failure. Repeat DAT.
                     </div>
                     """, unsafe_allow_html=True)
-
-                else:
+                elif dat_igg == "Not Done" or dat_c3d == "Not Done":
                     st.markdown("""
                     <div class='clinical-alert'>
-                    ⚠️ <b>AC POSITIVE but DAT IgG & C3d NEGATIVE</b> → consider in-vitro interference/technique issue (rouleaux, cold at RT, reagent effects).<br><br>
-                    <b>Recommended Actions:</b>
-                    <ol>
-                      <li>Repeat with proper technique; saline replacement if rouleaux suspected.</li>
-                      <li>Pre-warm/37°C repeat if cold suspected.</li>
-                      <li>If unresolved → refer.</li>
-                    </ol>
+                    ⚠️ Please perform <b>Monospecific DAT (IgG & C3d)</b> to proceed.
                     </div>
                     """, unsafe_allow_html=True)
+                else:
+                    if dat_igg == "Positive":
+                        ads = "Auto-adsorption (ONLY if NOT recently transfused)" if not recent_tx else "Allo-adsorption (recent transfusion → avoid auto-adsorption)"
+                        st.markdown(f"""
+                        <div class='clinical-info'>
+                        ✅ <b>DAT IgG POSITIVE</b> (C3d: {dat_c3d}) → consistent with <b>Warm Autoantibody / WAIHA</b>.<br><br>
+                        <b>Recommended Workflow:</b>
+                        <ol>
+                          <li>Consider eluate when indicated.</li>
+                          <li>Perform adsorption: <b>{ads}</b> to unmask alloantibodies.</li>
+                          <li>Patient phenotype/genotype (pre-transfusion preferred).</li>
+                          <li>Transfuse per policy (least-incompatible / antigen-matched as appropriate).</li>
+                        </ol>
+                        </div>
+                        """, unsafe_allow_html=True)
 
-            st.markdown("""
-            <div class='clinical-info'>
-            🔎 <b>Note:</b> Routine specificity engine remains paused in pan-reactive cases until DAT pathway is addressed.
-            </div>
-            """, unsafe_allow_html=True)
+                    elif dat_igg == "Negative" and dat_c3d == "Positive":
+                        st.markdown("""
+                        <div class='clinical-info'>
+                        ✅ <b>DAT IgG NEGATIVE + C3d POSITIVE</b> → complement-mediated process (e.g., cold autoantibody).<br><br>
+                        <b>Recommended Workflow:</b>
+                        <ol>
+                          <li>Evaluate cold interference (pre-warm/thermal amplitude) per SOP.</li>
+                          <li>Repeat at 37°C as needed.</li>
+                          <li>Refer if significant transfusion requirement.</li>
+                        </ol>
+                        </div>
+                        """, unsafe_allow_html=True)
 
-            conclusion_short = "Pan-reactive + AC Positive (DAT pathway)"
-            details = {"pattern": "pan_reactive_ac_positive"}
+                    else:
+                        st.markdown("""
+                        <div class='clinical-alert'>
+                        ⚠️ <b>AC POSITIVE but DAT IgG & C3d NEGATIVE</b> → consider in-vitro interference/technique issues (rouleaux/cold/artefact). Repeat appropriately or refer.
+                        </div>
+                        """, unsafe_allow_html=True)
 
-        else:
-            cells = get_cells(in_p, in_s, st.session_state.ext)
-            ruled = rule_out(in_p, in_s, st.session_state.ext)
-            candidates = [a for a in AGS if a not in ruled and a not in IGNORED_AGS]
-            best = find_best_combo(candidates, cells, max_size=3)
-
-            st.subheader("Conclusion (Step 1: Rule-out / Rule-in)")
-
-            if not best:
-                st.error("No resolved specificity from current data. Proceed with Selected Cells / Enhancement.")
-                poss_sig = [a for a in candidates if a not in INSIGNIFICANT_AGS][:12]
-                poss_cold = [a for a in candidates if a in INSIGNIFICANT_AGS][:6]
-                if poss_sig or poss_cold:
-                    st.markdown("### ⚠️ Not excluded yet (Needs more work — DO NOT confirm now):")
-                    if poss_sig:
-                        st.write("**Clinically significant possibilities:** " + ", ".join([f"Anti-{x}" for x in poss_sig]))
-                    if poss_cold:
-                        st.info("Cold/Insignificant possibilities: " + ", ".join([f"Anti-{x}" for x in poss_cold]))
-
-                conclusion_short = "No resolved specificity (needs selected cells / more work)"
-                details = {"best_combo": None, "candidates_not_excluded": candidates}
+                conclusion_short = "Pan-reactive + AC Positive (DAT pathway)"
+                details = {"pattern": "pan_reactive_ac_positive"}
 
             else:
-                sep_map = separability_map(best, cells)
-                resolved = [a for a in best if sep_map.get(a, False)]
-                needs_work = [a for a in best if not sep_map.get(a, False)]
+                cells = get_cells(in_p, in_s, st.session_state.ext)
+                ruled = rule_out(in_p, in_s, st.session_state.ext)
+                candidates = [a for a in AGS if a not in ruled and a not in IGNORED_AGS]
+                best = find_best_combo(candidates, cells, max_size=3)
 
-                if resolved:
-                    st.success("Resolved (pattern explained & separable): " + ", ".join([f"Anti-{a}" for a in resolved]))
-                if needs_work:
-                    st.warning("Pattern suggests these, but NOT separable yet (DO NOT confirm): " +
-                               ", ".join([f"Anti-{a}" for a in needs_work]))
+                st.subheader("Conclusion (Step 1: Rule-out / Rule-in)")
 
-                remaining_other = [a for a in candidates if a not in best]
-                other_sig = [a for a in remaining_other if a not in INSIGNIFICANT_AGS]
-                other_cold = [a for a in remaining_other if a in INSIGNIFICANT_AGS]
-
-                active_not_excluded = set(resolved + needs_work + other_sig + other_cold)
-
-                auto_ruled_out, supported_bg, inconclusive_bg, no_disc_bg = background_auto_resolution(
-                    background_list=other_sig + other_cold,
-                    active_not_excluded=active_not_excluded,
-                    cells=cells
-                )
-
-                other_sig_final = [a for a in other_sig if a not in auto_ruled_out]
-                other_cold_final = [a for a in other_cold if a not in auto_ruled_out]
-
-                if auto_ruled_out:
-                    st.markdown("### ✅ Auto Rule-out (from available discriminating cells):")
-                    for ag, labs in auto_ruled_out.items():
-                        st.write(f"- **Anti-{ag} ruled out** (discriminating cell(s) NEGATIVE): " + ", ".join(labs))
-
-                if supported_bg:
-                    st.markdown("### ⚠️ Background antibodies suggested by discriminating cells (NOT confirmed yet):")
-                    for ag, labs in supported_bg.items():
-                        st.write(f"- **Anti-{ag} suspected** (discriminating cell(s) POSITIVE): " + ", ".join(labs))
-
-                if inconclusive_bg:
-                    st.markdown("### ⚠️ Inconclusive background (mixed discriminating results):")
-                    for ag, labs in inconclusive_bg.items():
-                        st.write(f"- **Anti-{ag} inconclusive** (mixed results): " + ", ".join(labs))
-
-                if other_sig_final or other_cold_final or no_disc_bg:
-                    st.markdown("### ⚠️ Not excluded yet (background possibilities):")
-                    if other_sig_final:
-                        st.write("**Clinically significant:** " + ", ".join([f"Anti-{x}" for x in other_sig_final]))
-                    if other_cold_final:
-                        st.info("Cold/Insignificant: " + ", ".join([f"Anti-{x}" for x in other_cold_final]))
-                    if no_disc_bg:
-                        st.warning("No discriminating cells available in current panel/screen for: " +
-                                   ", ".join([f"Anti-{x}" for x in no_disc_bg]))
-
-                st.write("---")
-                st.subheader("Confirmation (Rule of Three) — Resolved & Separable only")
-
-                confirmation = {}
-                confirmed = set()
-                needs_more_for_confirmation = set()
-
-                if not resolved:
-                    st.info("No antibody is separable yet → DO NOT apply Rule of Three. Add discriminating selected cells.")
+                if not best:
+                    st.error("No resolved specificity from current data. Proceed with Selected Cells / enhancement.")
+                    conclusion_short = "No resolved specificity (needs selected cells / more work)"
+                    details = {"best_combo": None, "candidates_not_excluded": candidates}
                 else:
-                    for a in resolved:
-                        full, mod, p_cnt, n_cnt = check_rule_three_only_on_discriminating(a, best, cells)
-                        confirmation[a] = (full, mod, p_cnt, n_cnt)
-                        if full or mod:
-                            confirmed.add(a)
-                        else:
-                            needs_more_for_confirmation.add(a)
+                    sep_map = separability_map(best, cells)
+                    resolved = [a for a in best if sep_map.get(a, False)]
+                    needs_work = [a for a in best if not sep_map.get(a, False)]
 
-                    for a in resolved:
-                        full, mod, p_cnt, n_cnt = confirmation[a]
-                        if full:
-                            st.write(f"✅ **Anti-{a} CONFIRMED**: Full Rule (3+3) met on discriminating cells (P:{p_cnt} / N:{n_cnt})")
-                        elif mod:
-                            st.write(f"✅ **Anti-{a} CONFIRMED**: Modified Rule (2+3) met on discriminating cells (P:{p_cnt} / N:{n_cnt})")
-                        else:
-                            st.write(f"⚠️ **Anti-{a} NOT confirmed yet**: need more discriminating cells (P:{p_cnt} / N:{n_cnt})")
+                    if resolved:
+                        st.success("Resolved (separable): " + ", ".join([f"Anti-{a}" for a in resolved]))
+                    if needs_work:
+                        st.warning("Suggested but NOT separable yet (DO NOT confirm): " + ", ".join([f"Anti-{a}" for a in needs_work]))
 
-                if confirmed:
-                    st.markdown(patient_antigen_negative_reminder(sorted(list(confirmed)), strong=True), unsafe_allow_html=True)
-                elif resolved:
-                    st.markdown(patient_antigen_negative_reminder(sorted(list(resolved)), strong=False), unsafe_allow_html=True)
+                    # Auto rule-out summary (does NOT change the main conclusion)
+                    auto_ruled = sorted(list(rule_out(in_p, in_s, st.session_state.ext)))
+                    auto_ruled = [ag for ag in auto_ruled if ag not in best]
+                    if auto_ruled:
+                        st.markdown("**Ruled out (auto) based on nonreactive antigen-positive cells:**")
+                        for ag in auto_ruled:
+                            dc = ruleout_evidence_cells(ag, cells)
+                            if dc:
+                                st.write(f"• Anti-{ag} ruled out by: " + ", ".join(dc))
+                            else:
+                                st.write(f"• Anti-{ag} ruled out")
 
-                d_present = ("D" in confirmed) or ("D" in resolved) or ("D" in needs_work)
-                c_present = ("C" in confirmed) or ("C" in resolved) or ("C" in needs_work) or ("C" in supported_bg) or ("C" in other_sig_final)
-                if d_present and c_present:
-                    strong = ("D" in confirmed and "C" in confirmed)
-                    st.markdown(anti_g_alert_html(strong=strong), unsafe_allow_html=True)
+                    # Confirmation (rule of three) on discriminating cells
+                    st.write("---")
+                    st.subheader("Confirmation (Rule of Three) — separable only")
+                    confirmation = {}
+                    confirmed = set()
+                    needs_more_for_confirmation = set()
 
-                st.write("---")
+                    if not resolved:
+                        st.info("No antibody is separable yet → do NOT apply Rule of Three. Add discriminating selected cells.")
+                    else:
+                        for a in resolved:
+                            full, mod, p_cnt, n_cnt = check_rule_three_only_on_discriminating(a, best, cells)
+                            confirmation[a] = (full, mod, p_cnt, n_cnt)
+                            if full or mod:
+                                confirmed.add(a)
+                            else:
+                                needs_more_for_confirmation.add(a)
 
-                targets_needing_selected = list(dict.fromkeys(
-                    needs_work +
-                    list(needs_more_for_confirmation) +
-                    list(supported_bg.keys()) +
-                    other_sig_final
-                ))
+                        for a in resolved:
+                            full, mod, p_cnt, n_cnt = confirmation[a]
+                            if full:
+                                st.write(f"✅ **Anti-{a} CONFIRMED**: Full Rule (3+3) met (P:{p_cnt} / N:{n_cnt})")
+                            elif mod:
+                                st.write(f"✅ **Anti-{a} CONFIRMED**: Modified Rule (2+3) met (P:{p_cnt} / N:{n_cnt})")
+                            else:
+                                st.write(f"⚠️ **Anti-{a} NOT confirmed yet**: need more discriminating cells (P:{p_cnt} / N:{n_cnt})")
 
-                if targets_needing_selected:
-                    st.markdown("### 🧪 Selected Cells (Only if needed to resolve interference / exclude / confirm)")
-                    for a in targets_needing_selected:
-                        active_set_now = set(resolved + needs_work + other_sig_final + list(supported_bg.keys()))
+                    # Patient antigen negative reminder
+                    if confirmed:
+                        st.markdown(patient_antigen_negative_reminder(sorted(list(confirmed)), strong=True), unsafe_allow_html=True)
+                    elif resolved:
+                        st.markdown(patient_antigen_negative_reminder(sorted(list(resolved)), strong=False), unsafe_allow_html=True)
 
-                        if a in needs_work:
-                            st.warning(f"Anti-{a}: **Interference / not separable** → need {a}+ cells NEGATIVE for other active suspects.")
-                        elif a in other_sig_final:
-                            st.warning(f"Anti-{a}: **Clinically significant background NOT excluded** → need discriminating cells to exclude/confirm.")
-                        elif a in supported_bg:
-                            st.info(f"Anti-{a}: **Suggested by discriminating POSITIVE cell(s)** → requires confirmation (rule-of-three / additional discriminating cells).")
-                        else:
-                            st.info(f"Anti-{a}: **Not confirmed yet** → need more discriminating cells.")
+                    # Anti-G alert
+                    d_present = ("D" in confirmed) or ("D" in resolved) or ("D" in needs_work)
+                    c_present = ("C" in confirmed) or ("C" in resolved) or ("C" in needs_work)
+                    if d_present and c_present:
+                        strong = ("D" in confirmed and "C" in confirmed)
+                        st.markdown(anti_g_alert_html(strong=strong), unsafe_allow_html=True)
 
-                        sugg = suggest_selected_cells(a, list(active_set_now))
-                        if sugg:
-                            for lab, note in sugg[:12]:
-                                st.write(f"- {lab}  <span class='cell-hint'>{note}</span>", unsafe_allow_html=True)
-                        else:
-                            st.write("- No suitable discriminating cell in current inventory → use another lot / external selected cells.")
+                    confirmed_list = sorted(list(confirmed)) if isinstance(confirmed, set) else []
+                    if confirmed_list:
+                        conclusion_short = "Confirmed: " + ", ".join([f"Anti-{x}" for x in confirmed_list])
+                    elif resolved:
+                        conclusion_short = "Resolved (not fully confirmed): " + ", ".join([f"Anti-{x}" for x in resolved])
+                    else:
+                        conclusion_short = "Unresolved / Needs more work"
 
-                    enz = enzyme_hint_if_needed(targets_needing_selected)
-                    if enz:
-                        st.info("💡 " + enz)
-                else:
-                    st.success("No Selected Cells needed: all resolved antibodies are confirmed AND no clinically significant background remains unexcluded.")
+                    details = {
+                        "best_combo": list(best),
+                        "resolved": resolved,
+                        "needs_work": needs_work,
+                        "confirmed": confirmed_list,
+                    }
 
-                confirmed_list = sorted(list(confirmed)) if isinstance(confirmed, set) else []
-                resolved_list = resolved if isinstance(resolved, list) else []
-                needs_work_list = needs_work if isinstance(needs_work, list) else []
-                supported_list = sorted(list(supported_bg.keys())) if isinstance(supported_bg, dict) else []
+        st.text_area("📝 Antibody ID Comment", key="abid_comment", height=80)
 
-                if confirmed_list:
-                    conclusion_short = "Confirmed: " + ", ".join([f"Anti-{x}" for x in confirmed_list])
-                elif resolved_list:
-                    conclusion_short = "Resolved (not fully confirmed): " + ", ".join([f"Anti-{x}" for x in resolved_list])
-                else:
-                    conclusion_short = "Unresolved / Needs more work"
+        # Selected cells (kept inside ABID for workflow clarity)
+        with st.expander("➕ Add Selected Cell (From Library)"):
+            ex_id = st.text_input("ID", key="ex_id")
+            ex_res = st.selectbox("Reaction", GRADES, key="ex_res")
+            ag_cols = st.columns(6)
+            new_ph = {}
+            for i, ag in enumerate(AGS):
+                new_ph[ag] = 1 if ag_cols[i%6].checkbox(ag, key=f"ex_{ag}") else 0
 
-                details = {
-                    "best_combo": list(best),
-                    "resolved": resolved_list,
-                    "needs_work": needs_work_list,
-                    "confirmed": confirmed_list,
-                    "supported_bg": supported_list,
-                    "not_excluded_sig": other_sig_final if isinstance(other_sig_final, list) else [],
-                    "not_excluded_cold": other_cold_final if isinstance(other_cold_final, list) else [],
-                    "no_discriminating": no_disc_bg if isinstance(no_disc_bg, list) else []
-                }
+            if st.button("Confirm Add", key="btn_add_ex"):
+                st.session_state.ext.append({"id": ex_id.strip() if ex_id else "", "res": normalize_grade(ex_res), "ph": new_ph})
+                st.success("Added! Re-run Analysis.")
+                st.session_state.abid_pending_confirm = False
+                st.session_state.abid_confirmed = False
 
-    # ----------------------------------------------------------------------
-    # Selected cells expander (unchanged)
-    # ----------------------------------------------------------------------
-    with st.expander("➕ Add Selected Cell (From Library)"):
-        ex_id = st.text_input("ID", key="ex_id")
-        ex_res = st.selectbox("Reaction", GRADES, key="ex_res")
-        ag_cols = st.columns(6)
-        new_ph = {}
-        for i, ag in enumerate(AGS):
-            new_ph[ag] = 1 if ag_cols[i%6].checkbox(ag, key=f"ex_{ag}") else 0
+        if st.session_state.ext:
+            st.table(pd.DataFrame(st.session_state.ext)[["id", "res"]])
 
-        if st.button("Confirm Add", key="btn_add_ex"):
-            st.session_state.ext.append({"id": ex_id.strip() if ex_id else "", "res": normalize_grade(ex_res), "ph": new_ph})
-            st.success("Added! Re-run Analysis.")
+    # =============================
+    # REPORT / SAVE
+    # =============================
+    if st.session_state.ws_section == "REPORT":
+        st.subheader("📄 Report / Save (Final)")
 
-    if st.session_state.ext:
-        st.table(pd.DataFrame(st.session_state.ext)[["id","res"]])
+        st.text_area("📝 Case Comment (always saved)", key="case_comment", height=90)
 
-    # ----------------------------------------------------------------------
-    # SINGLE SAVE (saves everything: demographics + ABO + phenotype + antibody ID)
-    # ----------------------------------------------------------------------
-    st.write("---")
-    if st.button("💾 Save Full Case (ABO + Phenotype + Antibody ID)", type="primary", use_container_width=True):
-        if not st.session_state.lot_p or not st.session_state.lot_s:
-            st.error("⛔ Lots not configured by Supervisor.")
-        else:
-            pt_name = _safe_str(st.session_state.get("pt_name",""))
-            pt_mrn  = _safe_str(st.session_state.get("pt_mrn",""))
-            tech_nm = _safe_str(st.session_state.get("tech_nm",""))
-            sex = _safe_str(st.session_state.get("pt_sex",""))
-            run_dt_val = st.session_state.get("run_dt", date.today())
+        # ABO status
+        st.markdown(f"""
+        <div class='report-card'>
+          <div class='report-title'>Draft Summary</div>
+          <div class='report-sub'>This screen shows what will be saved. Confirmations are enforced.</div>
+          <div class='kv'><b>ABO</b>: {abo_interp['abo_final']} &nbsp;|&nbsp; <b>RhD</b>: {abo_interp['rhd_final']}<br>
+          <b>ABO Confirmed</b>: {'Yes' if st.session_state.abo_confirmed else 'No'} &nbsp;|&nbsp;
+          <b>Discrepancy Workup Confirmed</b>: {'Yes' if st.session_state.abo_workup_confirmed else 'No'}</div>
+        </div>
+        """, unsafe_allow_html=True)
 
-            # Must have MRN for GitHub history folders (recommended)
-            if not pt_mrn:
-                st.error("Please enter MRN before saving (required for history).")
+        # Antibody ID status
+        abid_status = "Not run"
+        if st.session_state.analysis_payload:
+            abid_status = "Confirmed" if st.session_state.abid_confirmed else "Not confirmed"
+        st.markdown(f"<div class='kv'><b>Antibody ID status</b>: {abid_status}</div>", unsafe_allow_html=True)
+
+        # Save
+        st.write("---")
+        if st.button("💾 Save Full Case (ABO + Phenotype + Antibody ID)", type="primary", use_container_width=True):
+            if not st.session_state.lot_p or not st.session_state.lot_s:
+                st.error("⛔ Lots not configured by Supervisor.")
             else:
-                # in_p/in_s may not exist if user didn't run analysis; handle gracefully
-                in_p = {}
-                in_s = {}
-                ac_res_sv = _safe_str(st.session_state.get("rx_ac",""))
-                recent_tx_sv = bool(st.session_state.get("recent_tx", False))
-                if st.session_state.analysis_payload:
-                    in_p = st.session_state.analysis_payload.get("in_p", {})
-                    in_s = st.session_state.analysis_payload.get("in_s", {})
-                    ac_res_sv = st.session_state.analysis_payload.get("ac_res", ac_res_sv)
-                    recent_tx_sv = bool(st.session_state.analysis_payload.get("recent_tx", recent_tx_sv))
+                pt_name = _safe_str(st.session_state.get("pt_name",""))
+                pt_mrn  = _safe_str(st.session_state.get("pt_mrn",""))
+                tech_nm = _safe_str(st.session_state.get("tech_nm",""))
+                sex = _safe_str(st.session_state.get("pt_sex",""))
+                run_dt_val = st.session_state.get("run_dt", date.today())
 
-                # phenotype results
-                ph = collect_phenotype_results()
+                if not pt_mrn:
+                    st.error("Please enter MRN before saving (required for history).")
+                elif not st.session_state.abo_confirmed:
+                    st.error("ABO/RhD is not confirmed. Go to ABO section and click Confirm.")
+                elif abo_interp["discrepancy"] and (not st.session_state.abo_workup_confirmed):
+                    st.error("ABO discrepancy detected. You must proceed to discrepancy workup and document checklist before saving.")
+                elif st.session_state.analysis_payload and (not st.session_state.abid_confirmed):
+                    st.error("Antibody ID analysis is not confirmed. Go to Screen & ID and click Confirm generate conclusion.")
+                else:
+                    # in_p/in_s may not exist if user didn't run analysis; handle gracefully
+                    in_p = {}
+                    in_s = {}
+                    ac_res_sv = _safe_str(st.session_state.get("rx_ac",""))
+                    recent_tx_sv = bool(st.session_state.get("recent_tx", False))
+                    if st.session_state.analysis_payload:
+                        in_p = st.session_state.analysis_payload.get("in_p", {})
+                        in_s = st.session_state.analysis_payload.get("in_s", {})
+                        ac_res_sv = st.session_state.analysis_payload.get("ac_res", ac_res_sv)
+                        recent_tx_sv = bool(st.session_state.analysis_payload.get("recent_tx", recent_tx_sv))
 
-                # conflict notes (if antibodies exist)
-                suspected_abs = []
-                if isinstance(details, dict):
-                    suspected_abs = list(dict.fromkeys((_as_list(details.get("confirmed", [])) + _as_list(details.get("resolved", [])))))
-                conflicts = phenotype_conflict_notes(suspected_abs, ph)
-                if conflicts:
-                    st.markdown(
-                        "<div class='clinical-danger'><b>Phenotype vs Antibody conflict</b><ul style='margin-top:6px;'>" +
-                        "".join([f"<li>{c}</li>" for c in conflicts]) +
-                        "</ul></div>",
-                        unsafe_allow_html=True
-                    )
+                    # phenotype results
+                    ph = collect_phenotype_results()
 
-                saved_at = _now_ts()
-                case_id = f"{pt_mrn}_{saved_at}".replace(" ", "_").replace(":", "-")
+                    saved_at = _now_ts()
+                    case_id = f"{pt_mrn}_{saved_at}".replace(" ", "_").replace(":", "-")
 
-                payload = {
-                    "patient": {"name": pt_name, "mrn": pt_mrn},
-                    "demographics": {"sex": sex, "age_y": age_y, "age_m": age_m, "age_d": age_d},
-                    "tech": tech_nm,
-                    "run_dt": str(run_dt_val),
-                    "saved_at": saved_at,
-                    "lots": {"panel": st.session_state.lot_p, "screen": st.session_state.lot_s},
-                    "abo": {
-                        "raw": abo_raw,
+                    payload = {
+                        "patient": {"name": pt_name, "mrn": pt_mrn},
+                        "demographics": {"sex": sex, "age_y": age_y, "age_m": age_m, "age_d": age_d},
+                        "tech": tech_nm,
+                        "run_dt": str(run_dt_val),
+                        "saved_at": saved_at,
+                        "lots": {"panel": st.session_state.lot_p, "screen": st.session_state.lot_s},
+                        "case_comment": _safe_str(st.session_state.get("case_comment","")),
+                        "section_comments": {
+                            "abo": _safe_str(st.session_state.get("abo_comment","")),
+                            "phenotype": _safe_str(st.session_state.get("pheno_comment","")),
+                            "abid": _safe_str(st.session_state.get("abid_comment","")),
+                        },
+                        "abo": {
+                            "raw": abo_raw,
+                            "abo_final": abo_interp["abo_final"],
+                            "rhd_final": abo_interp["rhd_final"],
+                            "discrepancy": bool(abo_interp["discrepancy"]),
+                            "invalid": bool(abo_interp["invalid"]),
+                            "notes": abo_interp["notes"],
+                            "confirmed": bool(st.session_state.abo_confirmed),
+                            "workup_confirmed": bool(st.session_state.abo_workup_confirmed),
+                        },
+                        "phenotype": {"results": ph},
+                        "inputs": {
+                            "panel_reactions": in_p,
+                            "screen_reactions": in_s,
+                            "AC": ac_res_sv,
+                            "recent_tx": bool(recent_tx_sv),
+                        },
+                        "all_rx": bool(all_rx),
+                        "dat": {"igg": _safe_str(dat_igg), "c3d": _safe_str(dat_c3d), "control": _safe_str(dat_ctl)},
+                        "selected_cells": st.session_state.ext,
+                        "interpretation": details or {},
+                        "conclusion_short": conclusion_short
+                    }
+
+                    # fingerprint excludes saved_at/case_id (for duplicate detection)
+                    fp_obj = {
+                        "mrn": pt_mrn,
+                        "run_dt": str(run_dt_val),
+                        "lots": payload["lots"],
+                        "abo": payload["abo"],
+                        "phenotype": payload["phenotype"],
+                        "inputs": payload["inputs"],
+                        "all_rx": payload["all_rx"],
+                        "dat": payload["dat"],
+                        "selected_cells": payload["selected_cells"],
+                        "interpretation": payload["interpretation"],
+                        "conclusion_short": _safe_str(conclusion_short),
+                        "case_comment": payload["case_comment"],
+                        "section_comments": payload["section_comments"],
+                    }
+                    fingerprint = _make_fingerprint(fp_obj)
+
+                    record = {
+                        "case_id": case_id,
+                        "saved_at": saved_at,
+                        "mrn": pt_mrn,
+                        "name": pt_name,
+                        "tech": tech_nm,
+                        "sex": sex,
+                        "age_y": age_y,
+                        "age_m": age_m,
+                        "age_d": age_d,
+                        "run_dt": str(run_dt_val),
+                        "lot_p": st.session_state.lot_p,
+                        "lot_s": st.session_state.lot_s,
+                        "ac_res": ac_res_sv,
+                        "recent_tx": bool(recent_tx_sv),
+                        "all_rx": bool(all_rx),
+                        "conclusion_short": conclusion_short,
                         "abo_final": abo_interp["abo_final"],
                         "rhd_final": abo_interp["rhd_final"],
-                        "discrepancy": bool(abo_interp["discrepancy"]),
-                        "invalid": bool(abo_interp["invalid"]),
-                        "notes": abo_interp["notes"],
-                    },
-                    "phenotype": {
-                        "results": ph
-                    },
-                    "inputs": {
-                        "panel_reactions": in_p,
-                        "screen_reactions": in_s,
-                        "AC": ac_res_sv,
-                        "recent_tx": bool(recent_tx_sv),
-                    },
-                    "all_rx": bool(all_rx),
-                    "dat": {"igg": _safe_str(dat_igg), "c3d": _safe_str(dat_c3d), "control": _safe_str(dat_ctl)},
-                    "selected_cells": st.session_state.ext,
-                    "interpretation": details or {},
-                    "conclusion_short": conclusion_short
-                }
+                        "abo_discrepancy": bool(abo_interp["discrepancy"]),
+                        "fingerprint": fingerprint,
+                        "summary_json": json.dumps(payload, ensure_ascii=False)
+                    }
 
-                # fingerprint excludes saved_at/case_id (for duplicate detection)
-                fp_obj = {
-                    "mrn": pt_mrn,
-                    "run_dt": str(run_dt_val),
-                    "lots": {"panel": st.session_state.lot_p, "screen": st.session_state.lot_s},
-                    "abo": payload["abo"],
-                    "phenotype": payload["phenotype"],
-                    "inputs": payload["inputs"],
-                    "all_rx": payload["all_rx"],
-                    "dat": payload["dat"],
-                    "selected_cells": payload["selected_cells"],
-                    "interpretation": payload["interpretation"],
-                    "conclusion_short": _safe_str(conclusion_short),
-                }
-                fingerprint = _make_fingerprint(fp_obj)
-
-                record = {
-                    "case_id": case_id,
-                    "saved_at": saved_at,
-                    "mrn": pt_mrn,
-                    "name": pt_name,
-                    "tech": tech_nm,
-                    "sex": sex,
-                    "age_y": age_y,
-                    "age_m": age_m,
-                    "age_d": age_d,
-                    "run_dt": str(run_dt_val),
-                    "lot_p": st.session_state.lot_p,
-                    "lot_s": st.session_state.lot_s,
-                    "ac_res": ac_res_sv,
-                    "recent_tx": bool(recent_tx_sv),
-                    "all_rx": bool(all_rx),
-                    "conclusion_short": conclusion_short,
-                    "abo_final": abo_interp["abo_final"],
-                    "rhd_final": abo_interp["rhd_final"],
-                    "abo_discrepancy": bool(abo_interp["discrepancy"]),
-                    "fingerprint": fingerprint,
-                    "summary_json": json.dumps(payload, ensure_ascii=False)
-                }
-
-                ok, msg = save_case_to_github(record)
-                if ok:
-                    st.success("Saved ✅ (GitHub history updated)")
-                else:
-                    st.warning("⚠️ " + msg)
+                    ok, msg = save_case_to_github(record)
+                    if ok:
+                        st.success("Saved ✅ (GitHub history updated)")
+                    else:
+                        st.warning("⚠️ " + msg)
