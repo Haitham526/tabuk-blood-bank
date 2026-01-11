@@ -760,7 +760,12 @@ def interpret_abo_rhd(
         antiB = _safe_str(raw.get("antiB","Not Done"))
         abo_guess = _abo_from_forward_only(antiA, antiB)
 
-        # Flag weak/mixed-field forward as discrepancy but still provide most probable ABO
+        # Flag mixed-field forward as discrepancy but still provide most probable ABO
+        if antiA == "Mixed-field" or antiB == "Mixed-field":
+            discrepancy = True
+            notes.append("Mixed-field forward reactions detected. Correlate with clinical history (e.g., transfusion, sample issues) and repeat testing per policy.")
+
+        # Flag weak forward as discrepancy but still provide most probable ABO
         if antiA in ("+1","+2") or antiB in ("+1","+2"):
             discrepancy = True
             notes.append("Weak/mixed-field A/B reactions can occur in neonates; report as 'most probable' and plan confirmation at 6 months (or per local policy).")
@@ -826,6 +831,7 @@ def interpret_abo_rhd(
 
         # Mixed-field -> transfusion / transplant
         if antiA == "Mixed-field" or antiB == "Mixed-field" or rev_a1 == "Mixed-field" or rev_b == "Mixed-field":
+            discrepancy = True
             notes.append("Mixed-field pattern: consider recent transfusion, stem cell transplant/chimerism, or sample issue. For transfused patients, confirm ABO ≥3 months after last transfusion (or per policy).")
 
         abo_final = fwd_abo if fwd_abo else "Unknown"
@@ -1091,6 +1097,101 @@ def build_abo_guidance(
 
     return {"general": general, "specific": specific}
 
+
+
+def build_how_to_report(
+    is_neonate: bool,
+    abo_interp: Dict[str, Any],
+    raw: Dict[str, str],
+    screen_any_positive: bool,
+    mixed_field_history: Dict[str, bool] | None = None
+) -> str:
+    """Return an English copy/paste comment for the HIS/EMR based on the current pattern."""
+    lines: list[str] = []
+    mixed_field_history = mixed_field_history or {}
+    recent_tx = bool(mixed_field_history.get("recent_tx"))
+    hsct_bm = bool(mixed_field_history.get("hsct_bm"))
+
+    # RhD inconclusive / weak D suspected
+    rhd_final = _safe_str(abo_interp.get("rhd_final",""))
+    if rhd_final.startswith("RhD Inconclusive"):
+        lines.append(
+            "RhD typing is inconclusive / Weak D suspected. A partial/weak D phenotype cannot be excluded. "
+            "RHD molecular testing is required for definitive confirmation and is not available at our facility. "
+            "Until resolved, manage the patient as RhD negative for transfusion purposes (issue RhD-negative RBC units when clinically indicated). "
+            "For Rh immune globulin (RhIG) eligibility, manage as RhD negative per policy until confirmatory testing is available."
+        )
+
+    # Neonate administrative reporting for weak forward antigens
+    if is_neonate:
+        antiA = _safe_str(raw.get("antiA","Not Done"))
+        antiB = _safe_str(raw.get("antiB","Not Done"))
+        if antiA in ("+1","+2","Mixed-field") or antiB in ("+1","+2","Mixed-field"):
+            abo_guess = _safe_str(abo_interp.get("abo_final",""))
+            # Ensure we don't echo "(Discrepancy)" in admin line
+            abo_guess_clean = abo_guess.replace("(Discrepancy)","").strip()
+            if not abo_guess_clean:
+                abo_guess_clean = "Unknown"
+            lines.append(
+                f"Neonatal ABO grouping: the current pattern suggests the patient is most likely {abo_guess_clean}; "
+                "however the result is not definitive due to weak/mixed-field antigen expression. "
+                "This interpretation is for administrative purposes only and must be reconfirmed at ≥6 months of age (or per local policy). "
+                "Transfusion guidance until confirmed: issue Group O RBCs and Group AB plasma/platelets."
+            )
+
+    # Mixed-field reporting (adult/child or neonate)
+    antiA = _safe_str(raw.get("antiA","Not Done"))
+    antiB = _safe_str(raw.get("antiB","Not Done"))
+    rev_a1 = _safe_str(raw.get("a1cells","Not Done"))
+    rev_b  = _safe_str(raw.get("bcells","Not Done"))
+    mixed_field_present = "Mixed-field" in (antiA, antiB, rev_a1, rev_b)
+
+    if mixed_field_present:
+        if recent_tx:
+            lines.append(
+                "Mixed-field pattern detected on ABO grouping. This is most consistent with recent transfusion, "
+                "particularly Group O RBC transfusion to a non-O patient, resulting in mixed red cell populations. "
+                "Correlate with transfusion history and prior documented blood group. Do not finalize ABO as confirmed based on the current specimen alone; "
+                "repeat grouping on a new specimen as clinically appropriate and follow facility policy for interim transfusion management."
+            )
+        elif hsct_bm:
+            lines.append(
+                "Mixed-field pattern detected on ABO grouping. In the context of hematopoietic stem cell / bone marrow transplantation, "
+                "this may represent post-transplant chimerism (donor/recipient mixed populations). "
+                "Correlate with transplant timeline and historical ABO records (pre- and post-transplant). "
+                "Do not finalize ABO as confirmed based on this specimen alone; manage per transplant transfusion policy and specialist guidance."
+            )
+        else:
+            lines.append(
+                "Mixed-field pattern detected on ABO grouping. Correlate with clinical history (recent transfusion, hematopoietic stem cell/BM transplant, "
+                "A3 subgroup, or chimerism) and prior records. Do not finalize ABO as confirmed based on this specimen alone; repeat testing per policy."
+            )
+
+    # Reverse weak/missing antibodies (adult/child)
+    if (not is_neonate) and "ABO DISCREPANCY" in " ".join([_safe_str(x) for x in abo_interp.get("notes", [])]):
+        # Only add if not already covered by mixed-field / RhD comment
+        if any("Reverse grouping is weaker" in _safe_str(n) for n in abo_interp.get("notes", [])):
+            lines.append(
+                "ABO discrepancy (reverse grouping): weak/missing expected antibodies. Forward grouping suggests the listed ABO type, "
+                "however reverse reactions are weaker than expected/absent and the ABO group cannot be confirmed at this stage. "
+                "Perform discrepancy resolution per protocol and do not finalize ABO as confirmed until resolved."
+            )
+
+    # Unexpected reverse with A1 cells + screen linkage
+    if (not is_neonate) and any("Anti-A1" in _safe_str(n) or "unexpected reverse" in _safe_str(n).lower() for n in abo_interp.get("notes", [])):
+        if screen_any_positive:
+            lines.append(
+                "Unexpected reverse reaction noted (A1 cells reactive). Antibody screen is POSITIVE, which may account for the unexpected reverse reactivity "
+                "(e.g., cold-reactive allo/autoantibody and/or rouleaux). Proceed with interference resolution per SOP (e.g., saline replacement and/or pre-warming technique) "
+                "and interpret ABO only after resolution."
+            )
+        else:
+            lines.append(
+                "Unexpected reverse reaction noted (A1 cells reactive) with NEGATIVE antibody screen. This pattern may suggest Anti-A1 in an A subgroup (e.g., A2/A2B). "
+                "Recommend confirmatory testing (Anti-A1 lectin and serum testing with A2 cells) per SOP."
+            )
+
+    return "\n\n".join([l for l in lines if l]).strip()
 def _phenotype_get_antigen_state(ph: Dict[str, str], ag: str) -> str:
     return _safe_str(ph.get(ag, "Not Done"))
 
@@ -1677,6 +1778,7 @@ else:
             st.session_state.abo_raw_confirmed = None
             st.session_state.abo_interp_confirmed = None
             st.session_state.abo_guidance_confirmed = None
+            st.session_state.abo_screen_any_positive = False
 
         if confirm_abo:
             # Basic completeness checks
@@ -1705,12 +1807,15 @@ else:
                     "ctl": _safe_str(st.session_state.get("dat_ctl","Not Done")),
                 }
 
+                screen_any_pos = any(_is_pos_any(g) for g in screen_grades.values() if _safe_str(g) not in ("Not Done",""))
+                st.session_state.abo_screen_any_positive = bool(screen_any_pos)
+
                 # Interpret (ABO/RhD)
                 abo_interp_tmp = interpret_abo_rhd(
                     is_neonate=abo_is_neonate,
                     purpose=("RhIG" if _safe_str(abo_raw_current.get("purpose","Transfusion")) == "RhIG" else "Transfusion"),
                     raw=abo_raw_current,
-                    screen_any_positive=any(_is_pos_any(g) for g in screen_grades.values() if _safe_str(g) not in ("Not Done",""))
+                    screen_any_positive=bool(screen_any_pos)
                 )
                 guidance_tmp = build_abo_guidance(
                     is_neonate=abo_is_neonate,
@@ -1760,6 +1865,36 @@ else:
                         )
                 else:
                     st.info("No specific rule was triggered by the current pattern. Continue with clerical/technical checks and clinical history.")
+                # Mixed-field history prompts (used for smarter reporting)
+                mf_present = "Mixed-field" in (
+                    _safe_str(st.session_state.get("abo_antiA","")),
+                    _safe_str(st.session_state.get("abo_antiB","")),
+                    _safe_str(st.session_state.get("abo_a1cells","")),
+                    _safe_str(st.session_state.get("abo_bcells",""))
+                )
+                colh1, colh2 = st.columns(2)
+                with colh1:
+                    st.checkbox("History: recent transfusion?", key="abo_recent_tx", value=bool(st.session_state.get("abo_recent_tx", False)), disabled=not mf_present)
+                with colh2:
+                    st.checkbox("History: HSCT / BM transplant?", key="abo_hsct_bm", value=bool(st.session_state.get("abo_hsct_bm", False)), disabled=not mf_present)
+
+                # How to report (copy/paste into HIS/EMR)
+                report_text = build_how_to_report(
+                    is_neonate=is_neonate,
+                    abo_interp=abo_interp,
+                    raw={
+                        "antiA": st.session_state.get("abo_antiA","Not Done"),
+                        "antiB": st.session_state.get("abo_antiB","Not Done"),
+                        "a1cells": st.session_state.get("abo_a1cells","Not Done"),
+                        "bcells": st.session_state.get("abo_bcells","Not Done"),
+                    },
+                    screen_any_positive=bool(st.session_state.get("abo_screen_any_positive", False)),
+                    mixed_field_history={"recent_tx": bool(st.session_state.get("abo_recent_tx", False)), "hsct_bm": bool(st.session_state.get("abo_hsct_bm", False))}
+                )
+                if report_text:
+                    st.markdown("<div class='clinical-alert'><b>How to report (copy/paste):</b></div>", unsafe_allow_html=True)
+                    st.code(report_text, language="text")
+
 
                 # Manual confirmation + comment (saved with the case)
                 st.checkbox("Manual confirmation completed (documented)", value=bool(st.session_state.get("abo_manual_confirm", False)), key="abo_manual_confirm")
