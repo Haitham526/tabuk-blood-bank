@@ -1315,7 +1315,7 @@ else:
     age_y = int(st.session_state.get("age_y", 0) or 0)
     age_m = int(st.session_state.get("age_m", 0) or 0)
     age_d = int(st.session_state.get("age_d", 0) or 0)
-    is_neonate_by_age = _age_is_neonate_by_age(age_y, age_m, age_d)
+    is_neonate = _age_is_neonate(age_y, age_m, age_d)
 
     # ----------------------------------------------------------------------
     # HISTORY LOOKUP (GitHub; MRN-based)
@@ -1358,175 +1358,60 @@ else:
     # ABO / RhD / DAT section (collapsed, opens when discrepancy)
     # ----------------------------------------------------------------------
     with st.expander("🧾 ABO / RhD / DAT (Enter by grade)", expanded=False):
+        if is_neonate:
+            st.markdown("""
+            <div class='clinical-info'>
+            👶 <b>Neonate mode (&lt; 4 months)</b>: Reverse grouping is typically unreliable.<br>
+            If purpose is <b>RhIG eligibility</b> → use <b>DVI+</b>. If purpose is <b>Transfusion</b> → use <b>DVI−</b> (per your policy).
+            </div>
+            """, unsafe_allow_html=True)
 
-        # ------------------------------------------------------------------
-        # Smarter card selection (avoid defaulting to newborn when age not entered)
-        # ------------------------------------------------------------------
-        def _invalidate_abo_confirm():
-            st.session_state.abo_confirmed = False
+            purpose = st.radio("Purpose", ["Transfusion", "RhIG"], horizontal=True, key="abo_purpose")
+            c1, c2, c3, c4, c5 = st.columns(5)
+            antiA = c1.selectbox("Anti-A", ABO_GRADES, key="abo_neonate_antiA")
+            antiB = c2.selectbox("Anti-B", ABO_GRADES, key="abo_neonate_antiB")
+            antiAB = c3.selectbox("Anti-AB", ABO_GRADES, key="abo_neonate_antiAB")
+            antiD = c4.selectbox("Anti-D", ABO_GRADES, key="abo_neonate_antiD")
+            ctl  = c5.selectbox("Control", ABO_GRADES, key="abo_neonate_ctl")
+            datg = st.selectbox("DAT (grade or Not Done)", ABO_GRADES, key="abo_neonate_dat")
 
-        if "abo_confirmed" not in st.session_state:
-            st.session_state.abo_confirmed = False
-        if "abo_raw_confirmed" not in st.session_state:
-            st.session_state.abo_raw_confirmed = None
-        if "abo_is_neonate_confirmed" not in st.session_state:
-            st.session_state.abo_is_neonate_confirmed = None
-        if "abo_purpose_confirmed" not in st.session_state:
-            st.session_state.abo_purpose_confirmed = "Transfusion"
-        if "abo_confirmed_at" not in st.session_state:
-            st.session_state.abo_confirmed_at = ""
-
-        # Set default card selection once (based on age if provided; otherwise Adult)
-        if "abo_card_mode" not in st.session_state:
-            if (age_y or age_m or age_d):
-                st.session_state.abo_card_mode = "Newborn/Neonate (< 4 months)" if is_neonate_by_age else "Adult/Child (≥ 4 months)"
-            else:
-                st.session_state.abo_card_mode = "Adult/Child (≥ 4 months)"
-
-        st.caption("⚠️ Enter the ABO/RhD/DAT grades, then click **Confirm** to calculate the result and discrepancy guidance.")
-        card_mode = st.radio(
-            "Card selection",
-            ["Adult/Child (≥ 4 months)", "Newborn/Neonate (< 4 months)"],
-            horizontal=True,
-            key="abo_card_mode",
-            on_change=_invalidate_abo_confirm
-        )
-        abo_is_neonate_ui = (card_mode.startswith("Newborn"))
-
-        # ------------------------------------------------------------------
-        # Data entry (confirmation-gated)
-        # ------------------------------------------------------------------
-        with st.form("abo_form"):
-            if abo_is_neonate_ui:
-                st.markdown("""
-                <div class='clinical-info'>
-                👶 <b>Neonate mode (&lt; 4 months)</b>: Reverse grouping is typically unreliable.<br>
-                If purpose is <b>RhIG eligibility</b> → use <b>DVI+</b> (per your policy).<br>
-                If purpose is <b>Transfusion</b> → use <b>DVI−</b> (per your policy).
-                </div>
-                """, unsafe_allow_html=True)
-
-                purpose = st.radio("Purpose", ["Transfusion", "RhIG"], horizontal=True, key="abo_purpose", on_change=_invalidate_abo_confirm)
-                c1, c2, c3, c4, c5 = st.columns(5)
-                antiA  = c1.selectbox("Anti-A",  ABO_GRADES, key="abo_neonate_antiA")
-                antiB  = c2.selectbox("Anti-B",  ABO_GRADES, key="abo_neonate_antiB")
-                antiAB = c3.selectbox("Anti-AB", ABO_GRADES, key="abo_neonate_antiAB")
-                antiD  = c4.selectbox("Anti-D",  ABO_GRADES, key="abo_neonate_antiD")
-                ctl    = c5.selectbox("Control", ABO_GRADES, key="abo_neonate_ctl")
-
-                datg = st.selectbox("DAT (optional)", ABO_GRADES, key="abo_neonate_dat")
-                abo_raw_local = {
-                    "mode": "neonate",
-                    "antiA": antiA,
-                    "antiB": antiB,
-                    "antiAB": antiAB,
-                    "antiD": antiD,
-                    "ctl": ctl,
-                    "dat": datg
-                }
-                purpose_local = purpose
-
-            else:
-                st.markdown("""
-                <div class='clinical-info'>
-                👤 <b>Adult/Child mode (≥ 4 months)</b>: Forward + Reverse grouping are required per your policy.
-                </div>
-                """, unsafe_allow_html=True)
-
-                c1, c2, c3, c4 = st.columns(4)
-                antiA = c1.selectbox("Anti-A", ABO_GRADES, key="abo_adult_antiA")
-                antiB = c2.selectbox("Anti-B", ABO_GRADES, key="abo_adult_antiB")
-                antiD = c3.selectbox("Anti-D (DVI−)", ABO_GRADES, key="abo_adult_antiD")
-                ctl   = c4.selectbox("Control", ABO_GRADES, key="abo_adult_ctl")
-
-                r1, r2 = st.columns(2)
-                a1cells = r1.selectbox("A1 cells", ABO_GRADES, key="abo_adult_a1")
-                bcells  = r2.selectbox("B cells",  ABO_GRADES, key="abo_adult_b")
-
-                abo_raw_local = {
-                    "mode": "adult",
-                    "antiA": antiA,
-                    "antiB": antiB,
-                    "antiD": antiD,
-                    "ctl": ctl,
-                    "a1cells": a1cells,
-                    "bcells": bcells
-                }
-                purpose_local = "Transfusion"
-
-            abo_confirm_btn = st.form_submit_button("✅ Confirm ABO results", use_container_width=True)
-
-        # Persist a stable, confirmed snapshot (this is what drives conclusions + saving)
-        if abo_confirm_btn:
-            # Basic completeness check (prevents "instant discrepancy" before real entry)
-            if abo_is_neonate_ui:
-                required = {"antiA": antiA, "antiB": antiB, "antiD": antiD, "ctl": ctl}
-            else:
-                required = {"antiA": antiA, "antiB": antiB, "antiD": antiD, "ctl": ctl, "a1cells": a1cells, "bcells": bcells}
-
-            missing = [k for k,v in required.items() if _safe_str(v) in ("Not Done", "")]
-            if missing:
-                st.error("⛔ Please complete the required ABO fields before confirming: " + ", ".join(missing))
-                st.session_state.abo_confirmed = False
-                st.session_state.abo_raw_confirmed = None
-                st.session_state.abo_is_neonate_confirmed = None
-                st.session_state.abo_confirmed_at = ""
-            else:
-                st.session_state.abo_confirmed = True
-                st.session_state.abo_raw_confirmed = abo_raw_local
-                st.session_state.abo_is_neonate_confirmed = bool(abo_is_neonate_ui)
-                st.session_state.abo_purpose_confirmed = purpose_local
-                st.session_state.abo_confirmed_at = _now_ts()
-        # Expose abo_raw for the rest of the app (use confirmed snapshot when available)
-        abo_raw = st.session_state.abo_raw_confirmed or abo_raw_local
-
-        # ------------------------------------------------------------------
-        # Show conclusion / discrepancy ONLY after confirm
-        # ------------------------------------------------------------------
-        if st.session_state.abo_confirmed and st.session_state.abo_raw_confirmed:
-            screen_any_positive = any(
-                _safe_str(st.session_state.get(k, "0")) not in ("0", "Not Done", "")
-                for k in ["rx_sI", "rx_sII", "rx_sIII"]
-            )
-
-            abo_interp = interpret_abo_rhd(
-                is_neonate=bool(st.session_state.abo_is_neonate_confirmed),
-                purpose=("RhIG" if (bool(st.session_state.abo_is_neonate_confirmed) and st.session_state.abo_purpose_confirmed == "RhIG") else "Transfusion"),
-                raw=st.session_state.abo_raw_confirmed,
-                screen_any_positive=screen_any_positive
-            )
-
-            if abo_interp["discrepancy"]:
-                st.markdown(f"""
-                <div class='clinical-danger'>
-                ⚠️ <b>ABO DISCREPANCY / SPECIAL SITUATION</b><br>
-                Confirmed result: <b>ABO: {abo_interp['abo_final']}</b> | <b>RhD: {abo_interp['rhd_final']}</b><br>
-                <span style='font-size:12px; opacity:0.85;'>Confirmed at: {st.session_state.abo_confirmed_at}</span>
-                </div>
-                """, unsafe_allow_html=True)
-
-                st.markdown(
-                    "<div class='clinical-alert'><b>How to report the result?</b><ul style='margin-top:6px;'>" +
-                    "".join([f"<li>{_safe_str(n)}</li>" for n in abo_interp["notes"]]) +
-                    "</ul></div>",
-                    unsafe_allow_html=True
-                )
-            else:
-                st.markdown(f"""
-                <div class='clinical-info'>
-                ✅ <b>ABO/RhD result is consistent</b>: <b>ABO: {abo_interp['abo_final']}</b> | <b>RhD: {abo_interp['rhd_final']}</b><br>
-                <span style='font-size:12px; opacity:0.85;'>Confirmed at: {st.session_state.abo_confirmed_at}</span>
-                </div>
-                """, unsafe_allow_html=True)
-        else:
-            # Not confirmed yet → do NOT compute discrepancy/conclusion
-            abo_interp = {
-                "abo_final": "",
-                "rhd_final": "",
-                "discrepancy": False,
-                "invalid": False,
-                "notes": []
+            abo_raw = {
+                "mode": "neonate",
+                "purpose": "RhIG" if purpose == "RhIG" else "Transfusion",
+                "antiA": antiA,
+                "antiB": antiB,
+                "antiAB": antiAB,
+                "antiD": antiD,
+                "ctl": ctl,
+                "dat": datg
             }
+        else:
+            st.markdown("""
+            <div class='clinical-info'>
+            👤 <b>Adult/Child mode (≥ 4 months)</b>: Forward + Reverse grouping are required per your policy.
+            </div>
+            """, unsafe_allow_html=True)
+
+            c1, c2, c3, c4 = st.columns(4)
+            antiA = c1.selectbox("Anti-A", ABO_GRADES, key="abo_adult_antiA")
+            antiB = c2.selectbox("Anti-B", ABO_GRADES, key="abo_adult_antiB")
+            antiD = c3.selectbox("Anti-D (DVI−)", ABO_GRADES, key="abo_adult_antiD")
+            ctl   = c4.selectbox("Control", ABO_GRADES, key="abo_adult_ctl")
+
+            r1, r2 = st.columns(2)
+            a1cells = r1.selectbox("A1 cells", ABO_GRADES, key="abo_adult_a1")
+            bcells  = r2.selectbox("B cells", ABO_GRADES, key="abo_adult_b")
+
+            abo_raw = {
+                "mode": "adult",
+                "antiA": antiA,
+                "antiB": antiB,
+                "antiD": antiD,
+                "ctl": ctl,
+                "a1cells": a1cells,
+                "bcells": bcells
+            }
+
     # ----------------------------------------------------------------------
     # Phenotype section (collapsed)
     # ----------------------------------------------------------------------
@@ -1654,6 +1539,44 @@ else:
                 "recent_tx": recent_tx,
             }
             st.session_state.analysis_ready = True
+
+    # ----------------------------------------------------------------------
+    # Display ABO result (computed) + discrepancy expander if needed
+    # ----------------------------------------------------------------------
+    screen_any_positive = any(_safe_str(st.session_state.get(k,"0")) not in ("0","Not Done","") for k in ["rx_sI","rx_sII","rx_sIII"])
+    purpose_val = "Transfusion"
+    if is_neonate:
+        purpose_val = "RhIG" if _safe_str(st.session_state.get("abo_purpose","Transfusion")) == "RhIG" else "Transfusion"
+
+    abo_interp = interpret_abo_rhd(
+        is_neonate=is_neonate,
+        purpose=("RhIG" if purpose_val=="RhIG" else "Transfusion"),
+        raw=abo_raw,
+        screen_any_positive=screen_any_positive
+    )
+
+    if abo_interp["discrepancy"]:
+        st.markdown(f"""
+        <div class='clinical-danger'>
+        ⚠️ <b>ABO DISCREPANCY / SPECIAL SITUATION</b><br>
+        Current computed result: <b>ABO: {abo_interp['abo_final']}</b> | <b>RhD: {abo_interp['rhd_final']}</b><br>
+        Open the discrepancy guidance below.
+        </div>
+        """, unsafe_allow_html=True)
+
+        with st.expander("🧩 ABO Discrepancy — Guidance (How to report the result?)", expanded=True):
+            st.markdown(
+                "<div class='clinical-alert'><b>How to report the result?</b><ul style='margin-top:6px;'>" +
+                "".join([f"<li>{_safe_str(n)}</li>" for n in abo_interp["notes"]]) +
+                "</ul></div>",
+                unsafe_allow_html=True
+            )
+    else:
+        st.markdown(f"""
+        <div class='clinical-info'>
+        ✅ <b>ABO/RhD result is consistent</b>: <b>ABO: {abo_interp['abo_final']}</b> | <b>RhD: {abo_interp['rhd_final']}</b>
+        </div>
+        """, unsafe_allow_html=True)
 
     # ----------------------------------------------------------------------
     # Antibody analysis output + Save (single Save button)
@@ -1986,11 +1909,6 @@ else:
         if not st.session_state.lot_p or not st.session_state.lot_s:
             st.error("⛔ Lots not configured by Supervisor.")
         else:
-            # Require ABO confirmation for professional, controlled reporting
-            if not st.session_state.get("abo_confirmed") or not st.session_state.get("abo_raw_confirmed"):
-                st.error("⛔ Please confirm ABO/RhD results first (ABO / RhD / DAT section).")
-                st.stop()
-
             pt_name = _safe_str(st.session_state.get("pt_name",""))
             pt_mrn  = _safe_str(st.session_state.get("pt_mrn",""))
             tech_nm = _safe_str(st.session_state.get("tech_nm",""))
