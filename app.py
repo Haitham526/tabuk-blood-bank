@@ -7,6 +7,7 @@ import requests
 from pathlib import Path
 from itertools import combinations
 import hashlib
+import re
 from typing import Dict, Any, List, Tuple, Optional
 
 # =============================================================================
@@ -857,6 +858,239 @@ def interpret_abo_rhd(
 # =============================================================================
 # 4.2) Phenotype helpers + conflict alert
 # =============================================================================
+
+# =============================================================================
+# 4.2) ABO discrepancy engine (general + specific guidance)
+# =============================================================================
+def _grade_rank(g: str) -> int:
+    g = _safe_str(g)
+    if g in ("Not Done","",None):
+        return -1
+    if g == "0":
+        return 0
+    if g == "Hemolysis":
+        return 99
+    if g == "Mixed-field":
+        return 50
+    m = re.match(r"\+(\d)", g)
+    if m:
+        return int(m.group(1))
+    return -1
+
+def _is_expected_pos_weak(g: str) -> bool:
+    # Reverse expected positives should be ≥2+
+    return _safe_str(g) in ("0","+1","Not Done","")
+
+def _all_entered(grades: list) -> bool:
+    return all(_safe_str(x) not in ("Not Done","",None) for x in grades)
+
+def build_abo_guidance(
+    is_neonate: bool,
+    purpose: str,
+    raw: Dict[str, str],
+    screen_grades: Dict[str, str],
+    dat_inputs: Dict[str, str]
+) -> Dict[str, Any]:
+    """
+    Returns:
+      {
+        general: [..],
+        specific: [{title, bullets}]
+      }
+    All guidance text is English.
+    """
+    general = [
+        "Clerical check: confirm patient identity, specimen labels/barcodes, request details, and historical ABO/RhD (if available).",
+        "Technical check: verify reagent/lot/expiry/storage, QC/control results, specimen quality, and repeat testing (or recollect) as needed.",
+        "Clinical history: review recent transfusion, hematopoietic stem cell/BM transplant, neonatal/cord sample details, and relevant diagnoses."
+    ]
+    specific = []
+
+    def add(title: str, bullets: list):
+        bullets = [b for b in bullets if _safe_str(b)]
+        if bullets:
+            specific.append({"title": title, "bullets": bullets})
+
+    # Screen status
+    sc_I   = _safe_str(screen_grades.get("I","Not Done"))
+    sc_II  = _safe_str(screen_grades.get("II","Not Done"))
+    sc_III = _safe_str(screen_grades.get("III","Not Done"))
+    sc_list = [sc_I, sc_II, sc_III]
+    screen_complete = _all_entered(sc_list)
+    screen_any_pos  = any(_is_pos_any(g) for g in sc_list if _safe_str(g) not in ("Not Done",""))
+    screen_all_pos  = screen_complete and all(_is_pos_any(g) for g in sc_list)
+
+    # Determine forward ABO guess
+    antiA = _safe_str(raw.get("antiA","Not Done"))
+    antiB = _safe_str(raw.get("antiB","Not Done"))
+    fwd_abo = _abo_from_forward_only(antiA, antiB)
+
+    # Grab reverse (adult)
+    rev_a1 = _safe_str(raw.get("a1cells","Not Done"))
+    rev_b  = _safe_str(raw.get("bcells","Not Done"))
+    ctl    = _safe_str(raw.get("ctl","Not Done"))
+
+    # 0) Control / spontaneous agglutination / combined discrepancies
+    if _is_pos_any(ctl):
+        add(
+            "Control is POSITIVE / spontaneous agglutination suspected",
+            [
+                "Do NOT interpret ABO until the cause is resolved.",
+                "Consider cold autoantibody (Auto-anti-I) or specimen interference.",
+                "Forward (resolution): wash patient RBCs multiple times with 37°C warm saline; if IgM-related agglutination persists and DTT is available, consider DTT treatment per SOP.",
+                "Reverse (resolution): perform pre-warming technique (warm serum and reagent cells separately to 37°C before mixing). If strong/persistent, consider cold auto-adsorption using the patient's washed RBCs per SOP."
+            ]
+        )
+
+    # 1) Forward weak/missing antigens
+    if antiA in ("+1","+2","Mixed-field") or antiB in ("+1","+2","Mixed-field"):
+        bullets = [
+            "Incubate at room temperature (RT) for 15–30 minutes, then repeat forward grouping.",
+            "If still weak, consider enzyme-treated cells (if available) per SOP.",
+            "If needed, perform adsorption/elution or refer to a reference lab per SOP."
+        ]
+        if is_neonate:
+            bullets += [
+                "How to report (administrative only): Patient blood group is MOST PROBABLE based on current testing; there is a discrepancy due to weak antigen expression and it must be reconfirmed at 6 months of age (or per local policy).",
+                "Transfusion safety until confirmed: transfuse Group O RBCs and AB plasma/platelets."
+            ]
+        add("Weak/Missing Antigens (Forward grouping is weak or mixed-field)", bullets)
+
+    # 2) Mixed-field emphasis (history-driven)
+    if "Mixed-field" in (antiA, antiB, rev_a1, rev_b):
+        add(
+            "Mixed-field pattern detected — correlate with history",
+            [
+                "Most common: recent Group O RBC transfusion to a non-O patient (A/B/AB).",
+                "Early after hematopoietic stem cell / bone marrow transplant (e.g., O donor → A recipient).",
+                "A3 subgroup.",
+                "Chimerism (twin / dispermic).",
+                "Document the suspected cause in the technologist comment and confirm manually once history is verified."
+            ]
+        )
+
+    # 3) Reverse weak/missing antibodies (adult/child)
+    if not is_neonate and fwd_abo in ("A","B","O") and _safe_str(rev_a1) not in ("Not Done","") and _safe_str(rev_b) not in ("Not Done",""):
+        a1_should_pos = (fwd_abo in ("B","O"))
+        b_should_pos  = (fwd_abo in ("A","O"))
+        weak_hit = (a1_should_pos and _safe_str(rev_a1) in ("0","+1")) or (b_should_pos and _safe_str(rev_b) in ("0","+1"))
+        if weak_hit:
+            need_cells = []
+            if a1_should_pos and _safe_str(rev_a1) in ("0","+1"):
+                need_cells.append("A1 cells")
+            if b_should_pos and _safe_str(rev_b) in ("0","+1"):
+                need_cells.append("B cells")
+            add(
+                "Weak/Missing Antibodies (Reverse grouping is weak/negative)",
+                [
+                    f"Forward suggests Group {fwd_abo}; reverse reactivity is weak/absent in expected cell(s): {', '.join(need_cells)}.",
+                    "1) Incubate at RT for 15 minutes, then repeat reverse grouping.",
+                    "2) If still negative/weak: use double-dose plasma, then repeat reverse grouping.",
+                    "3) If still negative/weak: incubate at 4°C for 15 minutes and repeat reverse grouping. ⚠️ Must run Auto-Control."
+                ]
+            )
+
+    # 4) Unexpected reverse reaction with A1 cells (Forward A or AB)
+    if not is_neonate and fwd_abo in ("A","AB") and _is_pos_any(rev_a1):
+        if not screen_complete:
+            add(
+                "Unexpected reverse reaction (A1 cells POSITIVE) — antibody screen needed",
+                [
+                    "Repeat reverse grouping to exclude technical/clerical error.",
+                    "Run Auto-Control with reverse grouping.",
+                    "Perform antibody screen and enter the result to refine the interpretation."
+                ]
+            )
+        elif screen_any_pos:
+            add(
+                "Extra (Unexpected) — Screen POSITIVE",
+                [
+                    "Antibody screen is POSITIVE — an antibody may be responsible for the unexpected reverse reaction (e.g., cold-reactive allo/autoantibody).",
+                    "1) Rouleaux: perform saline replacement (reverse grouping).",
+                    "2) Cold antibody (e.g., M, P1): perform pre-warming technique (37°C)."
+                ]
+            )
+        else:
+            add(
+                "Extra (Unexpected) — Screen NEGATIVE",
+                [
+                    "Suspect Anti-A1 in an A2 subgroup (or A2B if AB forward).",
+                    "Test patient RBCs with Anti-A1 lectin (Dolichos biflorus).",
+                    "Test patient serum with A2 cells."
+                ]
+            )
+
+    # 5) Bombay (Oh) suspicion
+    if not is_neonate and fwd_abo == "O" and screen_all_pos:
+        add(
+            "All screening cells POSITIVE with Forward Group O — suspect Bombay (Oh)",
+            [
+                "Pan-reactivity on group O reagent cells suggests anti-H.",
+                "Test patient RBCs with Anti-H lectin.",
+                "Negative reaction with Anti-H lectin supports Bombay (Oh)."
+            ]
+        )
+
+    # 6) Extra unexpected antigens: Acquired B
+    if not is_neonate:
+        # Pattern: forward looks AB but reverse looks A (strong anti-B present)
+        if _is_pos_any(antiA) and _is_pos_any(antiB) and (not _is_pos_any(rev_a1)) and (_grade_rank(rev_b) >= 2):
+            add(
+                "Extra Unexpected Antigen — Acquired B phenotype (suspected)",
+                [
+                    "Clinical context: typically Group A patient with lower GI disease (e.g., colon cancer/bowel obstruction) or Gram-negative sepsis (e.g., E. coli).",
+                    "Pattern: forward appears AB, while reverse appears A (strong anti-B in serum).",
+                    "Investigations:",
+                    "• Reagent verification: check Anti-B product insert; some monoclonal clones react with Acquired B. Retest using a different Anti-B clone if available.",
+                    "• Auto-control: test patient serum against autologous RBCs.",
+                    "• Acidified Anti-B test: test patient RBCs using human Anti-B serum acidified to pH 6.0 (if available).",
+                    "Interpretation:",
+                    "• If the Anti-B reaction disappears with a different monoclonal clone → consistent with Acquired B (patient is Group A).",
+                    "• Auto-control is typically NEGATIVE in Acquired B.",
+                    "• Acidified Anti-B: true B reacts strongly at pH 6.0; Acquired B does NOT react at pH 6.0."
+                ]
+            )
+
+        # B(A) / A(B) phenotype (trace antigen with highly sensitive monoclonals)
+        if fwd_abo in ("A","B"):
+            # A(B): A forward with weak anti-B; B(A): B forward with weak anti-A
+            weak_extra = False
+            if fwd_abo == "A" and _safe_str(antiB) in ("+1","+2"):
+                weak_extra = True
+            if fwd_abo == "B" and _safe_str(antiA) in ("+1","+2"):
+                weak_extra = True
+            if weak_extra:
+                add(
+                    "Extra Unexpected Antigen — B(A) or A(B) phenotype (consider)",
+                    [
+                        "An autosomal dominant phenotype with trace antigen expression detected by highly sensitive monoclonal reagents (e.g., certain clones).",
+                        "Resolution: retest using a different manufacturer’s reagent or polyclonal antisera (if available)."
+                    ]
+                )
+
+    # 7) Wharton’s jelly (cord blood)
+    cord_flag = bool(raw.get("cord_sample", False))
+    if is_neonate and cord_flag:
+        add(
+            "Neonate cord sample — Wharton’s jelly contamination (consider)",
+            [
+                "Cord blood contaminated with hyaluronic acid-rich Wharton’s jelly may cause spontaneous agglutination.",
+                "Resolution: wash cord RBCs 4–6 times with warm saline, then repeat forward grouping."
+            ]
+        )
+
+    # 8) Strong DAT C3 (cold agglutinin supporting)
+    dat_c3 = _safe_str(dat_inputs.get("c3d","Not Done"))
+    if dat_c3 in ("+3","+4"):
+        add(
+            "DAT (C3) strongly POSITIVE — cold agglutinin interference (supporting)",
+            [
+                "Resolution: wash RBCs several times with warm saline and retest washed cells at 37°C."
+            ]
+        )
+
+    return {"general": general, "specific": specific}
+
 def _phenotype_get_antigen_state(ph: Dict[str, str], ag: str) -> str:
     return _safe_str(ph.get(ag, "Not Done"))
 
@@ -1315,7 +1549,7 @@ else:
     age_y = int(st.session_state.get("age_y", 0) or 0)
     age_m = int(st.session_state.get("age_m", 0) or 0)
     age_d = int(st.session_state.get("age_d", 0) or 0)
-    is_neonate_by_age = _age_is_neonate(age_y, age_m, age_d)
+    is_neonate = _age_is_neonate(age_y, age_m, age_d)
 
     # ----------------------------------------------------------------------
     # HISTORY LOOKUP (GitHub; MRN-based)
@@ -1357,179 +1591,188 @@ else:
     # ----------------------------------------------------------------------
     # ABO / RhD / DAT section (collapsed, opens when discrepancy)
     # ----------------------------------------------------------------------
+
+    # ----------------------------------------------------------------------
+    # ABO / RhD / DAT section (collapsible; interpretation only after confirmation)
+    # ----------------------------------------------------------------------
     with st.expander("🧾 ABO / RhD / DAT (Enter by grade)", expanded=False):
 
-        # ------------------------------------------------------------------
-        # Smarter card selection (avoid defaulting to newborn when age not entered)
-        # ------------------------------------------------------------------
-        def _invalidate_abo_confirm():
-            st.session_state.abo_confirmed = False
-
-        if "abo_confirmed" not in st.session_state:
-            st.session_state.abo_confirmed = False
-        if "abo_raw_confirmed" not in st.session_state:
-            st.session_state.abo_raw_confirmed = None
-        if "abo_is_neonate_confirmed" not in st.session_state:
-            st.session_state.abo_is_neonate_confirmed = None
-        if "abo_purpose_confirmed" not in st.session_state:
-            st.session_state.abo_purpose_confirmed = "Transfusion"
-        if "abo_confirmed_at" not in st.session_state:
-            st.session_state.abo_confirmed_at = ""
-
-        # Set default card selection once (based on age if provided; otherwise Adult)
+        # Let user choose workflow card (do NOT assume neonate when age is not entered)
+        age_entered = (age_y + age_m + age_d) > 0
         if "abo_card_mode" not in st.session_state:
-            if (age_y or age_m or age_d):
-                st.session_state.abo_card_mode = "Newborn/Neonate (< 4 months)" if is_neonate_by_age else "Adult/Child (≥ 4 months)"
-            else:
-                st.session_state.abo_card_mode = "Adult/Child (≥ 4 months)"
+            st.session_state.abo_card_mode = "Adult/Child (≥ 4 months)"
+            if age_entered and is_neonate:
+                st.session_state.abo_card_mode = "Newborn/Neonate (< 4 months)"
 
-        st.caption("⚠️ Enter the ABO/RhD/DAT grades, then click **Confirm** to calculate the result and discrepancy guidance.")
         card_mode = st.radio(
-            "Card selection",
+            "ABO workflow card",
             ["Adult/Child (≥ 4 months)", "Newborn/Neonate (< 4 months)"],
             horizontal=True,
-            key="abo_card_mode",
-            on_change=_invalidate_abo_confirm
+            key="abo_card_mode"
         )
-        abo_is_neonate_ui = (card_mode.startswith("Newborn"))
+        abo_is_neonate = card_mode.startswith("Newborn")
 
-        # ------------------------------------------------------------------
-        # Data entry (confirmation-gated)
-        # ------------------------------------------------------------------
-        with st.form("abo_form"):
-            if abo_is_neonate_ui:
-                st.markdown("""
-                <div class='clinical-info'>
-                👶 <b>Neonate mode (&lt; 4 months)</b>: Reverse grouping is typically unreliable.<br>
-                If purpose is <b>RhIG eligibility</b> → use <b>DVI+</b> (per your policy).<br>
-                If purpose is <b>Transfusion</b> → use <b>DVI−</b> (per your policy).
-                </div>
-                """, unsafe_allow_html=True)
+        # Build ABO raw input (current)
+        if abo_is_neonate:
+            st.markdown("""
+            <div class='clinical-info'>
+            👶 <b>Newborn/Neonate mode</b>: reverse grouping is typically unreliable and may be omitted per policy.<br>
+            </div>
+            """, unsafe_allow_html=True)
 
-                purpose = st.radio("Purpose", ["Transfusion", "RhIG"], horizontal=True, key="abo_purpose", on_change=_invalidate_abo_confirm)
-                c1, c2, c3, c4, c5 = st.columns(5)
-                antiA  = c1.selectbox("Anti-A",  ABO_GRADES, key="abo_neonate_antiA")
-                antiB  = c2.selectbox("Anti-B",  ABO_GRADES, key="abo_neonate_antiB")
-                antiAB = c3.selectbox("Anti-AB", ABO_GRADES, key="abo_neonate_antiAB")
-                antiD  = c4.selectbox("Anti-D",  ABO_GRADES, key="abo_neonate_antiD")
-                ctl    = c5.selectbox("Control", ABO_GRADES, key="abo_neonate_ctl")
+            purpose = st.radio("Purpose", ["Transfusion", "RhIG"], horizontal=True, key="abo_purpose")
+            cord_sample = st.checkbox("Cord blood sample?", value=False, key="abo_cord_sample")
 
-                datg = st.selectbox("DAT (optional)", ABO_GRADES, key="abo_neonate_dat")
-                abo_raw_local = {
-                    "mode": "neonate",
-                    "antiA": antiA,
-                    "antiB": antiB,
-                    "antiAB": antiAB,
-                    "antiD": antiD,
-                    "ctl": ctl,
-                    "dat": datg
-                }
-                purpose_local = purpose
+            c1, c2, c3, c4, c5 = st.columns(5)
+            antiA = c1.selectbox("Anti-A", ABO_GRADES, key="abo_neonate_antiA")
+            antiB = c2.selectbox("Anti-B", ABO_GRADES, key="abo_neonate_antiB")
+            antiAB = c3.selectbox("Anti-AB", ABO_GRADES, key="abo_neonate_antiAB")
+            antiD = c4.selectbox("Anti-D", ABO_GRADES, key="abo_neonate_antiD")
+            ctl  = c5.selectbox("Control", ABO_GRADES, key="abo_neonate_ctl")
+            datg = st.selectbox("DAT (grade or Not Done)", ABO_GRADES, key="abo_neonate_dat")
 
+            abo_raw_current = {
+                "mode": "neonate",
+                "purpose": "RhIG" if purpose == "RhIG" else "Transfusion",
+                "antiA": antiA,
+                "antiB": antiB,
+                "antiAB": antiAB,
+                "antiD": antiD,
+                "ctl": ctl,
+                "dat": datg,
+                "cord_sample": bool(cord_sample),
+            }
+        else:
+            st.markdown("""
+            <div class='clinical-info'>
+            👤 <b>Adult/Child mode</b>: forward + reverse grouping are required (per policy).
+            </div>
+            """, unsafe_allow_html=True)
+
+            c1, c2, c3, c4, c5, c6 = st.columns(6)
+            antiA = c1.selectbox("Anti-A", ABO_GRADES, key="abo_adult_antiA")
+            antiB = c2.selectbox("Anti-B", ABO_GRADES, key="abo_adult_antiB")
+            antiD = c3.selectbox("Anti-D", ABO_GRADES, key="abo_adult_antiD")
+            ctl  = c4.selectbox("Control", ABO_GRADES, key="abo_adult_ctl")
+            a1cells = c5.selectbox("A1 cells", ABO_GRADES, key="abo_adult_a1")
+            bcells  = c6.selectbox("B cells", ABO_GRADES, key="abo_adult_b")
+
+            abo_raw_current = {
+                "mode": "adult",
+                "antiA": antiA,
+                "antiB": antiB,
+                "antiD": antiD,
+                "ctl": ctl,
+                "a1cells": a1cells,
+                "bcells": bcells
+            }
+
+        # Confirmation gate (prevents early 'discrepancy' before entries are complete)
+        colb1, colb2 = st.columns([1, 1])
+        confirm_abo = colb1.button("✅ Confirm ABO entry", type="primary", use_container_width=True, key="abo_confirm_btn")
+        reset_abo   = colb2.button("✏️ Edit / Reset confirmation", use_container_width=True, key="abo_reset_btn")
+
+        if reset_abo:
+            st.session_state.abo_confirmed = False
+            st.session_state.abo_raw_confirmed = None
+            st.session_state.abo_interp_confirmed = None
+            st.session_state.abo_guidance_confirmed = None
+
+        if confirm_abo:
+            # Basic completeness checks
+            missing = []
+            if abo_is_neonate:
+                for k, lbl in [("antiA","Anti-A"),("antiB","Anti-B"),("antiD","Anti-D"),("ctl","Control")]:
+                    if _safe_str(abo_raw_current.get(k,"Not Done")) in ("Not Done",""):
+                        missing.append(lbl)
             else:
-                st.markdown("""
-                <div class='clinical-info'>
-                👤 <b>Adult/Child mode (≥ 4 months)</b>: Forward + Reverse grouping are required per your policy.
-                </div>
-                """, unsafe_allow_html=True)
+                for k, lbl in [("antiA","Anti-A"),("antiB","Anti-B"),("antiD","Anti-D"),("ctl","Control"),("a1cells","A1 cells"),("bcells","B cells")]:
+                    if _safe_str(abo_raw_current.get(k,"Not Done")) in ("Not Done",""):
+                        missing.append(lbl)
 
-                c1, c2, c3, c4 = st.columns(4)
-                antiA = c1.selectbox("Anti-A", ABO_GRADES, key="abo_adult_antiA")
-                antiB = c2.selectbox("Anti-B", ABO_GRADES, key="abo_adult_antiB")
-                antiD = c3.selectbox("Anti-D (DVI−)", ABO_GRADES, key="abo_adult_antiD")
-                ctl   = c4.selectbox("Control", ABO_GRADES, key="abo_adult_ctl")
-
-                r1, r2 = st.columns(2)
-                a1cells = r1.selectbox("A1 cells", ABO_GRADES, key="abo_adult_a1")
-                bcells  = r2.selectbox("B cells",  ABO_GRADES, key="abo_adult_b")
-
-                abo_raw_local = {
-                    "mode": "adult",
-                    "antiA": antiA,
-                    "antiB": antiB,
-                    "antiD": antiD,
-                    "ctl": ctl,
-                    "a1cells": a1cells,
-                    "bcells": bcells
-                }
-                purpose_local = "Transfusion"
-
-            abo_confirm_btn = st.form_submit_button("✅ Confirm ABO results", use_container_width=True)
-
-        # Persist a stable, confirmed snapshot (this is what drives conclusions + saving)
-        if abo_confirm_btn:
-            # Basic completeness check (prevents "instant discrepancy" before real entry)
-            if abo_is_neonate_ui:
-                required = {"antiA": antiA, "antiB": antiB, "antiD": antiD, "ctl": ctl}
-            else:
-                required = {"antiA": antiA, "antiB": antiB, "antiD": antiD, "ctl": ctl, "a1cells": a1cells, "bcells": bcells}
-
-            missing = [k for k,v in required.items() if _safe_str(v) in ("Not Done", "")]
             if missing:
-                st.error("⛔ Please complete the required ABO fields before confirming: " + ", ".join(missing))
-                st.session_state.abo_confirmed = False
-                st.session_state.abo_raw_confirmed = None
-                st.session_state.abo_is_neonate_confirmed = None
-                st.session_state.abo_confirmed_at = ""
+                st.error("Please complete the following fields before confirmation: " + ", ".join(missing))
             else:
+                # Link inputs (screen + DAT)
+                screen_grades = {
+                    "I": _safe_str(st.session_state.get("rx_sI","Not Done")),
+                    "II": _safe_str(st.session_state.get("rx_sII","Not Done")),
+                    "III": _safe_str(st.session_state.get("rx_sIII","Not Done")),
+                }
+                dat_inputs = {
+                    "igg": _safe_str(st.session_state.get("dat_igg","Not Done")),
+                    "c3d": _safe_str(st.session_state.get("dat_c3d","Not Done")),
+                    "ctl": _safe_str(st.session_state.get("dat_ctl","Not Done")),
+                }
+
+                # Interpret (ABO/RhD)
+                abo_interp_tmp = interpret_abo_rhd(
+                    is_neonate=abo_is_neonate,
+                    purpose=("RhIG" if _safe_str(abo_raw_current.get("purpose","Transfusion")) == "RhIG" else "Transfusion"),
+                    raw=abo_raw_current,
+                    screen_any_positive=any(_is_pos_any(g) for g in screen_grades.values() if _safe_str(g) not in ("Not Done",""))
+                )
+                guidance_tmp = build_abo_guidance(
+                    is_neonate=abo_is_neonate,
+                    purpose=_safe_str(abo_raw_current.get("purpose","Transfusion")),
+                    raw=abo_raw_current,
+                    screen_grades=screen_grades,
+                    dat_inputs=dat_inputs
+                )
+
                 st.session_state.abo_confirmed = True
-                st.session_state.abo_raw_confirmed = abo_raw_local
-                st.session_state.abo_is_neonate_confirmed = bool(abo_is_neonate_ui)
-                st.session_state.abo_purpose_confirmed = purpose_local
-                st.session_state.abo_confirmed_at = _now_ts()
-        # Expose abo_raw for the rest of the app (use confirmed snapshot when available)
-        abo_raw = st.session_state.abo_raw_confirmed or abo_raw_local
+                st.session_state.abo_raw_confirmed = abo_raw_current
+                st.session_state.abo_interp_confirmed = abo_interp_tmp
+                st.session_state.abo_guidance_confirmed = guidance_tmp
 
-        # ------------------------------------------------------------------
-        # Show conclusion / discrepancy ONLY after confirm
-        # ------------------------------------------------------------------
-        if st.session_state.abo_confirmed and st.session_state.abo_raw_confirmed:
-            screen_any_positive = any(
-                _safe_str(st.session_state.get(k, "0")) not in ("0", "Not Done", "")
-                for k in ["rx_sI", "rx_sII", "rx_sIII"]
-            )
+        # Display (only after confirmation)
+        if st.session_state.get("abo_confirmed", False) and st.session_state.get("abo_interp_confirmed"):
+            abo_interp = st.session_state.abo_interp_confirmed
+            guid = st.session_state.get("abo_guidance_confirmed") or {"general": [], "specific": []}
 
-            abo_interp = interpret_abo_rhd(
-                is_neonate=bool(st.session_state.abo_is_neonate_confirmed),
-                purpose=("RhIG" if (bool(st.session_state.abo_is_neonate_confirmed) and st.session_state.abo_purpose_confirmed == "RhIG") else "Transfusion"),
-                raw=st.session_state.abo_raw_confirmed,
-                screen_any_positive=screen_any_positive
-            )
-
-            if abo_interp["discrepancy"]:
+            is_discrep = bool(abo_interp.get("discrepancy", False)) or bool(abo_interp.get("invalid", False))
+            if is_discrep:
                 st.markdown(f"""
                 <div class='clinical-danger'>
                 ⚠️ <b>ABO DISCREPANCY / SPECIAL SITUATION</b><br>
-                Confirmed result: <b>ABO: {abo_interp['abo_final']}</b> | <b>RhD: {abo_interp['rhd_final']}</b><br>
-                <span style='font-size:12px; opacity:0.85;'>Confirmed at: {st.session_state.abo_confirmed_at}</span>
+                Current computed result: <b>ABO: {abo_interp.get('abo_final','')}</b> | <b>RhD: {abo_interp.get('rhd_final','')}</b>
                 </div>
                 """, unsafe_allow_html=True)
 
+                st.markdown("<div class='clinical-alert'><b>General rule (always start here):</b></div>", unsafe_allow_html=True)
                 st.markdown(
-                    "<div class='clinical-alert'><b>How to report the result?</b><ul style='margin-top:6px;'>" +
-                    "".join([f"<li>{_safe_str(n)}</li>" for n in abo_interp["notes"]]) +
+                    "<div class='clinical-alert'><ul style='margin-top:6px;'>" +
+                    "".join([f"<li>{_safe_str(x)}</li>" for x in guid.get('general',[])]) +
                     "</ul></div>",
                     unsafe_allow_html=True
                 )
+
+                # Specific guidance
+                if guid.get("specific"):
+                    st.markdown("<div class='clinical-alert'><b>Specific guidance (based on the pattern entered):</b></div>", unsafe_allow_html=True)
+                    for sec in guid["specific"]:
+                        st.markdown(
+                            "<div class='clinical-info'><b>" + _safe_str(sec.get("title","")) + "</b>" +
+                            "<ul style='margin-top:6px;'>" +
+                            "".join([f"<li>{_safe_str(b)}</li>" for b in sec.get("bullets",[])]) +
+                            "</ul></div>",
+                            unsafe_allow_html=True
+                        )
+                else:
+                    st.info("No specific rule was triggered by the current pattern. Continue with clerical/technical checks and clinical history.")
+
+                # Manual confirmation + comment (saved with the case)
+                st.checkbox("Manual confirmation completed (documented)", value=bool(st.session_state.get("abo_manual_confirm", False)), key="abo_manual_confirm")
+                st.text_area("Technologist comment (optional; saved with the case)", key="abo_comment", height=120)
+
             else:
                 st.markdown(f"""
                 <div class='clinical-info'>
-                ✅ <b>ABO/RhD result is consistent</b>: <b>ABO: {abo_interp['abo_final']}</b> | <b>RhD: {abo_interp['rhd_final']}</b><br>
-                <span style='font-size:12px; opacity:0.85;'>Confirmed at: {st.session_state.abo_confirmed_at}</span>
+                ✅ <b>ABO/RhD result is consistent</b>: <b>ABO: {abo_interp.get('abo_final','')}</b> | <b>RhD: {abo_interp.get('rhd_final','')}</b>
                 </div>
                 """, unsafe_allow_html=True)
         else:
-            # Not confirmed yet → do NOT compute discrepancy/conclusion
-            abo_interp = {
-                "abo_final": "",
-                "rhd_final": "",
-                "discrepancy": False,
-                "invalid": False,
-                "notes": []
-            }
-    # ----------------------------------------------------------------------
-    # Phenotype section (collapsed)
-    # ----------------------------------------------------------------------
+            st.caption("Enter grades above, then click **Confirm ABO entry** to generate the interpretation and (if needed) discrepancy guidance.")
     with st.expander("🧬 Patient Phenotype (optional)", expanded=False):
         st.caption("Use: Not Done / Not Detected / Detected. Control should be Not Detected.")
         tab1, tab2 = st.tabs(["Rh phenotype (C/c/E/e/K)", "Extended phenotype"])
@@ -1655,7 +1898,12 @@ else:
             }
             st.session_state.analysis_ready = True
 
+    
     # ----------------------------------------------------------------------
+    # ABO interpretation is shown inside the ABO expander after confirmation.
+    # (No auto-interpretation here to avoid premature discrepancy flags.)
+    # ----------------------------------------------------------------------
+# ----------------------------------------------------------------------
     # Antibody analysis output + Save (single Save button)
     # ----------------------------------------------------------------------
     conclusion_short = ""
@@ -1986,11 +2234,6 @@ else:
         if not st.session_state.lot_p or not st.session_state.lot_s:
             st.error("⛔ Lots not configured by Supervisor.")
         else:
-            # Require ABO confirmation for professional, controlled reporting
-            if not st.session_state.get("abo_confirmed") or not st.session_state.get("abo_raw_confirmed"):
-                st.error("⛔ Please confirm ABO/RhD results first (ABO / RhD / DAT section).")
-                st.stop()
-
             pt_name = _safe_str(st.session_state.get("pt_name",""))
             pt_mrn  = _safe_str(st.session_state.get("pt_mrn",""))
             tech_nm = _safe_str(st.session_state.get("tech_nm",""))
@@ -2028,6 +2271,18 @@ else:
                         unsafe_allow_html=True
                     )
 
+
+                # ABO confirmation is required (stored from the ABO expander)
+                abo_raw_sv = st.session_state.get("abo_raw_confirmed")
+                abo_interp_sv = st.session_state.get("abo_interp_confirmed")
+                abo_guid_sv = st.session_state.get("abo_guidance_confirmed") or {}
+                abo_comment_sv = _safe_str(st.session_state.get("abo_comment",""))
+                abo_manual_sv = bool(st.session_state.get("abo_manual_confirm", False))
+
+                if not bool(st.session_state.get("abo_confirmed", False)) or (not abo_raw_sv) or (not abo_interp_sv):
+                    st.error("⛔ Please enter and CONFIRM ABO results before saving.")
+                    st.stop()
+
                 saved_at = _now_ts()
                 case_id = f"{pt_mrn}_{saved_at}".replace(" ", "_").replace(":", "-")
 
@@ -2039,12 +2294,15 @@ else:
                     "saved_at": saved_at,
                     "lots": {"panel": st.session_state.lot_p, "screen": st.session_state.lot_s},
                     "abo": {
-                        "raw": abo_raw,
-                        "abo_final": abo_interp["abo_final"],
-                        "rhd_final": abo_interp["rhd_final"],
-                        "discrepancy": bool(abo_interp["discrepancy"]),
-                        "invalid": bool(abo_interp["invalid"]),
-                        "notes": abo_interp["notes"],
+                        "raw": abo_raw_sv,
+                        "abo_final": abo_interp_sv.get("abo_final", ""),
+                        "rhd_final": abo_interp_sv.get("rhd_final", ""),
+                        "discrepancy": bool(abo_interp_sv.get("discrepancy", False)),
+                        "invalid": bool(abo_interp_sv.get("invalid", False)),
+                        "notes": abo_interp_sv.get("notes", []),
+                        "guidance": abo_guid_sv,
+                        "comment": abo_comment_sv,
+                        "manual_confirmation": bool(abo_manual_sv),
                     },
                     "phenotype": {
                         "results": ph
@@ -2095,9 +2353,9 @@ else:
                     "recent_tx": bool(recent_tx_sv),
                     "all_rx": bool(all_rx),
                     "conclusion_short": conclusion_short,
-                    "abo_final": abo_interp["abo_final"],
-                    "rhd_final": abo_interp["rhd_final"],
-                    "abo_discrepancy": bool(abo_interp["discrepancy"]),
+                    "abo_final": abo_interp_sv.get("abo_final",""),
+                    "rhd_final": abo_interp_sv.get("rhd_final",""),
+                    "abo_discrepancy": bool(abo_interp_sv.get("discrepancy", False)),
                     "fingerprint": fingerprint,
                     "summary_json": json.dumps(payload, ensure_ascii=False)
                 }
