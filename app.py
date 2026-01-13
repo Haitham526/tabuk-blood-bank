@@ -417,37 +417,40 @@ UI_THEME_CSS = """
 }}
 
     /* Elegant expander headers (robust to Streamlit DOM changes) */
-    div[data-testid="stExpander"] details {{{{
-        border: 1px solid var(--sec-border) !important;
-        border-radius: 16px !important;
-        overflow: hidden !important;
-        box-shadow: var(--sec-shadow) !important;
-        background: #FFFFFF !important;
-    }}}}
-    div[data-testid="stExpander"] details > summary {{{{
-        background: var(--sec-bg) !important;
-        padding: 12px 16px !important;
-    }}}}
-    div[data-testid="stExpander"] details > summary:hover {{{{
-        background: var(--sec-bg-hover) !important;
-    }}}}
-    /* Color EVERYTHING inside the expander header (text + icons), regardless of tag structure */
-    div[data-testid="stExpander"] details > summary * {{{{
-        color: var(--sec-fg) !important;
-        font-weight: 800 !important;
-        letter-spacing: 0.2px;
-    }}}}
-    div[data-testid="stExpander"] details > summary svg {{{{
-        color: var(--sec-fg) !important;
-        fill: var(--sec-fg) !important;
-    }}}}
+div[data-testid="stExpander"] details {{
+    border: 1px solid var(--sec-border) !important;
+    border-radius: 16px !important;
+    overflow: hidden !important;
+    box-shadow: var(--sec-shadow) !important;
+    background: #FFFFFF !important;
+}}
+div[data-testid="stExpander"] details > summary {{
+    background: var(--sec-bg) !important;
+    padding: 12px 16px !important;
+}}
+div[data-testid="stExpander"] details > summary:hover {{
+    background: var(--sec-bg-hover) !important;
+}}
+/* Color EVERYTHING inside the expander header (text + icons), regardless of tag structure */
+div[data-testid="stExpander"] details > summary,
+div[data-testid="stExpander"] details > summary * {{
+    color: var(--sec-fg) !important;
+    font-weight: 800 !important;
+    letter-spacing: 0.2px;
+}}
+div[data-testid="stExpander"] details > summary svg,
+div[data-testid="stExpander"] details > summary svg * {{
+    fill: var(--sec-fg) !important;
+    color: var(--sec-fg) !important;
+}}
 
-    /* Slightly tighter spacing inside expanders */
-    div[data-testid="stExpander"] .stMarkdown, div[data-testid="stExpander"] .stText {{{{
-        margin-top: 0.25rem;
-    }}}}
-    
-    /* App header (Doctor Decision) */
+/* Slightly tighter spacing inside expanders */
+div[data-testid="stExpander"] .stMarkdown,
+div[data-testid="stExpander"] .stText {{
+    margin-top: 0.25rem;
+}}
+
+/* App header (Doctor Decision) */
     .app-header {{
         background: var(--hdr-bg);
         border: 1px solid var(--hdr-border);
