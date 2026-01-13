@@ -417,52 +417,52 @@ st.markdown("""
 
 UI_THEME_CSS = """
 <style>
-:root {{
-    --sec-bg: {sec_bg};
-    --sec-bg-hover: {sec_bg_hover};
-    --sec-fg: {sec_fg};
-    --sec-border: {sec_border};
-    --sec-shadow: {sec_shadow};
-    --hdr-bg: {hdr_bg};
-    --hdr-title: {hdr_title};
-    --hdr-sub: {hdr_sub};
-    --hdr-tag: {hdr_tag};
-    --hdr-border: {hdr_border};
-}}
+:root {
+    --sec-bg: __SEC_BG__;
+    --sec-bg-hover: __SEC_BG_HOVER__;
+    --sec-fg: __SEC_FG__;
+    --sec-border: __SEC_BORDER__;
+    --sec-shadow: __SEC_SHADOW__;
+    --hdr-bg: __HDR_BG__;
+    --hdr-title: __HDR_TITLE__;
+    --hdr-sub: __HDR_SUB__;
+    --hdr-tag: __HDR_TAG__;
+    --hdr-border: __HDR_BORDER__;
+}
 
     /* Elegant expander headers (robust to Streamlit DOM changes) */
-div[data-testid="stExpander"] details {{
+div[data-testid="stExpander"] details {
     border: 1px solid var(--sec-border) !important;
     border-radius: 16px !important;
     overflow: hidden !important;
     box-shadow: var(--sec-shadow) !important;
     background: #FFFFFF !important;
-}}
-div[data-testid="stExpander"] details > summary {{
+}
+div[data-testid="stExpander"] details > summary {
     background: var(--sec-bg) !important;
     padding: 12px 16px !important;
-}}
-div[data-testid="stExpander"] details > summary:hover {{
+}
+div[data-testid="stExpander"] details > summary:hover {
     background: var(--sec-bg-hover) !important;
-}}
+}
 /* Color EVERYTHING inside the expander header (text + icons), regardless of tag structure */
 div[data-testid="stExpander"] details > summary,
-div[data-testid="stExpander"] details > summary * {{
+div[data-testid="stExpander"] details > summary * {
     color: var(--sec-fg) !important;
     font-weight: 800 !important;
     letter-spacing: 0.2px;
-}}
+}
 div[data-testid="stExpander"] details > summary svg,
-div[data-testid="stExpander"] details > summary svg * {{
+div[data-testid="stExpander"] details > summary svg * {
     fill: var(--sec-fg) !important;
     color: var(--sec-fg) !important;
-}}
+}
 
 /* Slightly tighter spacing inside expanders */
 div[data-testid="stExpander"] .stMarkdown,
-div[data-testid="stExpander"] .stText {{
+div[data-testid="stExpander"] .stText {
     margin-top: 0.25rem;
-}}
+}
 
 /* App header (Doctor Decision) */
         .site-title{
@@ -481,7 +481,7 @@ div[data-testid="stExpander"] .stText {{
         }
 
 
-    .app-header {{
+    .app-header {
         background: var(--hdr-bg);
         border: 1px solid var(--hdr-border);
         border-radius: 14px;
@@ -489,32 +489,32 @@ div[data-testid="stExpander"] .stText {{
         margin: 6px 0 14px 0;
         text-align: center;
         box-shadow: var(--sec-shadow);
-    }}
-    .app-header .app-title {{
+    }
+    .app-header .app-title {
         font-size: 34px;
         font-weight: 900;
         letter-spacing: 0.6px;
         color: var(--hdr-title);
         line-height: 1.05;
         margin-bottom: 4px;
-    }}
-    .app-header .app-subtitle {{
+    }
+    .app-header .app-subtitle {
         font-size: 18px;
         font-weight: 700;
         color: var(--hdr-sub);
         letter-spacing: 0.2px;
         margin-bottom: 4px;
-    }}
-    .app-header .app-tagline {{
+    }
+    .app-header .app-tagline {
         font-size: 13px;
         font-weight: 700;
         color: var(--hdr-tag);
         opacity: 0.95;
         letter-spacing: 0.4px;
-    }}
+    }
 
     /* ABO card colored labels */
-    .abo-label {{
+    .abo-label {
         width: 100%;
         height: 34px;
         border-radius: 10px;
@@ -527,18 +527,18 @@ div[data-testid="stExpander"] .stText {{
         border: 1px solid rgba(0,0,0,0.08);
         position: relative;
         user-select: none;
-    }}
-    .abo-a {{ background: #4F9BD9; color: #FFFFFF; }}  /* Anti-A (blue) */
-    .abo-b {{ background: #F3D35C; color: #111111; }}  /* Anti-B (yellow) */
-    .abo-d {{ background: #D3DAE2; color: #111111; }}  /* Anti-D (silver) */
-    .abo-ctl {{ background: #FFFFFF; color: #111111; border: 1px solid #D0D0D0; }} /* Control (white) */
-    .abo-a1 {{ background: #F2B274; color: #111111; }} /* A1 cells (light orange) */
-    .abo-bcells {{ background: #F2B274; color: #111111; }} /* B cells (light orange) */
+    }
+    .abo-a { background: #4F9BD9; color: #FFFFFF; }  /* Anti-A (blue) */
+    .abo-b { background: #F3D35C; color: #111111; }  /* Anti-B (yellow) */
+    .abo-d { background: #D3DAE2; color: #111111; }  /* Anti-D (silver) */
+    .abo-ctl { background: #FFFFFF; color: #111111; border: 1px solid #D0D0D0; } /* Control (white) */
+    .abo-a1 { background: #F2B274; color: #111111; } /* A1 cells (light orange) */
+    .abo-bcells { background: #F2B274; color: #111111; } /* B cells (light orange) */
 
     /* Neonate card specific */
-    .neo-ab {{ background: #FFFFFF; color: #111111; border: 1px solid #D0D0D0; }} /* Anti-AB (white) */
-    .neo-dat {{ background: #BFE9D2; color: #0A3D0A; border: 1px solid rgba(10,61,10,0.18); }} /* DAT (light green) */
-    .ctl-icon {{
+    .neo-ab { background: #FFFFFF; color: #111111; border: 1px solid #D0D0D0; } /* Anti-AB (white) */
+    .neo-dat { background: #BFE9D2; color: #0A3D0A; border: 1px solid rgba(10,61,10,0.18); } /* DAT (light green) */
+    .ctl-icon {
         position: absolute;
         left: 10px;
         top: 50%;
@@ -550,9 +550,12 @@ div[data-testid="stExpander"] .stText {{
         background: rgba(0,0,0,0.08);
         color: #111111;
         letter-spacing: 0.4px;
-    }}
+    }
 </style>
-""".format(**THEME_VARS)
+"""
+for _k, _v in THEME_VARS.items():
+    UI_THEME_CSS = UI_THEME_CSS.replace(f"__{_k.upper()}__", str(_v))
+
 st.markdown(UI_THEME_CSS, unsafe_allow_html=True)
 
 
