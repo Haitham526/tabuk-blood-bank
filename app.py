@@ -1939,7 +1939,7 @@ else:
                 st.markdown(_render_abo_label_html('Anti-D (DVI+)', 'neo-d'), unsafe_allow_html=True)
                 antiD = st.selectbox('Anti-D', ABO_GRADES, key='abo_neonate_antiD', label_visibility='collapsed')
             with c5:
-                st.markdown(_render_abo_label_html('Control', 'neo-ctl', show_ctl_icon=True), unsafe_allow_html=True)
+                st.markdown(_render_abo_label_html('Control', 'neo-ctl', ctl_badge=True), unsafe_allow_html=True)
                 ctl = st.selectbox('Control', ABO_GRADES, key='abo_neonate_ctl', label_visibility='collapsed')
             with c6:
                 st.markdown(_render_abo_label_html('DAT', 'neo-dat'), unsafe_allow_html=True)
