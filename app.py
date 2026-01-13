@@ -512,16 +512,16 @@ div[data-testid="stExpander"] .stText {{
         position: relative;
         user-select: none;
     }}
-    .abo-a {{ background: #2F6FAE; color: #FFFFFF; }}  /* Anti-A (blue) */
-    .abo-b {{ background: #D8C06A; color: #111111; }}  /* Anti-B (yellow) */
-    .abo-d {{ background: #A9B4BB; color: #111111; }}  /* Anti-D (silver) */
+    .abo-a {{ background: #4F9BD9; color: #FFFFFF; }}  /* Anti-A (blue) */
+    .abo-b {{ background: #F3D35C; color: #111111; }}  /* Anti-B (yellow) */
+    .abo-d {{ background: #D3DAE2; color: #111111; }}  /* Anti-D (silver) */
     .abo-ctl {{ background: #FFFFFF; color: #111111; border: 1px solid #D0D0D0; }} /* Control (white) */
-    .abo-a1 {{ background: #D8A25A; color: #111111; }} /* A1 cells (light orange) */
-    .abo-bcells {{ background: #D8A25A; color: #111111; }} /* B cells (light orange) */
+    .abo-a1 {{ background: #F2B274; color: #111111; }} /* A1 cells (light orange) */
+    .abo-bcells {{ background: #F2B274; color: #111111; }} /* B cells (light orange) */
 
     /* Neonate card specific */
     .neo-ab {{ background: #FFFFFF; color: #111111; border: 1px solid #D0D0D0; }} /* Anti-AB (white) */
-    .neo-dat {{ background: #B7D7B1; color: #0A3D0A; border: 1px solid rgba(10,61,10,0.18); }} /* DAT (light green) */
+    .neo-dat {{ background: #BFE9D2; color: #0A3D0A; border: 1px solid rgba(10,61,10,0.18); }} /* DAT (light green) */
     .ctl-icon {{
         position: absolute;
         left: 10px;
