@@ -416,7 +416,7 @@ UI_THEME_CSS = """
     --hdr-border: {hdr_border};
 }}
 
-    /* Elegant expander headers */
+    /* Elegant expander headers (robust to Streamlit DOM changes) */
     div[data-testid="stExpander"] details {{{{
         border: 1px solid var(--sec-border) !important;
         border-radius: 16px !important;
@@ -431,7 +431,8 @@ UI_THEME_CSS = """
     div[data-testid="stExpander"] details > summary:hover {{{{
         background: var(--sec-bg-hover) !important;
     }}}}
-    div[data-testid="stExpander"] details > summary p {{{{
+    /* Color EVERYTHING inside the expander header (text + icons), regardless of tag structure */
+    div[data-testid="stExpander"] details > summary * {{{{
         color: var(--sec-fg) !important;
         font-weight: 800 !important;
         letter-spacing: 0.2px;
