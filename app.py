@@ -873,8 +873,8 @@ def patient_antigen_negative_reminder(antibodies: list, strong: bool = True) -> 
     if not uniq:
         return ""
 
-    title = "✅ Final confirmation step (Patient antigen check + unit selection)" if strong else \
-            ⚠️ Before final reporting (Patient antigen check + unit selection)"
+    title = ("✅ Final confirmation step (Patient antigen check + unit selection)"
+             if strong else "⚠️ Before final reporting (Patient antigen check + unit selection)")
     subtitle = "Confirmed clinically significant antibody(ies) identified" if strong else \
                "Resolved / lower-likelihood antibody signal — confirm before finalizing"
 
