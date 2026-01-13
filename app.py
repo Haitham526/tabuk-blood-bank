@@ -465,6 +465,22 @@ div[data-testid="stExpander"] .stText {{
 }}
 
 /* App header (Doctor Decision) */
+        .site-title{
+            width:100%;
+            text-align:center;
+            font-weight:900;
+            letter-spacing:.3px;
+            font-size:38px;
+            line-height:1.05;
+            margin:10px 0 14px 0;
+            color: var(--hdr-bg);
+            text-shadow: 0 1px 0 rgba(255,255,255,.6);
+        }
+        @media (max-width: 900px){
+            .site-title{ font-size:30px; }
+        }
+
+
     .app-header {{
         background: var(--hdr-bg);
         border: 1px solid var(--hdr-border);
@@ -1835,11 +1851,12 @@ if nav == "Supervisor":
 # 7) WORKSTATION PAGE
 # =============================================================================
 else:
+    st.markdown("""<div class='site-title'>Maternity &amp; Children Hospital – Tabuk</div>""", unsafe_allow_html=True)
+
     st.markdown("""
-    <div class='app-header'>
+        <div class='app-header'>
         <div class='app-title'>Doctor Decision</div>
-        <div class='app-subtitle'>Maternity & Children Hospital – Tabuk</div>
-        <div class='app-tagline'>ABO • RhD • DAT • Phenotype • Antibody ID</div>
+            <div class='app-tagline'>ABO • RhD • DAT • Phenotype • Antibody ID</div>
     </div>
     """, unsafe_allow_html=True)
 
