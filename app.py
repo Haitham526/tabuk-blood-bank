@@ -1194,14 +1194,26 @@ def build_abo_guidance(
                 ]
             )
         elif screen_any_pos:
+            # Priority: address reverse interference when the antibody screen is positive.
             add(
-                "Extra (Unexpected) — Screen POSITIVE",
+                "Extra (Unexpected) — Screen POSITIVE (priority)",
                 [
-                    "Antibody screen is POSITIVE — an antibody may be responsible for the unexpected reverse reaction (e.g., cold-reactive allo/autoantibody).",
+                    "Antibody screen is POSITIVE — an antibody may be responsible for the unexpected reverse reaction (e.g., cold-reactive allo/autoantibody) and/or rouleaux.",
                     "1) Rouleaux: perform saline replacement (reverse grouping).",
-                    "2) Cold antibody (e.g., M, P1): perform pre-warming technique (37°C)."
-                ]
+                    "2) Cold antibody (e.g., M, P1): perform pre-warming technique (37°C).",
+                    "Proceed with antibody investigation/identification as indicated, then re-interpret ABO after interference is addressed.",
+                ],
             )
+            # Still consider Anti-A1 when the pattern fits (may coexist with other antibodies).
+            add(
+                "Also consider: Anti-A1 in an A subgroup (pattern-based)",
+                [
+                    "Because A1 cells are reactive with an A (or AB) forward type, Anti-A1 in an A2/A2B subgroup remains a possible contributor (may coexist with other antibodies).",
+                    "👉 Test patient red cells with Anti-A1 lectin (Dolichos biflorus).",
+                    "👉 Test patient serum with A2 reagent cells.",
+                ],
+            )
+
         else:
             add(
                 "Extra (Unexpected) — Screen NEGATIVE",
@@ -1378,8 +1390,9 @@ def build_how_to_report(
         if screen_any_positive:
             lines.append(
                 "Unexpected reverse reaction noted (A1 cells reactive). Antibody screen is POSITIVE, which may account for the unexpected reverse reactivity "
-                "(e.g., cold-reactive allo/autoantibody and/or rouleaux). Proceed with interference resolution per SOP (e.g., saline replacement and/or pre-warming technique) "
-                "and interpret ABO only after resolution."
+                "(e.g., cold-reactive allo/autoantibody and/or rouleaux). Proceed with interference resolution per SOP (e.g., saline replacement and/or pre-warming technique), "
+                "and proceed with antibody investigation/identification as indicated. Because the pattern includes A1-cell reactivity, Anti-A1 in an A subgroup (A2/A2B) "
+                "should still be considered as a possible contributor; confirm with Anti-A1 lectin and serum testing with A2 cells per SOP. Interpret/finalize ABO only after resolution/confirmation."
             )
         else:
             lines.append(
