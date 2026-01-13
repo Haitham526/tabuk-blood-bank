@@ -308,38 +308,22 @@ if "ui_theme" not in st.session_state:
 
 def _get_theme_vars(name: str) -> dict:
     name = (name or "").strip().lower()
-
-    # Navy / Deep Blue
     if name.startswith("navy"):
         return {
-            # Section (expander) header colors
             "sec_bg": "#0B1B3A",
             "sec_bg_hover": "#112A57",
             "sec_fg": "#B9F5FF",
             "sec_border": "rgba(11, 27, 58, 0.35)",
             "sec_shadow": "0 6px 16px rgba(11, 27, 58, 0.10)",
-            # App header colors
-            "hdr_bg": "#08162F",
-            "hdr_title": "#B9F5FF",
-            "hdr_sub": "#FFFFFF",
-            "hdr_tag": "#D7F9FF",
-            "hdr_border": "rgba(185, 245, 255, 0.35)",
         }
-
-    # Burgundy / Wine (default)
+    # Burgundy / Wine
     return {
         "sec_bg": "#5A0F1A",
         "sec_bg_hover": "#721425",
         "sec_fg": "#FFFFFF",
         "sec_border": "rgba(90, 15, 26, 0.30)",
         "sec_shadow": "0 6px 16px rgba(90, 15, 26, 0.10)",
-        "hdr_bg": "#4A0B14",
-        "hdr_title": "#FFFFFF",
-        "hdr_sub": "#F6F1F2",
-        "hdr_tag": "#FFF3D6",
-        "hdr_border": "rgba(255, 243, 214, 0.35)",
     }
-
 
 THEME_VARS = _get_theme_vars(st.session_state.ui_theme)
 
@@ -410,11 +394,6 @@ st.markdown(
         --sec-fg: {THEME_VARS["sec_fg"]};
         --sec-border: {THEME_VARS["sec_border"]};
         --sec-shadow: {THEME_VARS["sec_shadow"]};
-        --hdr-bg: {THEME_VARS["hdr_bg"]};
-        --hdr-title: {THEME_VARS["hdr_title"]};
-        --hdr-sub: {THEME_VARS["hdr_sub"]};
-        --hdr-tag: {THEME_VARS["hdr_tag"]};
-        --hdr-border: {THEME_VARS["hdr_border"]};
     }}
 
     /* Elegant expander headers */
@@ -446,79 +425,7 @@ st.markdown(
     div[data-testid="stExpander"] .stMarkdown, div[data-testid="stExpander"] .stText {{
         margin-top: 0.25rem;
     }}
-    
-    /* App header (Doctor Decision) */
-    .app-header {
-        background: var(--hdr-bg);
-        border: 1px solid var(--hdr-border);
-        border-radius: 14px;
-        padding: 14px 18px;
-        margin: 6px 0 14px 0;
-        text-align: center;
-        box-shadow: var(--sec-shadow);
-    }
-    .app-header .app-title {
-        font-size: 34px;
-        font-weight: 900;
-        letter-spacing: 0.6px;
-        color: var(--hdr-title);
-        line-height: 1.05;
-        margin-bottom: 4px;
-    }
-    .app-header .app-subtitle {
-        font-size: 18px;
-        font-weight: 700;
-        color: var(--hdr-sub);
-        letter-spacing: 0.2px;
-        margin-bottom: 4px;
-    }
-    .app-header .app-tagline {
-        font-size: 13px;
-        font-weight: 700;
-        color: var(--hdr-tag);
-        opacity: 0.95;
-        letter-spacing: 0.4px;
-    }
-
-    /* ABO card colored labels */
-    .abo-label {
-        width: 100%;
-        height: 34px;
-        border-radius: 10px;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        font-weight: 900;
-        letter-spacing: 0.3px;
-        margin: 2px 0 6px 0;
-        border: 1px solid rgba(0,0,0,0.08);
-        position: relative;
-        user-select: none;
-    }
-    .abo-a { background: #1E88E5; color: #FFFFFF; }  /* Anti-A (blue) */
-    .abo-b { background: #FDD835; color: #111111; }  /* Anti-B (yellow) */
-    .abo-d { background: #B0BEC5; color: #111111; }  /* Anti-D (silver) */
-    .abo-ctl { background: #FFFFFF; color: #111111; border: 1px solid #D0D0D0; } /* Control (white) */
-    .abo-a1 { background: #FFB74D; color: #111111; } /* A1 cells (light orange) */
-    .abo-bcells { background: #FFB74D; color: #111111; } /* B cells (light orange) */
-
-    /* Neonate card specific */
-    .neo-ab { background: #FFFFFF; color: #111111; border: 1px solid #D0D0D0; } /* Anti-AB (white) */
-    .neo-dat { background: #C8E6C9; color: #0A3D0A; border: 1px solid rgba(10,61,10,0.18); } /* DAT (light green) */
-    .ctl-icon {
-        position: absolute;
-        left: 10px;
-        top: 50%;
-        transform: translateY(-50%);
-        font-size: 11px;
-        font-weight: 900;
-        padding: 2px 7px;
-        border-radius: 999px;
-        background: rgba(0,0,0,0.08);
-        color: #111111;
-        letter-spacing: 0.4px;
-    }
-</style>
+    </style>
     """,
     unsafe_allow_html=True,
 )
@@ -546,13 +453,6 @@ GRADES = ["0", "+1", "+2", "+3", "+4", "Hemolysis"]  # antibody ID grades
 YN3 = ["Not Done", "Negative", "Positive"]
 
 ABO_GRADES = ["Not Done", "0", "+1", "+2", "+3", "+4", "Mixed-field", "Hemolysis"]
-
-
-def _render_abo_label_html(text: str, cls: str, ctl_badge: bool = False) -> str:
-    badge = "<span class='ctl-icon'>ctl</span>" if ctl_badge else ""
-    safe = str(text)
-    return f"<div class='abo-label {cls}'>{badge}{safe}</div>"
-
 SEX_OPTS = ["", "M", "F"]
 
 PHENO_OPTS = ["Not Done", "Not Detected", "Detected"]  # antigen absent/present
@@ -1807,10 +1707,9 @@ if nav == "Supervisor":
 # =============================================================================
 else:
     st.markdown("""
-    <div class='app-header'>
-        <div class='app-title'>Doctor Decision</div>
-        <div class='app-subtitle'>Maternity & Children Hospital – Tabuk</div>
-        <div class='app-tagline'>ABO • RhD • DAT • Phenotype • Antibody ID</div>
+    <div class='hospital-logo'>
+        <h2>Maternity & Children Hospital - Tabuk</h2>
+        <h4 style='color:#555'>Blood Bank Serology Unit</h4>
     </div>
     """, unsafe_allow_html=True)
 
@@ -1910,23 +1809,12 @@ else:
             cord_sample = st.checkbox("Cord blood sample?", value=False, key="abo_cord_sample")
 
             c1, c2, c3, c4, c5 = st.columns(5)
-            with c1:
-                st.markdown(_render_abo_label_html('Anti-A', 'abo-a'), unsafe_allow_html=True)
-                antiA = st.selectbox('Anti-A', ABO_GRADES, key='abo_neonate_antiA', label_visibility='collapsed')
-            with c2:
-                st.markdown(_render_abo_label_html('Anti-B', 'abo-b'), unsafe_allow_html=True)
-                antiB = st.selectbox('Anti-B', ABO_GRADES, key='abo_neonate_antiB', label_visibility='collapsed')
-            with c3:
-                st.markdown(_render_abo_label_html('Anti-AB', 'neo-ab'), unsafe_allow_html=True)
-                antiAB = st.selectbox('Anti-AB', ABO_GRADES, key='abo_neonate_antiAB', label_visibility='collapsed')
-            with c4:
-                st.markdown(_render_abo_label_html('Anti-D (DVI+)', 'abo-d'), unsafe_allow_html=True)
-                antiD = st.selectbox('Anti-D', ABO_GRADES, key='abo_neonate_antiD', label_visibility='collapsed')
-            with c5:
-                st.markdown(_render_abo_label_html('Control', 'abo-ctl', ctl_badge=True), unsafe_allow_html=True)
-                ctl  = st.selectbox('Control', ABO_GRADES, key='abo_neonate_ctl', label_visibility='collapsed')
-            st.markdown(_render_abo_label_html('DAT', 'neo-dat'), unsafe_allow_html=True)
-            datg = st.selectbox('DAT (grade or Not Done)', ABO_GRADES, key='abo_neonate_dat', label_visibility='collapsed')
+            antiA = c1.selectbox("Anti-A", ABO_GRADES, key="abo_neonate_antiA")
+            antiB = c2.selectbox("Anti-B", ABO_GRADES, key="abo_neonate_antiB")
+            antiAB = c3.selectbox("Anti-AB", ABO_GRADES, key="abo_neonate_antiAB")
+            antiD = c4.selectbox("Anti-D", ABO_GRADES, key="abo_neonate_antiD")
+            ctl  = c5.selectbox("Control", ABO_GRADES, key="abo_neonate_ctl")
+            datg = st.selectbox("DAT (grade or Not Done)", ABO_GRADES, key="abo_neonate_dat")
 
             abo_raw_current = {
                 "mode": "neonate",
@@ -1947,26 +1835,12 @@ else:
             """, unsafe_allow_html=True)
 
             c1, c2, c3, c4, c5, c6 = st.columns(6)
-            with c1:
-                st.markdown(_render_abo_label_html('Anti-A', 'abo-a'), unsafe_allow_html=True)
-                antiA = st.selectbox('Anti-A', ABO_GRADES, key='abo_adult_antiA', label_visibility='collapsed')
-            with c2:
-                st.markdown(_render_abo_label_html('Anti-B', 'abo-b'), unsafe_allow_html=True)
-                antiB = st.selectbox('Anti-B', ABO_GRADES, key='abo_adult_antiB', label_visibility='collapsed')
-            with c3:
-                st.markdown(_render_abo_label_html('Anti-D (DVI−)', 'abo-d'), unsafe_allow_html=True)
-                antiD = st.selectbox('Anti-D', ABO_GRADES, key='abo_adult_antiD', label_visibility='collapsed')
-            with c4:
-                st.markdown(_render_abo_label_html('Control', 'abo-ctl'), unsafe_allow_html=True)
-                ctl  = st.selectbox('Control', ABO_GRADES, key='abo_adult_ctl', label_visibility='collapsed')
-            with c5:
-                st.markdown(_render_abo_label_html('A1 cells', 'abo-a1'), unsafe_allow_html=True)
-                a1cells = st.selectbox('A1 cells', ABO_GRADES, key='abo_adult_a1', label_visibility='collapsed')
-            with c6:
-                st.markdown(_render_abo_label_html('B cells', 'abo-bcells'), unsafe_allow_html=True)
-                bcells  = st.selectbox('B cells', ABO_GRADES, key='abo_adult_b', label_visibility='collapsed')
-
-
+            antiA = c1.selectbox("Anti-A", ABO_GRADES, key="abo_adult_antiA")
+            antiB = c2.selectbox("Anti-B", ABO_GRADES, key="abo_adult_antiB")
+            antiD = c3.selectbox("Anti-D", ABO_GRADES, key="abo_adult_antiD")
+            ctl  = c4.selectbox("Control", ABO_GRADES, key="abo_adult_ctl")
+            a1cells = c5.selectbox("A1 cells", ABO_GRADES, key="abo_adult_a1")
+            bcells  = c6.selectbox("B cells", ABO_GRADES, key="abo_adult_b")
 
             abo_raw_current = {
                 "mode": "adult",
@@ -2190,78 +2064,79 @@ else:
     # ----------------------------------------------------------------------
     # MAIN FORM: Antibody Identification
     # ----------------------------------------------------------------------
-    with st.form("main_form", clear_on_submit=False):
-        st.write("### Antibody Identification — Reaction Entry")
-        L, R = st.columns([1, 2.5])
+    with st.expander("🧪 Antibody Identification", expanded=False):
+        with st.form("main_form", clear_on_submit=False):
+            st.write("### Antibody Identification — Reaction Entry")
+            L, R = st.columns([1, 2.5])
     
-        with L:
-            st.write("Controls")
-            ac_res = st.radio("Auto Control (AC)", ["Negative", "Positive"], key="rx_ac")
+            with L:
+                st.write("Controls")
+                ac_res = st.radio("Auto Control (AC)", ["Negative", "Positive"], key="rx_ac")
     
-            recent_tx = st.checkbox("Recent transfusion (≤ 4 weeks)?", value=False, key="recent_tx")
+                recent_tx = st.checkbox("Recent transfusion (≤ 4 weeks)?", value=False, key="recent_tx")
     
-            if recent_tx:
-                st.markdown("""
-                <div class='clinical-danger'>
-                🩸 <b>RECENT TRANSFUSION FLAGGED</b><br>
-                ⚠️ Consider <b>DHTR</b> / anamnestic alloantibody response if compatible with clinical picture.<br>
-                <ul>
-                  <li>Review Hb trend, hemolysis markers (bilirubin/LDH/haptoglobin), DAT as indicated.</li>
-                  <li>Compare pre- vs post-transfusion samples if available.</li>
-                  <li>Escalate early if new alloantibody suspected.</li>
-                </ul>
-                </div>
-                """, unsafe_allow_html=True)
+                if recent_tx:
+                    st.markdown("""
+                    <div class='clinical-danger'>
+                    🩸 <b>RECENT TRANSFUSION FLAGGED</b><br>
+                    ⚠️ Consider <b>DHTR</b> / anamnestic alloantibody response if compatible with clinical picture.<br>
+                    <ul>
+                      <li>Review Hb trend, hemolysis markers (bilirubin/LDH/haptoglobin), DAT as indicated.</li>
+                      <li>Compare pre- vs post-transfusion samples if available.</li>
+                      <li>Escalate early if new alloantibody suspected.</li>
+                    </ul>
+                    </div>
+                    """, unsafe_allow_html=True)
     
-            st.write("Screening")
-            s_I   = st.selectbox("Scn I", GRADES, key="rx_sI")
-            s_II  = st.selectbox("Scn II", GRADES, key="rx_sII")
-            s_III = st.selectbox("Scn III", GRADES, key="rx_sIII")
+                st.write("Screening")
+                s_I   = st.selectbox("Scn I", GRADES, key="rx_sI")
+                s_II  = st.selectbox("Scn II", GRADES, key="rx_sII")
+                s_III = st.selectbox("Scn III", GRADES, key="rx_sIII")
     
-        with R:
-            st.write("Panel Reactions")
-            g1, g2 = st.columns(2)
-            with g1:
-                p1 = st.selectbox("1", GRADES, key="rx_p1")
-                p2 = st.selectbox("2", GRADES, key="rx_p2")
-                p3 = st.selectbox("3", GRADES, key="rx_p3")
-                p4 = st.selectbox("4", GRADES, key="rx_p4")
-                p5 = st.selectbox("5", GRADES, key="rx_p5")
-                p6 = st.selectbox("6", GRADES, key="rx_p6")
-            with g2:
-                p7  = st.selectbox("7", GRADES, key="rx_p7")
-                p8  = st.selectbox("8", GRADES, key="rx_p8")
-                p9  = st.selectbox("9", GRADES, key="rx_p9")
-                p10 = st.selectbox("10", GRADES, key="rx_p10")
-                p11 = st.selectbox("11", GRADES, key="rx_p11")
+            with R:
+                st.write("Panel Reactions")
+                g1, g2 = st.columns(2)
+                with g1:
+                    p1 = st.selectbox("1", GRADES, key="rx_p1")
+                    p2 = st.selectbox("2", GRADES, key="rx_p2")
+                    p3 = st.selectbox("3", GRADES, key="rx_p3")
+                    p4 = st.selectbox("4", GRADES, key="rx_p4")
+                    p5 = st.selectbox("5", GRADES, key="rx_p5")
+                    p6 = st.selectbox("6", GRADES, key="rx_p6")
+                with g2:
+                    p7  = st.selectbox("7", GRADES, key="rx_p7")
+                    p8  = st.selectbox("8", GRADES, key="rx_p8")
+                    p9  = st.selectbox("9", GRADES, key="rx_p9")
+                    p10 = st.selectbox("10", GRADES, key="rx_p10")
+                    p11 = st.selectbox("11", GRADES, key="rx_p11")
     
-        run_btn = st.form_submit_button("🚀 Run Analysis", use_container_width=True)
+            run_btn = st.form_submit_button("🚀 Run Analysis", use_container_width=True)
     
-    # ----------------------------------------------------------------------
-    # Run Analysis
-    # ----------------------------------------------------------------------
-    if run_btn:
-        if not st.session_state.lot_p or not st.session_state.lot_s:
-            st.error("⛔ Lots not configured by Supervisor.")
-            st.session_state.analysis_ready = False
-            st.session_state.analysis_payload = None
-        else:
-            in_p = {1:p1,2:p2,3:p3,4:p4,5:p5,6:p6,7:p7,8:p8,9:p9,10:p10,11:p11}
-            in_s = {"I": s_I, "II": s_II, "III": s_III}
+        # ----------------------------------------------------------------------
+        # Run Analysis
+        # ----------------------------------------------------------------------
+        if run_btn:
+            if not st.session_state.lot_p or not st.session_state.lot_s:
+                st.error("⛔ Lots not configured by Supervisor.")
+                st.session_state.analysis_ready = False
+                st.session_state.analysis_payload = None
+            else:
+                in_p = {1:p1,2:p2,3:p3,4:p4,5:p5,6:p6,7:p7,8:p8,9:p9,10:p10,11:p11}
+                in_s = {"I": s_I, "II": s_II, "III": s_III}
     
-            st.session_state.analysis_payload = {
-                "in_p": in_p,
-                "in_s": in_s,
-                "ac_res": ac_res,
-                "recent_tx": recent_tx,
-            }
-            st.session_state.analysis_ready = True
+                st.session_state.analysis_payload = {
+                    "in_p": in_p,
+                    "in_s": in_s,
+                    "ac_res": ac_res,
+                    "recent_tx": recent_tx,
+                }
+                st.session_state.analysis_ready = True
     
-    
-    # ----------------------------------------------------------------------
-    # ABO interpretation is shown inside the ABO expander after confirmation.
-    # (No auto-interpretation here to avoid premature discrepancy flags.)
-    # ----------------------------------------------------------------------
+        
+        # ----------------------------------------------------------------------
+        # ABO interpretation is shown inside the ABO expander after confirmation.
+        # (No auto-interpretation here to avoid premature discrepancy flags.)
+        # ----------------------------------------------------------------------
     # ----------------------------------------------------------------------
         # Antibody analysis output + Save (single Save button)
         # ----------------------------------------------------------------------
