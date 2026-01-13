@@ -398,6 +398,20 @@ st.markdown("""
     .dr-name { color: #8B0000; font-size: 15px; font-weight: bold; display: block;}
     .dr-title { color: #333; font-size: 11px; }
     div[data-testid="stDataEditor"] table { width: 100% !important; }
+
+    /* Status chips (to show where the issue is: ABO vs RhD) */
+    .status-row { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 8px; }
+    .status-chip {
+        display: inline-flex; align-items: center; gap: 6px;
+        padding: 6px 10px; border-radius: 999px;
+        font-weight: 800; font-size: 0.95rem;
+        border: 1px solid rgba(0,0,0,0.12);
+    }
+    .chip-ok { background: #d1e7dd; }
+    .chip-warn { background: #f8d7da; }
+    .chip-neutral { background: #e2e3e5; }
+    .chip-label { opacity: 0.75; font-weight: 900; letter-spacing: 0.2px; }
+
 </style>
 """, unsafe_allow_html=True)
 
@@ -1911,7 +1925,7 @@ else:
             purpose = st.radio("Purpose", ["Transfusion", "RhIG"], horizontal=True, key="abo_purpose")
             cord_sample = st.checkbox("Cord blood sample?", value=False, key="abo_cord_sample")
 
-            c1, c2, c3, c4, c5 = st.columns(5)
+            c1, c2, c3, c4, c5, c6 = st.columns(6)
             with c1:
                 st.markdown(_render_abo_label_html('Anti-A', 'abo-a'), unsafe_allow_html=True)
                 antiA = st.selectbox('Anti-A', ABO_GRADES, key='abo_neonate_antiA', label_visibility='collapsed')
@@ -1922,13 +1936,14 @@ else:
                 st.markdown(_render_abo_label_html('Anti-AB', 'neo-ab'), unsafe_allow_html=True)
                 antiAB = st.selectbox('Anti-AB', ABO_GRADES, key='abo_neonate_antiAB', label_visibility='collapsed')
             with c4:
-                st.markdown(_render_abo_label_html('Anti-D (DVI+)', 'abo-d'), unsafe_allow_html=True)
+                st.markdown(_render_abo_label_html('Anti-D (DVI+)', 'neo-d'), unsafe_allow_html=True)
                 antiD = st.selectbox('Anti-D', ABO_GRADES, key='abo_neonate_antiD', label_visibility='collapsed')
             with c5:
-                st.markdown(_render_abo_label_html('Control', 'abo-ctl', ctl_badge=True), unsafe_allow_html=True)
-                ctl  = st.selectbox('Control', ABO_GRADES, key='abo_neonate_ctl', label_visibility='collapsed')
-            st.markdown(_render_abo_label_html('DAT', 'neo-dat'), unsafe_allow_html=True)
-            datg = st.selectbox('DAT (grade or Not Done)', ABO_GRADES, key='abo_neonate_dat', label_visibility='collapsed')
+                st.markdown(_render_abo_label_html('Control', 'neo-ctl', show_ctl_icon=True), unsafe_allow_html=True)
+                ctl = st.selectbox('Control', ABO_GRADES, key='abo_neonate_ctl', label_visibility='collapsed')
+            with c6:
+                st.markdown(_render_abo_label_html('DAT', 'neo-dat'), unsafe_allow_html=True)
+                datg = st.selectbox('DAT (grade or Not Done)', ABO_GRADES, key='abo_neonate_dat', label_visibility='collapsed')
 
             abo_raw_current = {
                 "mode": "neonate",
@@ -2048,11 +2063,25 @@ else:
             guid = st.session_state.get("abo_guidance_confirmed") or {"general": [], "specific": []}
 
             is_discrep = bool(abo_interp.get("discrepancy", False)) or bool(abo_interp.get("invalid", False))
+            abo_final = abo_interp.get("abo_final", "Unknown")
+            rhd_final = abo_interp.get("rhd_final", "Unknown")
+
+            # Highlight exactly where the issue is (ABO vs RhD)
+            notes_join = " ".join([str(x) for x in abo_interp.get("notes", [])])
+            control_pos = "Control is POSITIVE" in notes_join
+            abo_issue = control_pos or ("Discrepancy" in abo_final) or ("Most probable" in abo_final) or (abo_final.strip().lower() in ("unknown", "invalid", "inconclusive"))
+            rhd_issue = control_pos or ("Inconclusive" in rhd_final) or (rhd_final.strip().lower() in ("unknown", "invalid"))
+
+            abo_chip = "chip-warn" if abo_issue else "chip-ok"
+            rhd_chip = "chip-warn" if rhd_issue else "chip-ok"
             if is_discrep:
                 st.markdown(f"""
                 <div class='clinical-danger'>
-                ⚠️ <b>ABO DISCREPANCY / SPECIAL SITUATION</b><br>
-                Current computed result: <b>ABO: {abo_interp.get('abo_final','')}</b> | <b>RhD: {abo_interp.get('rhd_final','')}</b>
+                  ⚠️ <b>ABO DISCREPANCY / SPECIAL SITUATION</b>
+                  <div class='status-row'>
+                    <span class='status-chip {abo_chip}'><span class='chip-label'>ABO</span> {abo_final}</span>
+                    <span class='status-chip {rhd_chip}'><span class='chip-label'>RhD</span> {rhd_final}</span>
+                  </div>
                 </div>
                 """, unsafe_allow_html=True)
 
@@ -2129,7 +2158,11 @@ else:
             else:
                 st.markdown(f"""
                 <div class='clinical-info'>
-                ✅ <b>ABO/RhD result is consistent</b>: <b>ABO: {abo_interp.get('abo_final','')}</b> | <b>RhD: {abo_interp.get('rhd_final','')}</b>
+                  ✅ <b>ABO/RhD result is consistent</b>
+                  <div class='status-row'>
+                    <span class='status-chip {abo_chip}'><span class='chip-label'>ABO</span> {abo_final}</span>
+                    <span class='status-chip {rhd_chip}'><span class='chip-label'>RhD</span> {rhd_final}</span>
+                  </div>
                 </div>
                 """, unsafe_allow_html=True)
         else:
