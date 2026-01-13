@@ -850,30 +850,108 @@ def background_auto_resolution(background_list: list, active_not_excluded: set, 
     return auto_ruled_out, supported, inconclusive, no_disc
 
 def patient_antigen_negative_reminder(antibodies: list, strong: bool = True) -> str:
+    """
+    UI safety reminder shown after antibody interpretation.
+    - Strong = confirmed/clinically significant.
+    - Not-strong = resolved/likely insignificant but still requires final confirmation.
+    NOTE: We keep this strictly as a reminder; local policy and clinical context prevail.
+    """
     if not antibodies:
         return ""
+
+    # Normalize: we receive antigen symbols (e.g., "K", "E", "Jka") not full names.
     uniq = []
-    for a in antibodies:
-        if a and a not in uniq:
-            uniq.append(a)
-    uniq = [a for a in uniq if a not in IGNORED_AGS]
+    seen = set()
+    for ag in antibodies:
+        if not ag or ag in IGNORED_AGS:
+            continue
+        if ag not in seen:
+            seen.add(ag)
+            uniq.append(ag)
+
     if not uniq:
         return ""
-    title = "✅ Final confirmation step (Patient antigen check)" if strong else "⚠️ Before final reporting (Patient antigen check)"
-    box_class = "clinical-danger" if strong else "clinical-alert"
-    intro = ("Confirm the patient is <b>ANTIGEN-NEGATIVE</b> for the corresponding antigen(s) to support the antibody identification."
-             if strong else
-             "Before you finalize/report, confirm the patient is <b>ANTIGEN-NEGATIVE</b> for the corresponding antigen(s).")
-    bullets = "".join([f"<li>Anti-{ag} → verify patient is <b>{ag}-negative</b> (phenotype/genotype; pre-transfusion sample preferred).</li>" for ag in uniq])
-    return f"""
-    <div class='{box_class}'>
-      <b>{title}</b><br>
-      {intro}
-      <ul style="margin-top:6px;">
-        {bullets}
+
+    title = "✅ Final confirmation step (Patient antigen check + unit selection)" if strong else \
+            "⚠️ Before final reporting (Patient antigen check + unit selection)"
+    subtitle = "Confirmed clinically significant antibody(ies) identified" if strong else \
+               "Resolved / lower-likelihood antibody signal — confirm before finalizing"
+
+    action = "MUST" if strong else "Prefer to"
+    bullets = []
+    for ag in uniq:
+        if ag.upper() == "M":
+            bullets.append(
+                "<li><b>Anti-M</b>: <b>Prefer M-negative</b> units. "
+                "If the antibody is <b>cold-reactive only</b> and M-negative units are not readily available, "
+                "<b>AHG-compatible / prewarmed crossmatch-compatible</b> units may be acceptable per local policy & clinical context. "
+                "If reactive at 37°C/AHG, treat as clinically significant and provide <b>M-negative</b> units.</li>"
+            )
+        else:
+            bullets.append(
+                f"<li><b>Anti-{ag}</b>: {action} select <b>{ag}-negative</b> RBC units and "
+                f"confirm the patient is <b>{ag}-negative</b> (or document justification per policy).</li>"
+            )
+
+    html = f"""
+    <div class="ba-box ba-border-soft" style="background:rgba(245, 245, 245, 0.75);">
+      <div style="font-weight:800; font-size:1.02rem; margin-bottom:.25rem;">{title}</div>
+      <div style="font-size:.92rem; margin-bottom:.4rem; opacity:.95;">{subtitle}</div>
+      <ul style="margin:0 0 0 1.1rem; padding:0;">
+        {''.join(bullets)}
       </ul>
     </div>
     """
+    return html
+
+
+def not_excluded_antigen_negative_notice(antigens: list) -> str:
+    """
+    Shown when an antibody is NOT EXCLUDED (i.e., still possible).
+    The note must disappear automatically once the antibody becomes excluded by additional cells.
+    """
+    if not antigens:
+        return ""
+
+    uniq = []
+    seen = set()
+    for ag in antigens:
+        if not ag or ag in IGNORED_AGS:
+            continue
+        if ag not in seen:
+            seen.add(ag)
+            uniq.append(ag)
+
+    if not uniq:
+        return ""
+
+    bullets = []
+    for ag in uniq:
+        if ag.upper() == "M":
+            bullets.append(
+                "<li><b>Anti-M (not excluded)</b>: <b>Prefer M-negative</b> units; "
+                "if only cold-reactive and M-negative units are not readily available, "
+                "<b>AHG-compatible / prewarmed crossmatch-compatible</b> units may be acceptable per local policy.</li>"
+            )
+        else:
+            bullets.append(
+                f"<li><b>Anti-{ag} (not excluded)</b>: until excluded, select <b>{ag}-negative</b> RBC units (or follow local policy).</li>"
+            )
+
+    html = f"""
+    <div class="ba-box ba-border-warn" style="background:rgba(255, 250, 230, 0.92);">
+      <div style="font-weight:850; font-size:1.0rem; margin-bottom:.25rem;">⚠️ Not excluded — treat as potentially significant</div>
+      <div style="font-size:.92rem; margin-bottom:.4rem; opacity:.95;">
+        These antibodies are <b>not excluded</b>. If transfusion is required <b>before exclusion</b>, consider antigen-negative selection as below.
+      </div>
+      <ul style="margin:0 0 0 1.1rem; padding:0;">
+        {''.join(bullets)}
+      </ul>
+    </div>
+    """
+    return html
+
+
 
 def anti_g_alert_html(strong: bool = False) -> str:
     box = "clinical-danger" if strong else "clinical-alert"
@@ -2569,6 +2647,10 @@ else:
                         st.markdown(patient_antigen_negative_reminder(sorted(list(confirmed)), strong=True), unsafe_allow_html=True)
                     elif resolved:
                         st.markdown(patient_antigen_negative_reminder(sorted(list(resolved)), strong=False), unsafe_allow_html=True)
+                    if other_sig_final or other_cold_final:
+                        _ne = sorted(list(set(other_sig_final + other_cold_final)))
+                        st.markdown(not_excluded_antigen_negative_notice(_ne), unsafe_allow_html=True)
+
     
                     d_present = ("D" in confirmed) or ("D" in resolved) or ("D" in needs_work)
                     c_present = ("C" in confirmed) or ("C" in resolved) or ("C" in needs_work) or ("C" in supported_bg) or ("C" in other_sig_final)
