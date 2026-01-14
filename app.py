@@ -6,7 +6,6 @@ import base64
 import requests
 from pathlib import Path
 from itertools import combinations
-import math
 import hashlib
 import re
 from typing import Dict, Any, List, Tuple, Optional
@@ -851,377 +850,30 @@ def background_auto_resolution(background_list: list, active_not_excluded: set, 
     return auto_ruled_out, supported, inconclusive, no_disc
 
 def patient_antigen_negative_reminder(antibodies: list, strong: bool = True) -> str:
-    """
-    UI safety reminder shown after antibody interpretation.
-    - Strong = confirmed/clinically significant.
-    - Not-strong = resolved/likely insignificant but still requires final confirmation.
-    NOTE: We keep this strictly as a reminder; local policy and clinical context prevail.
-    """
     if not antibodies:
         return ""
-
-    # Normalize: we receive antigen symbols (e.g., "K", "E", "Jka") not full names.
     uniq = []
-    seen = set()
-    for ag in antibodies:
-        if not ag or ag in IGNORED_AGS:
-            continue
-        if ag not in seen:
-            seen.add(ag)
-            uniq.append(ag)
-
+    for a in antibodies:
+        if a and a not in uniq:
+            uniq.append(a)
+    uniq = [a for a in uniq if a not in IGNORED_AGS]
     if not uniq:
         return ""
-
-    title = ("✅ Final confirmation step (Patient antigen check + unit selection)"
-             if strong else "⚠️ Before final reporting (Patient antigen check + unit selection)")
-    subtitle = "Confirmed clinically significant antibody(ies) identified" if strong else \
-               "Resolved / lower-likelihood antibody signal — confirm before finalizing"
-
-    action = "MUST" if strong else "Prefer to"
-    bullets = []
-    for ag in uniq:
-        if ag.upper() == "M":
-            bullets.append(
-                "<li><b>Anti-M</b>: <b>Prefer M-negative</b> units. "
-                "If the antibody is <b>cold-reactive only</b> and M-negative units are not readily available, "
-                "<b>AHG-compatible / prewarmed crossmatch-compatible</b> units may be acceptable per local policy & clinical context. "
-                "If reactive at 37°C/AHG, treat as clinically significant and provide <b>M-negative</b> units.</li>"
-            )
-        else:
-            bullets.append(
-                f"<li><b>Anti-{ag}</b>: {action} select <b>{ag}-negative</b> RBC units and "
-                f"confirm the patient is <b>{ag}-negative</b> (or document justification per policy).</li>"
-            )
-
-    html = f"""
-    <div class="ba-box ba-border-soft" style="background:rgba(245, 245, 245, 0.75);">
-      <div style="font-weight:800; font-size:1.02rem; margin-bottom:.25rem;">{title}</div>
-      <div style="font-size:.92rem; margin-bottom:.4rem; opacity:.95;">{subtitle}</div>
-      <ul style="margin:0 0 0 1.1rem; padding:0;">
-        {''.join(bullets)}
+    title = "✅ Final confirmation step (Patient antigen check)" if strong else "⚠️ Before final reporting (Patient antigen check)"
+    box_class = "clinical-danger" if strong else "clinical-alert"
+    intro = ("Confirm the patient is <b>ANTIGEN-NEGATIVE</b> for the corresponding antigen(s) to support the antibody identification."
+             if strong else
+             "Before you finalize/report, confirm the patient is <b>ANTIGEN-NEGATIVE</b> for the corresponding antigen(s).")
+    bullets = "".join([f"<li>Anti-{ag} → verify patient is <b>{ag}-negative</b> (phenotype/genotype; pre-transfusion sample preferred).</li>" for ag in uniq])
+    return f"""
+    <div class='{box_class}'>
+      <b>{title}</b><br>
+      {intro}
+      <ul style="margin-top:6px;">
+        {bullets}
       </ul>
     </div>
     """
-    return html
-
-
-
-
-# =============================================================================
-# Saudi donor antigen/phenotype frequency matrix (for probability-based unit search)
-# NOTE:
-# - Within-system linkage is handled using phenotype frequencies when available (Rh, KEL, JK, FY, MNS).
-# - Between-system independence is assumed (common practical approximation).
-#
-# Data sources (Saudi donor studies):
-# - Rh (D,C,c,E,e) + K: Riyadh donors n=4675 (Alalshaikh et al., 2022; Table 1 & Table 3)
-# - KEL (K/k phenotype): Jeddah donors n=758 (Felimban et al., 2021; Table 1)  [used mainly for k-negative rarity]
-# - JK phenotypes: Western region donors n=14987 (Halawani et al., 2025; Saudi subgroup; phenotypes)
-# - FY phenotypes: Western region donors n=21496 (Halawani et al., 2025; Table 3)
-# - MNS phenotypes: Jazan donors n=149 (Halawani et al., 2021; Table 2)
-#
-# IMPORTANT: If a required antigen is not covered by the matrix, the estimator will report it as "no local data"
-#            and will avoid generating a misleading probability.
-# =============================================================================
-
-# --- Rh phenotype frequencies (Riyadh; % converted to fraction)
-SAUDI_RH_PHENO_FREQ = {
-    "CCDEe": 0.0004,
-    "CCDee": 0.2178,
-    "ccDEE": 0.0272,
-    "ccDEe": 0.1040,
-    "ccDee": 0.0860,
-    "CcDEe": 0.1228,
-    "CcDee": 0.3061,
-    "CcDEE": 0.0002,
-    "ccdee": 0.1206,
-    "ccdEe": 0.0034,
-    "Ccdee": 0.0105,
-    "CCdee": 0.0006,
-    "CcdEE": 0.0002,
-    "ccdEE": 0.0002,
-}
-
-# --- Rh antigen frequencies (Riyadh; % converted to fraction) - fallback for single antigen math
-SAUDI_RH_ANTIGEN_POS_FREQ = {
-    "D": 0.864,
-    "C": 0.659,
-    "c": 0.781,
-    "E": 0.258,
-    "e": 0.972,
-}
-
-# --- Kell K/k phenotype frequencies (Jeddah; % converted to fraction)
-SAUDI_KEL_KK_PHENO_FREQ = {
-    "K-k+": 0.877,
-    "K+k+": 0.113,
-    "K+k-": 0.0092,  # k-negative units (rare)
-}
-
-# --- Kidd JK phenotype frequencies among Saudi donors (Western region; % converted to fraction)
-SAUDI_JK_PHENO_FREQ = {
-    "Jk(a+b-)": 0.4604,
-    "Jk(a+b+)": 0.4148,
-    "Jk(a-b+)": 0.1209,
-    "Jk(a-b-)": 0.0003,
-}
-
-# --- Duffy FY phenotype frequencies among Saudi donors (Western region; % converted to fraction)
-SAUDI_FY_PHENO_FREQ = {
-    "Fy(a+b-)": 0.2153,
-    "Fy(a+b+)": 0.0666,
-    "Fy(a-b+)": 0.2174,
-    "Fy(a-b-)": 0.5007,
-}
-
-# --- MNS phenotype frequencies (Jazan; % converted to fraction)
-SAUDI_MNS_PHENO_FREQ = {
-    "M+N-S+s-": 0.0805,
-    "M+N-S+s+": 0.2416,
-    "M+N-S-s+": 0.1543,
-    "M+N-S-s-": 0.0067,
-    "M+N+S+s-": 0.0872,
-    "M+N+S+s+": 0.1612,
-    "M+N+S-s+": 0.1612,
-    "M+N+S-s-": 0.0,
-    "M-N+S+s-": 0.0,
-    "M-N+S-s+": 0.0671,
-    "M-N+S-s-": 0.0,
-    "M-N+S+s+": 0.0402,
-}
-
-_SUPPORTED_ANTIGENS = set(["D","C","c","E","e","K","k","Jka","Jkb","Fya","Fyb","M","N","S","s"])
-
-def _rh_pheno_has_antigen(ph: str, antigen: str) -> bool:
-    # ph example: "CcDee", "ccdee"
-    if antigen == "D":
-        return "D" in ph  # uppercase D => D positive; absence => d/d
-    return antigen in ph
-
-def _kel_phenotype_has_antigen(ph: str, antigen: str) -> bool:
-    # ph example: "K-k+", "K+k-"
-    if antigen == "K":
-        return "K+" in ph
-    if antigen == "k":
-        return "k+" in ph
-    return False
-
-def _jk_phenotype_has_antigen(ph: str, antigen: str) -> bool:
-    # ph example: "Jk(a+b+)"
-    if antigen == "Jka":
-        return "a+" in ph
-    if antigen == "Jkb":
-        return "b+" in ph
-    return False
-
-def _fy_phenotype_has_antigen(ph: str, antigen: str) -> bool:
-    # ph example: "Fy(a-b+)"
-    if antigen == "Fya":
-        return "a+" in ph
-    if antigen == "Fyb":
-        return "b+" in ph
-    return False
-
-def _mns_phenotype_has_antigen(ph: str, antigen: str) -> bool:
-    # ph example: "M+N-S+s+"
-    return f"{antigen}+" in ph
-
-def _system_probability_negative(required_negative: List[str]) -> float:
-    # Probability a random donor unit is NEGATIVE for all antigens in required_negative (within that system).
-    if not required_negative:
-        return 1.0
-
-    rh_set = set(["D","C","c","E","e"])
-    if set(required_negative).issubset(rh_set):
-        p = 0.0
-        for ph, f in SAUDI_RH_PHENO_FREQ.items():
-            if all(not _rh_pheno_has_antigen(ph, ag) for ag in required_negative):
-                p += f
-        if p > 0:
-            return p
-        # fallback
-        p = 1.0
-        for ag in required_negative:
-            p *= (1.0 - SAUDI_RH_ANTIGEN_POS_FREQ.get(ag, 0.0))
-        return p
-
-    kel_set = set(["K","k"])
-    if set(required_negative).issubset(kel_set):
-        return sum(
-            f for ph, f in SAUDI_KEL_KK_PHENO_FREQ.items()
-            if all(not _kel_phenotype_has_antigen(ph, ag) for ag in required_negative)
-        )
-
-    jk_set = set(["Jka","Jkb"])
-    if set(required_negative).issubset(jk_set):
-        return sum(
-            f for ph, f in SAUDI_JK_PHENO_FREQ.items()
-            if all(not _jk_phenotype_has_antigen(ph, ag) for ag in required_negative)
-        )
-
-    fy_set = set(["Fya","Fyb"])
-    if set(required_negative).issubset(fy_set):
-        return sum(
-            f for ph, f in SAUDI_FY_PHENO_FREQ.items()
-            if all(not _fy_phenotype_has_antigen(ph, ag) for ag in required_negative)
-        )
-
-    mns_set = set(["M","N","S","s"])
-    if set(required_negative).issubset(mns_set):
-        return sum(
-            f for ph, f in SAUDI_MNS_PHENO_FREQ.items()
-            if all(not _mns_phenotype_has_antigen(ph, ag) for ag in required_negative)
-        )
-
-    return 1.0
-
-def _combined_probability_negative(required_negative: List[str]) -> Tuple[float, List[str], Dict[str, float]]:
-    # Combine per-system probabilities (between-system independence).
-    supported = [a for a in required_negative if a in _SUPPORTED_ANTIGENS]
-    missing = [a for a in required_negative if a not in _SUPPORTED_ANTIGENS]
-
-    rh = [a for a in supported if a in ["D","C","c","E","e"]]
-    kel = [a for a in supported if a in ["K","k"]]
-    jk = [a for a in supported if a in ["Jka","Jkb"]]
-    fy = [a for a in supported if a in ["Fya","Fyb"]]
-    mns = [a for a in supported if a in ["M","N","S","s"]]
-
-    breakdown = {}
-    p_total = 1.0
-
-    breakdown["Rh"] = _system_probability_negative(rh);  p_total *= breakdown["Rh"]
-    breakdown["KEL"] = _system_probability_negative(kel); p_total *= breakdown["KEL"]
-    breakdown["JK"] = _system_probability_negative(jk);   p_total *= breakdown["JK"]
-    breakdown["FY"] = _system_probability_negative(fy);   p_total *= breakdown["FY"]
-    breakdown["MNS"] = _system_probability_negative(mns); p_total *= breakdown["MNS"]
-
-    return p_total, missing, breakdown
-
-def _binom_prob_at_least_k(n: int, k: int, p: float) -> float:
-    # P(X >= k) where X ~ Binomial(n, p)
-    if p <= 0.0:
-        return 0.0
-    if p >= 1.0:
-        return 1.0
-    q = 1.0 - p
-    s = 0.0
-    for i in range(0, k):
-        s += math.comb(n, i) * (p ** i) * (q ** (n - i))
-    return max(0.0, min(1.0, 1.0 - s))
-
-def _min_units_to_screen(p: float, units_needed: int, confidence: float, n_max: int = 5000) -> Optional[int]:
-    if units_needed <= 0:
-        return 0
-    if p <= 0.0:
-        return None
-    if p >= 1.0:
-        return units_needed
-    for n in range(units_needed, n_max + 1):
-        if _binom_prob_at_least_k(n, units_needed, p) >= confidence:
-            return n
-    return None
-
-def render_antigen_negative_unit_estimator(antibodies: List[str], key_prefix: str = "est") -> None:
-    # Streamlit UI: estimate how many donor units to screen to find antigen-negative units.
-    if not antibodies:
-        return
-
-    preferred_only = set(["M"])  # Anti-M often treated as "preferred antigen-negative" depending on context.
-    required = [a for a in antibodies if a not in preferred_only]
-    preferred = [a for a in antibodies if a in preferred_only]
-
-    with st.expander("📦 Antigen‑negative unit search estimate (Saudi donor data)", expanded=False):
-        units_needed = st.number_input(
-            "How many RBC units do you need to provide?",
-            min_value=1, max_value=20, value=1, step=1,
-            key=f"{key_prefix}_units_needed",
-        )
-        confidence = st.slider(
-            "Target confidence to find at least that many units",
-            min_value=0.50, max_value=0.99, value=0.95, step=0.01,
-            key=f"{key_prefix}_confidence",
-        )
-        st.caption("Assumptions: phenotype linkage handled within each system; between systems assumed independent.")
-
-        if required:
-            p, missing, breakdown = _combined_probability_negative(required)
-
-            if p <= 0.0:
-                st.error("Computed probability is zero (or not computable) for the required antigen list.")
-            else:
-                n = _min_units_to_screen(p, int(units_needed), float(confidence))
-                exp_units = (1.0 / p) if p > 0 else None
-
-                st.markdown("- **Required antigen‑negative**: " + ", ".join([f"{a}−" for a in required]))
-                st.markdown(f"- **Match probability per random unit**: `{p:.4f}`  (≈ {p*100:.2f}%)")
-                if exp_units is not None:
-                    st.markdown(f"- **Expected units to screen for 1 match (mean)**: `{exp_units:.1f}`")
-                if n is None:
-                    st.warning("Probability is extremely low; estimator cannot find a practical screening number within the set limit.")
-                else:
-                    st.success(f"✅ Practical start: **screen ~{n} units** to have ≥ {int(confidence*100)}% chance to obtain **≥ {units_needed}** compatible unit(s).")
-
-                st.markdown("**Per‑system probability (negative for required antigens within each system):**")
-                for sys_name, p_sys in breakdown.items():
-                    st.markdown(f"- {sys_name}: `{p_sys:.4f}`")
-
-                if missing:
-                    st.warning("No local frequency data in the matrix for: " + ", ".join(missing))
-
-        if preferred:
-            st.info(
-                "Anti‑M note: many services treat **M‑negative** as *preferred* (especially if reactive at 37°C/AHG), "
-                "but a unit compatible by full AHG crossmatch may be acceptable per clinical context."
-            )
-
-def not_excluded_antigen_negative_notice(antigens: list) -> str:
-    """
-    Shown when an antibody is NOT EXCLUDED (i.e., still possible).
-    The note must disappear automatically once the antibody becomes excluded by additional cells.
-    """
-    if not antigens:
-        return ""
-
-    uniq = []
-    seen = set()
-    for ag in antigens:
-        if not ag or ag in IGNORED_AGS:
-            continue
-        if ag not in seen:
-            seen.add(ag)
-            uniq.append(ag)
-
-    if not uniq:
-        return ""
-
-    bullets = []
-    for ag in uniq:
-        if ag.upper() == "M":
-            bullets.append(
-                "<li><b>Anti-M (not excluded)</b>: <b>Prefer M-negative</b> units; "
-                "if only cold-reactive and M-negative units are not readily available, "
-                "<b>AHG-compatible / prewarmed crossmatch-compatible</b> units may be acceptable per local policy.</li>"
-            )
-        else:
-            bullets.append(
-                f"<li><b>Anti-{ag} (not excluded)</b>: until excluded, select <b>{ag}-negative</b> RBC units (or follow local policy).</li>"
-            )
-
-    html = f"""
-    <div class="ba-box ba-border-warn" style="background:rgba(255, 250, 230, 0.92);">
-      <div style="font-weight:850; font-size:1.0rem; margin-bottom:.25rem;">⚠️ Not excluded — treat as potentially significant</div>
-      <div style="font-size:.92rem; margin-bottom:.4rem; opacity:.95;">
-        These antibodies are <b>not excluded</b>. If transfusion is required <b>before exclusion</b>, consider antigen-negative selection as below.
-      </div>
-      <ul style="margin:0 0 0 1.1rem; padding:0;">
-        {''.join(bullets)}
-      </ul>
-    </div>
-    """
-    return html
-
-
 
 def anti_g_alert_html(strong: bool = False) -> str:
     box = "clinical-danger" if strong else "clinical-alert"
@@ -2915,14 +2567,8 @@ else:
     
                     if confirmed:
                         st.markdown(patient_antigen_negative_reminder(sorted(list(confirmed)), strong=True), unsafe_allow_html=True)
-                        render_antigen_negative_unit_estimator(sorted(list(confirmed)), key_prefix='confirmed')
                     elif resolved:
                         st.markdown(patient_antigen_negative_reminder(sorted(list(resolved)), strong=False), unsafe_allow_html=True)
-                        render_antigen_negative_unit_estimator(sorted(list(resolved)), key_prefix='resolved')
-                    if other_sig_final or other_cold_final:
-                        _ne = sorted(list(set(other_sig_final + other_cold_final)))
-                        st.markdown(not_excluded_antigen_negative_notice(_ne), unsafe_allow_html=True)
-
     
                     d_present = ("D" in confirmed) or ("D" in resolved) or ("D" in needs_work)
                     c_present = ("C" in confirmed) or ("C" in resolved) or ("C" in needs_work) or ("C" in supported_bg) or ("C" in other_sig_final)
