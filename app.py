@@ -1217,7 +1217,7 @@ def build_abo_guidance(
             add(
                 "Extra (Unexpected) — Screen POSITIVE (priority)",
                 [
-                    "Antibody screen is POSITIVE — an antibody may be responsible for the unexpected reverse reaction (e.g., cold-reactive allo/autoantibody) and/or rouleaux.",
+                    "Antibody screen is POSITIVE — an antibody may be responsible for the unexpected reverse reaction (e.g., cold-reactive allo/autoantibody and/or rouleaux).",
                     "1) Rouleaux: perform saline replacement (reverse grouping).",
                     "2) Cold antibody (e.g., M, P1): perform pre-warming technique (37°C).",
                     "Proceed with antibody investigation/identification as indicated, then re-interpret ABO after interference is addressed.",
@@ -2636,20 +2636,51 @@ else:
                     }
     
         # ----------------------------------------------------------------------
-        # Selected cells expander (unchanged)
+        # Selected cells expander (FIXED with form)
         # ----------------------------------------------------------------------
         with st.expander("➕ Add Selected Cell (From Library)"):
-            ex_id = st.text_input("ID", key="ex_id")
-            ex_res = st.selectbox("Reaction", GRADES, key="ex_res")
-            ag_cols = st.columns(6)
-            new_ph = {}
-            for i, ag in enumerate(AGS):
-                new_ph[ag] = 1 if ag_cols[i%6].checkbox(ag, key=f"ex_{ag}") else 0
-    
-            if st.button("Confirm Add", key="btn_add_ex"):
-                st.session_state.ext.append({"id": ex_id.strip() if ex_id else "", "res": normalize_grade(ex_res), "ph": new_ph})
-                st.success("Added! Re-run Analysis.")
-    
+            with st.form("add_selected_cell_form", clear_on_submit=True):
+                st.write("Enter Cell Details:")
+                c_ex1, c_ex2 = st.columns([1, 2])
+                ex_id = c_ex1.text_input("Cell ID (e.g. 3-11-5)", key="ex_id_input")
+                ex_res = c_ex2.selectbox("Reaction Grade", GRADES, key="ex_res_input")
+
+                st.markdown("---")
+                st.write("**Antigen Profile (Tick if POSITIVE):**")
+                ag_cols = st.columns(6)
+                
+                # We need to capture the checkbox states, but since they are inside a form,
+                # we can't read them immediately into a dict. We create the widgets, 
+                # then read their values only when the submit button is pressed.
+                # To make this clean, we'll store the widget objects or keys? 
+                # Actually, in Streamlit forms, we just create them. 
+                # The tricky part is reading 26 checkboxes without clutter.
+                
+                # Let's use a dictionary to store the keys we assign
+                checkbox_keys = {}
+                for i, ag in enumerate(AGS):
+                    checkbox_keys[ag] = f"new_ex_{ag}"
+                    ag_cols[i % 6].checkbox(ag, key=checkbox_keys[ag])
+
+                submitted = st.form_submit_button("➕ Confirm & Add Cell")
+
+                if submitted:
+                    if not ex_id:
+                        st.error("⚠️ Please enter a Cell ID.")
+                    else:
+                        # Build the phenotype dictionary from session state using the keys
+                        final_ph = {}
+                        for ag in AGS:
+                            # st.session_state[key] holds the True/False value after submit
+                            final_ph[ag] = 1 if st.session_state.get(checkbox_keys[ag], False) else 0
+                        
+                        st.session_state.ext.append({
+                            "id": ex_id.strip(),
+                            "res": normalize_grade(ex_res),
+                            "ph": final_ph
+                        })
+                        st.success(f"Cell '{ex_id}' added successfully! Re-run Analysis to use it.")
+
         if st.session_state.ext:
             st.table(pd.DataFrame(st.session_state.ext)[["id","res"]])
     
