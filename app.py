@@ -15,7 +15,7 @@ from typing import Dict, Any, List, Tuple, Optional
 # =============================================================================
 def _gh_get_cfg():
     token = st.secrets.get("GITHUB_TOKEN", None)
-    repo  = st.secrets.get("GITHUB_REPO", None)   # e.g. "Haitham526/tabuk-blood-bank"
+    repo  = st.secrets.get("GITHUB_REPO", None)
     branch = st.secrets.get("GITHUB_BRANCH", "main")
     return token, repo, branch
 
@@ -26,9 +26,6 @@ def _gh_headers(token: str):
     }
 
 def github_get_file(path_in_repo: str) -> Tuple[Optional[str], Optional[str]]:
-    """
-    Returns (content_text, sha) or (None, None) if not found.
-    """
     token, repo, branch = _gh_get_cfg()
     if not token or not repo:
         raise RuntimeError("Missing Streamlit Secrets: GITHUB_TOKEN / GITHUB_REPO")
@@ -95,7 +92,7 @@ def github_upsert_file(path_in_repo: str, content_text: str, commit_message: str
         raise RuntimeError(f"GitHub PUT error {w.status_code}: {w.text}")
 
 # =============================================================================
-# 0.1) Local config files (panel/screen/lots) - still local + publish to GitHub
+# 0.1) Local config files (panel/screen/lots)
 # =============================================================================
 def load_csv_if_exists(local_path: str, default_df: pd.DataFrame) -> pd.DataFrame:
     p = Path(local_path)
@@ -116,11 +113,11 @@ def load_json_if_exists(local_path: str, default_obj: dict) -> dict:
     return default_obj
 
 # =============================================================================
-# 0.2) HISTORY ENGINE (GitHub, scalable per-patient directory)
+# 0.2) HISTORY ENGINE
 # =============================================================================
-HISTORY_ROOT = "data/history"     # repo path
-HISTORY_DUP_WINDOW_MIN = 10       # ignore exact duplicates within this window
-HISTORY_MAX_PER_PATIENT_INDEX = 5000  # safety cap (per MRN index file)
+HISTORY_ROOT = "data/history"
+HISTORY_DUP_WINDOW_MIN = 10
+HISTORY_MAX_PER_PATIENT_INDEX = 5000
 
 def _safe_str(x):
     return "" if x is None else str(x).strip()
@@ -161,7 +158,6 @@ def _read_patient_index(mrn: str) -> List[dict]:
             rows.append(json.loads(line))
         except Exception:
             continue
-    # sort newest first if saved_at exists
     rows2 = []
     for r in rows:
         dt = _parse_dt(r.get("saved_at", ""))
@@ -173,7 +169,6 @@ def _read_patient_index(mrn: str) -> List[dict]:
     return rows2
 
 def _write_patient_index(mrn: str, rows: List[dict]):
-    # keep only most recent N
     rows2 = []
     for r in rows:
         dt = _parse_dt(r.get("saved_at", ""))
@@ -189,17 +184,9 @@ def _write_patient_index(mrn: str, rows: List[dict]):
     github_upsert_file(_index_path(mrn), content, f"Update history index for {mrn}")
 
 def save_case_to_github(record: dict) -> Tuple[bool, str]:
-    """
-    record: full record dict with keys:
-      - mrn, case_id, saved_at, fingerprint, summary_json, etc
-    Saves:
-      - case JSON file under data/history/<mrn>/<case_id>.json
-      - updates per-patient index.jsonl
-    """
     mrn = _safe_str(record.get("mrn", "")) or "NO_MRN"
     case_id = _safe_str(record.get("case_id", "")) or f"{mrn}_{_now_ts()}".replace(" ", "_").replace(":", "-")
 
-    # Duplicate check: load patient index, compare fingerprint within time window
     try:
         idx = _read_patient_index(mrn)
     except Exception as e:
@@ -207,14 +194,12 @@ def save_case_to_github(record: dict) -> Tuple[bool, str]:
 
     fp = _safe_str(record.get("fingerprint", ""))
     if fp and idx:
-        # find any matching fp; if found within window, do not save
-        for r in idx[:30]:  # recent check only
+        for r in idx[:30]:
             if _safe_str(r.get("fingerprint","")) == fp:
                 last_dt = _parse_dt(r.get("saved_at",""))
                 if last_dt and (datetime.now() - last_dt) <= timedelta(minutes=HISTORY_DUP_WINDOW_MIN):
                     return (False, f"Duplicate detected: identical record already saved within last {HISTORY_DUP_WINDOW_MIN} minutes.")
 
-    # Save full case file
     payload = None
     try:
         payload = json.loads(record.get("summary_json","{}"))
@@ -230,7 +215,6 @@ def save_case_to_github(record: dict) -> Tuple[bool, str]:
     except Exception as e:
         return (False, f"Case save failed: {e}")
 
-    # Update index row (small)
     index_row = {
         "case_id": case_id,
         "saved_at": _safe_str(record.get("saved_at","")),
@@ -269,7 +253,6 @@ def load_history_index_as_df(mrn: str) -> pd.DataFrame:
             "ac_res","recent_tx","all_rx","case_id"
         ])
     df = pd.DataFrame(rows)
-    # guarantee columns
     wanted = [
         "saved_at","run_dt","tech","sex","age_y","age_m","age_d",
         "conclusion_short","abo_final","rhd_final","abo_discrepancy",
@@ -299,50 +282,24 @@ def load_case_payload(mrn: str, case_id: str) -> Optional[dict]:
 # =============================================================================
 st.set_page_config(page_title="MCH Tabuk - Serology Expert", layout="wide", page_icon="🩸")
 
-# ------------------------------
-# UI Theme (expander headers)
-# ------------------------------
 if "ui_theme" not in st.session_state:
-    # Default theme (recommended)
     st.session_state.ui_theme = "Burgundy / White"
 
 def _get_theme_vars(name: str) -> dict:
     name = (name or "").strip().lower()
-
-    # Navy / Deep Blue
     if name.startswith("navy"):
         return {
-            # Section (expander) header colors
-            "sec_bg": "#0B1B3A",
-            "sec_bg_hover": "#112A57",
-            "sec_fg": "#B9F5FF",
-            "sec_border": "rgba(11, 27, 58, 0.35)",
-            "sec_shadow": "0 6px 16px rgba(11, 27, 58, 0.10)",
-            # App header colors
-            "hdr_bg": "#08162F",
-            "hdr_title": "#B9F5FF",
-            "hdr_sub": "#FFFFFF",
-            "hdr_tag": "#D7F9FF",
-            "hdr_border": "rgba(185, 245, 255, 0.35)",
+            "sec_bg": "#0B1B3A", "sec_bg_hover": "#112A57", "sec_fg": "#B9F5FF",
+            "sec_border": "rgba(11, 27, 58, 0.35)", "sec_shadow": "0 6px 16px rgba(11, 27, 58, 0.10)",
+            "hdr_bg": "#08162F", "hdr_title": "#B9F5FF", "hdr_sub": "#FFFFFF", "hdr_tag": "#D7F9FF", "hdr_border": "rgba(185, 245, 255, 0.35)",
         }
-
-    # Burgundy / Wine (default)
     return {
-        "sec_bg": "#5A0F1A",
-        "sec_bg_hover": "#721425",
-        "sec_fg": "#FFFFFF",
-        "sec_border": "rgba(90, 15, 26, 0.30)",
-        "sec_shadow": "0 6px 16px rgba(90, 15, 26, 0.10)",
-        "hdr_bg": "#4A0B14",
-        "hdr_title": "#FFFFFF",
-        "hdr_sub": "#F6F1F2",
-        "hdr_tag": "#FFF3D6",
-        "hdr_border": "rgba(255, 243, 214, 0.35)",
+        "sec_bg": "#5A0F1A", "sec_bg_hover": "#721425", "sec_fg": "#FFFFFF",
+        "sec_border": "rgba(90, 15, 26, 0.30)", "sec_shadow": "0 6px 16px rgba(90, 15, 26, 0.10)",
+        "hdr_bg": "#4A0B14", "hdr_title": "#FFFFFF", "hdr_sub": "#F6F1F2", "hdr_tag": "#FFF3D6", "hdr_border": "rgba(255, 243, 214, 0.35)",
     }
 
-
 THEME_VARS = _get_theme_vars(st.session_state.ui_theme)
-
 
 st.markdown("""
 <style>
@@ -810,7 +767,7 @@ def suggest_selected_cells(target: str, other_set: list):
 def enzyme_hint_if_needed(targets_needing_help: list):
     hits = [x for x in targets_needing_help if x in ENZYME_DESTROYED]
     if hits:
-        return f"Enzyme option may help (destroys/weakens: {', '.join(hits)}). Use only per SOP and interpret carefully."
+        return f"Enzyme-treated cells can be considered. (Enzymes destroy: {', '.join(hits)}; use to eliminate interference)."
     return None
 
 def discriminating_cells_for(target: str, active_not_excluded: set, cells: list):
@@ -2636,9 +2593,10 @@ else:
                     }
     
         # ----------------------------------------------------------------------
-        # Selected cells expander (unchanged)
+        # Selected cells expander (FIXED with form)
         # ----------------------------------------------------------------------
         with st.expander("➕ Add Selected Cell (From Library)"):
+            # Form to prevent closing
             with st.form("add_selected_cell_form", clear_on_submit=True):
                 st.write("Enter Cell Details:")
                 c_ex1, c_ex2 = st.columns([1, 2])
@@ -2646,7 +2604,7 @@ else:
                 ex_res = c_ex2.selectbox("Reaction Grade", GRADES, key="ex_res_input")
 
                 st.markdown("---")
-                st.write("**Antigen Profile (Tick if POSITIVE):**")
+                st.markdown("**Antigen Profile:** (Please tick all POSITIVE antigens)")
                 ag_cols = st.columns(6)
                 checkbox_keys = {}
                 for i, ag in enumerate(AGS):
@@ -2668,7 +2626,8 @@ else:
                             "res": normalize_grade(ex_res),
                             "ph": final_ph
                         })
-                        st.success(f"Cell '{ex_id}' added! Analysis updating...")
+                        st.success(f"Cell '{ex_id}' added!")
+                        # Force Rerun to update analysis immediately
                         if st.session_state.analysis_ready:
                             st.rerun()
     
