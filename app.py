@@ -2638,7 +2638,8 @@ else:
         # ----------------------------------------------------------------------
         # Selected cells expander (FIXED with form)
         # ----------------------------------------------------------------------
-        with st.expander("➕ Add Selected Cell (From Library)"):
+        with st.expander("➕ Add Selected Cell (From Library)", expanded=True):
+            # Form to prevent closing
             with st.form("add_selected_cell_form", clear_on_submit=False):
                 st.write("Enter Cell Details:")
                 c_ex1, c_ex2 = st.columns([1, 2])
