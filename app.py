@@ -620,6 +620,9 @@ if "analysis_ready" not in st.session_state:
 if "analysis_payload" not in st.session_state:
     st.session_state.analysis_payload = None
 
+if "selcell_added" not in st.session_state:
+    st.session_state.selcell_added = False
+
 # =============================================================================
 # 4) HELPERS / ENGINE
 # =============================================================================
@@ -810,7 +813,7 @@ def suggest_selected_cells(target: str, other_set: list):
 def enzyme_hint_if_needed(targets_needing_help: list):
     hits = [x for x in targets_needing_help if x in ENZYME_DESTROYED]
     if hits:
-        return f"Enzyme treated cells can be considered (Enzymes destroy: {', '.join(hits)}; use to eliminate interference)."
+        return f"Enzyme option may help (destroys/weakens: {', '.join(hits)}). Use only per SOP and interpret carefully."
     return None
 
 def discriminating_cells_for(target: str, active_not_excluded: set, cells: list):
@@ -1217,7 +1220,7 @@ def build_abo_guidance(
             add(
                 "Extra (Unexpected) — Screen POSITIVE (priority)",
                 [
-                    "Antibody screen is POSITIVE — an antibody may be responsible for the unexpected reverse reaction (e.g., cold-reactive allo/autoantibody and/or rouleaux).",
+                    "Antibody screen is POSITIVE — an antibody may be responsible for the unexpected reverse reaction (e.g., cold-reactive allo/autoantibody) and/or rouleaux.",
                     "1) Rouleaux: perform saline replacement (reverse grouping).",
                     "2) Cold antibody (e.g., M, P1): perform pre-warming technique (37°C).",
                     "Proceed with antibody investigation/identification as indicated, then re-interpret ABO after interference is addressed.",
@@ -1867,6 +1870,15 @@ else:
     ls_txt = st.session_state.lot_s if st.session_state.lot_s else "⚠️ REQUIRED"
     st.markdown(f"<div class='lot-bar'><span>ID Panel Lot: {lp_txt}</span> | <span>Screen Lot: {ls_txt}</span></div>",
                 unsafe_allow_html=True)
+    # If a selected cell was added, refresh feedback (the rerun is triggered on add)
+    if st.session_state.get("selcell_added", False):
+        try:
+            st.toast("✅ Selected cell added — interpretation refreshed.")
+        except Exception:
+            st.success("✅ Selected cell added — interpretation refreshed.")
+        st.session_state.selcell_added = False
+
+
 
     # ----------------------------------------------------------------------
     # Demographics row (same line: Sex + Age Y/M/D + Tech)
@@ -2636,44 +2648,24 @@ else:
                     }
     
         # ----------------------------------------------------------------------
-        # Selected cells expander (FIXED with form)
+        # Selected cells expander (unchanged)
         # ----------------------------------------------------------------------
         with st.expander("➕ Add Selected Cell (From Library)"):
-            with st.form("add_selected_cell_form", clear_on_submit=False):
-                st.write("Enter Cell Details:")
-                c_ex1, c_ex2 = st.columns([1, 2])
-                ex_id = c_ex1.text_input("Cell ID (e.g. 3-11-5)", key="ex_id_input")
-                ex_res = c_ex2.selectbox("Reaction Grade", GRADES, key="ex_res_input")
-
-                st.markdown("---")
-                st.write("**Antigen Profile (Tick if POSITIVE):**")
-                
-                # Checkboxes inside form do not trigger rerun
-                ag_cols = st.columns(6)
-                checkbox_vals = {}
-                for i, ag in enumerate(AGS):
-                    checkbox_vals[ag] = ag_cols[i % 6].checkbox(ag, key=f"new_ex_{ag}")
-
-                submitted = st.form_submit_button("➕ Confirm & Add Cell")
-
-                if submitted:
-                    if not ex_id:
-                        st.error("⚠️ Please enter a Cell ID.")
-                    else:
-                        final_ph = {}
-                        for ag in AGS:
-                            # Read the value from the form widget
-                            final_ph[ag] = 1 if checkbox_vals[ag] else 0
-                        
-                        st.session_state.ext.append({
-                            "id": ex_id.strip(),
-                            "res": normalize_grade(ex_res),
-                            "ph": final_ph
-                        })
-                        st.success(f"Cell '{ex_id}' added successfully!")
-                        # Force update logic immediately
-                        st.session_state.analysis_ready = True
-                        st.rerun()
+            ex_id = st.text_input("ID", key="ex_id")
+            ex_res = st.selectbox("Reaction", GRADES, key="ex_res")
+            ag_cols = st.columns(6)
+            new_ph = {}
+            for i, ag in enumerate(AGS):
+                new_ph[ag] = 1 if ag_cols[i%6].checkbox(ag, key=f"ex_{ag}") else 0
+    
+            if st.button("Confirm Add", key="btn_add_ex"):
+                st.session_state.ext.append({"id": ex_id.strip() if ex_id else "", "res": normalize_grade(ex_res), "ph": new_ph})
+                st.session_state.selcell_added = True
+                # Force immediate refresh so the new selected cell is included in the interpretation.
+                try:
+                    st.rerun()
+                except Exception:
+                    st.experimental_rerun()
     
         if st.session_state.ext:
             st.table(pd.DataFrame(st.session_state.ext)[["id","res"]])
