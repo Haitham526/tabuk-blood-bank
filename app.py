@@ -15,7 +15,7 @@ from typing import Dict, Any, List, Tuple, Optional
 # =============================================================================
 def _gh_get_cfg():
     token = st.secrets.get("GITHUB_TOKEN", None)
-    repo  = st.secrets.get("GITHUB_REPO", None)   # e.g. "Haitham526/tabuk-blood-bank"
+    repo  = st.secrets.get("GITHUB_REPO", None)
     branch = st.secrets.get("GITHUB_BRANCH", "main")
     return token, repo, branch
 
@@ -409,7 +409,7 @@ if "analysis_ready" not in st.session_state: st.session_state.analysis_ready = F
 if "analysis_payload" not in st.session_state: st.session_state.analysis_payload = None
 
 # =============================================================================
-# 4) HELPERS
+# 4) HELPERS (ENGINE)
 # =============================================================================
 def normalize_grade(val) -> int:
     s = str(val).lower().strip()
@@ -462,7 +462,6 @@ def rule_out(in_p: dict, in_s: dict, extras: list):
             ph = c["ph"]
             for ag in AGS:
                 if ag in IGNORED_AGS: continue
-                # STANDARD RULE: Exclude only if homozygous for dosage antigens
                 if ph_has(ph, ag) and is_homozygous(ph, ag):
                     ruled_out.add(ag)
     return ruled_out
@@ -542,20 +541,23 @@ def suggest_selected_cells(target: str, other_set: list):
     for i in range(11):
         ph = st.session_state.panel11_df.iloc[i]
         if ok(ph):
-            note = "Homozygous preferred" if (target in DOSAGE and not is_homozygous(ph, target)) else "OK"
+            note = "OK"
+            if target in DOSAGE:
+                note = "Homozygous preferred" if is_homozygous(ph, target) else "Heterozygous (dosage caution)"
             out.append((f"Panel #{i+1}", note))
     sc_lbls = ["I","II","III"]
     for i in range(3):
         ph = st.session_state.screen3_df.iloc[i]
         if ok(ph):
-            note = "Homozygous preferred" if (target in DOSAGE and not is_homozygous(ph, target)) else "OK"
+            note = "OK"
+            if target in DOSAGE:
+                note = "Homozygous preferred" if is_homozygous(ph, target) else "Heterozygous (dosage caution)"
             out.append((f"Screen {sc_lbls[i]}", note))
     return out
 
 def enzyme_hint_if_needed(targets_needing_help: list):
     hits = [x for x in targets_needing_help if x in ENZYME_DESTROYED]
     if hits:
-        # User requested specific phrasing regarding solving interference
         return f"Enzyme-treated cells can be considered. (Enzymes destroy: {', '.join(hits)}; use to eliminate interference)."
     return None
 
@@ -592,7 +594,7 @@ def patient_antigen_negative_reminder(antibodies: list, strong: bool = True) -> 
     if not uniq: return ""
     title = "✅ Final confirmation step (Patient antigen check)" if strong else "⚠️ Before final reporting (Patient antigen check)"
     box_class = "clinical-danger" if strong else "clinical-alert"
-    intro = "Confirm the patient is <b>ANTIGEN-NEGATIVE</b> for the corresponding antigen(s)."
+    intro = "Confirm the patient is <b>ANTIGEN-NEGATIVE</b> for the corresponding antigen(s) to support the antibody identification."
     bullets = "".join([f"<li>Anti-{ag} → verify patient is <b>{ag}-negative</b>.</li>" for ag in uniq])
     return f"<div class='{box_class}'><b>{title}</b><br>{intro}<ul style='margin-top:6px;'>{bullets}</ul></div>"
 
