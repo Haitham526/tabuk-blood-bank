@@ -615,13 +615,18 @@ if "lot_s" not in st.session_state:
 if "ext" not in st.session_state:
     st.session_state.ext = []
 
+# Pending selected cell (applied BEFORE analysis so it affects interpretation immediately)
+if "pending_selected_cell" not in st.session_state:
+    st.session_state.pending_selected_cell = None
+if st.session_state.pending_selected_cell is not None:
+    st.session_state.ext.append(st.session_state.pending_selected_cell)
+    st.session_state.pending_selected_cell = None
+
+
 if "analysis_ready" not in st.session_state:
     st.session_state.analysis_ready = False
 if "analysis_payload" not in st.session_state:
     st.session_state.analysis_payload = None
-
-if "selcell_added" not in st.session_state:
-    st.session_state.selcell_added = False
 
 # =============================================================================
 # 4) HELPERS / ENGINE
@@ -1870,15 +1875,6 @@ else:
     ls_txt = st.session_state.lot_s if st.session_state.lot_s else "⚠️ REQUIRED"
     st.markdown(f"<div class='lot-bar'><span>ID Panel Lot: {lp_txt}</span> | <span>Screen Lot: {ls_txt}</span></div>",
                 unsafe_allow_html=True)
-    # If a selected cell was added, refresh feedback (the rerun is triggered on add)
-    if st.session_state.get("selcell_added", False):
-        try:
-            st.toast("✅ Selected cell added — interpretation refreshed.")
-        except Exception:
-            st.success("✅ Selected cell added — interpretation refreshed.")
-        st.session_state.selcell_added = False
-
-
 
     # ----------------------------------------------------------------------
     # Demographics row (same line: Sex + Age Y/M/D + Tech)
@@ -2659,13 +2655,12 @@ else:
                 new_ph[ag] = 1 if ag_cols[i%6].checkbox(ag, key=f"ex_{ag}") else 0
     
             if st.button("Confirm Add", key="btn_add_ex"):
-                st.session_state.ext.append({"id": ex_id.strip() if ex_id else "", "res": normalize_grade(ex_res), "ph": new_ph})
-                st.session_state.selcell_added = True
-                # Force immediate refresh so the new selected cell is included in the interpretation.
-                try:
-                    st.rerun()
-                except Exception:
-                    st.experimental_rerun()
+                # Queue the cell then rerun so analysis calculations (which run ABOVE this expander)
+                # will include the new selected cell immediately on the next run.
+                cell_obj = {"id": ex_id.strip() if ex_id else "", "res": normalize_grade(ex_res), "ph": new_ph}
+                st.session_state.pending_selected_cell = cell_obj
+                st.toast("Selected cell added — updating interpretation…")
+                st.rerun()
     
         if st.session_state.ext:
             st.table(pd.DataFrame(st.session_state.ext)[["id","res"]])
