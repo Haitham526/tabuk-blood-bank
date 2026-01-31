@@ -2638,8 +2638,7 @@ else:
         # ----------------------------------------------------------------------
         # Selected cells expander (FIXED with form)
         # ----------------------------------------------------------------------
-        with st.expander("➕ Add Selected Cell (From Library)", expanded=True):
-            # Form to prevent closing
+        with st.expander("➕ Add Selected Cell (From Library)"):
             with st.form("add_selected_cell_form", clear_on_submit=False):
                 st.write("Enter Cell Details:")
                 c_ex1, c_ex2 = st.columns([1, 2])
@@ -2647,12 +2646,13 @@ else:
                 ex_res = c_ex2.selectbox("Reaction Grade", GRADES, key="ex_res_input")
 
                 st.markdown("---")
-                st.markdown("**Antigen Profile:** (Please tick all POSITIVE antigens)")
+                st.write("**Antigen Profile (Tick if POSITIVE):**")
+                
+                # Checkboxes inside form do not trigger rerun
                 ag_cols = st.columns(6)
-                checkbox_keys = {}
+                checkbox_vals = {}
                 for i, ag in enumerate(AGS):
-                    checkbox_keys[ag] = f"new_ex_{ag}"
-                    ag_cols[i % 6].checkbox(ag, key=checkbox_keys[ag])
+                    checkbox_vals[ag] = ag_cols[i % 6].checkbox(ag, key=f"new_ex_{ag}")
 
                 submitted = st.form_submit_button("➕ Confirm & Add Cell")
 
@@ -2662,15 +2662,15 @@ else:
                     else:
                         final_ph = {}
                         for ag in AGS:
-                            final_ph[ag] = 1 if st.session_state.get(checkbox_keys[ag], False) else 0
+                            # Read the value from the form widget
+                            final_ph[ag] = 1 if checkbox_vals[ag] else 0
                         
                         st.session_state.ext.append({
                             "id": ex_id.strip(),
                             "res": normalize_grade(ex_res),
                             "ph": final_ph
                         })
-                        st.success(f"Cell '{ex_id}' added!")
-                        
+                        st.success(f"Cell '{ex_id}' added successfully!")
                         # Force update logic immediately
                         st.session_state.analysis_ready = True
                         st.rerun()
