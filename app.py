@@ -813,27 +813,6 @@ def enzyme_hint_if_needed(targets_needing_help: list):
         return f"Enzyme option may help (destroys/weakens: {', '.join(hits)}). Use only per SOP and interpret carefully."
     return None
 
-ENZYME_HELP_TARGETS = ["D","C","c","E","e","K","k","Jka","Jkb"]
-
-def enzyme_interference_hint(unresolved_targets: list, active_antibodies: set):
-    """Suggest enzyme-treated cells when unresolved (e.g., K) may be masked by concurrent enzyme-sensitive specificities.
-    We only suggest this when at least one ENZYME_DESTROYED specificity is present AND the unresolved target is enzyme-resistant.
-    """
-    if not unresolved_targets:
-        return None
-    sensitive_present = sorted([x for x in active_antibodies if x in ENZYME_DESTROYED])
-    if not sensitive_present:
-        return None
-    resistant_unresolved = [x for x in unresolved_targets if x in ENZYME_HELP_TARGETS and x not in ENZYME_DESTROYED]
-    if not resistant_unresolved:
-        return None
-    return (
-        f"Consider an enzyme-treated panel/selected cell approach to help clarify "
-        f"{', '.join(resistant_unresolved)}" +
-        f" when concurrent enzyme-sensitive specificity is present ({', '.join(sensitive_present)}). " +
-        "Enzymes (e.g., papain/ficin) typically destroy/weakens M, N, S/s and Fya/Fyb, which may remove masking reactivity. Use only per SOP and interpret carefully."
-    )
-
 def discriminating_cells_for(target: str, active_not_excluded: set, cells: list):
     others = [x for x in active_not_excluded if x != target]
     disc = []
@@ -1221,6 +1200,30 @@ def build_abo_guidance(
                     "3) If still negative/weak: incubate at 4°C for 15 minutes and repeat reverse grouping. ⚠️ Must run Auto-Control."
                 ]
             )
+
+    # 3b) Less likely: weak/missing antigen in forward (apparent Group O)
+    if not is_neonate and fwd_abo == "O":
+        suspected = None
+        weak_antigen = None
+        # If reverse suggests a non-O group (one expected antibody present, the other absent),
+        # consider a weak/missing A or B antigen causing a falsely O forward type.
+        if _is_pos_any(rev_a1) and not _is_pos_any(rev_b):
+            suspected = "Group B (Anti-A present; B cells NEG)"
+            weak_antigen = "weak/missing B antigen in forward (Anti-B may be weak/negative)"
+        elif _is_pos_any(rev_b) and not _is_pos_any(rev_a1):
+            suspected = "Group A (Anti-B present; A1 cells NEG)"
+            weak_antigen = "weak/missing A antigen in forward (Anti-A may be weak/negative)"
+        if suspected:
+            add(
+                "Less likely — Weak/Missing Antigens (Forward typing may be falsely O)",
+                [
+                    f"Reverse pattern suggests {suspected}; consider {weak_antigen}.",
+                    "Repeat forward typing on washed patient cells (and a fresh specimen if available); verify reagents/QC and repeat testing.",
+                    "Use an alternative anti-A/anti-B clone and/or anti-A,B; extend incubation per manufacturer; review history (recent transfusion/HSCT, hematologic malignancy, suspected subgroup).",
+                    "If still unresolved: proceed with subgroup workup per your policy and consult transfusion medicine.",
+                ]
+            )
+
 
     # 4) Unexpected reverse reaction with A1 cells (Forward A or AB)
     if not is_neonate and fwd_abo in ("A","AB") and _is_pos_any(rev_a1):
@@ -2608,9 +2611,8 @@ else:
 
                 if targets_needing_selected:
                     st.markdown("### 🧪 Selected Cells (Only if needed to resolve interference / exclude / confirm)")
-                    active_set_now = set(resolved + needs_work + other_sig_final + list(supported_bg.keys()))
-                    missing_disc = []
                     for a in targets_needing_selected:
+                        active_set_now = set(resolved + needs_work + other_sig_final + list(supported_bg.keys()))
 
                         if a in needs_work:
                             st.warning(f"Anti-{a}: **Interference / not separable** → need {a}+ cells NEGATIVE for other active suspects.")
@@ -2627,19 +2629,10 @@ else:
                                 st.write(f"- {lab}  <span class='cell-hint'>{note}</span>", unsafe_allow_html=True)
                         else:
                             st.write("- No suitable discriminating cell in current inventory → use another lot / external selected cells.")
-                            missing_disc.append(a)
 
                     enz = enzyme_hint_if_needed(targets_needing_selected)
                     if enz:
                         st.info("💡 " + enz)
-
-                    # If no suitable discriminating cell is available for the unresolved target(s),
-                    # enzyme-treated cells may provide an alternative route by removing enzyme-sensitive specificities.
-                    if 'missing_disc' in locals() and missing_disc:
-                        active_for_enz = set(active_set_now) | set(confirmed if isinstance(confirmed, set) else [])
-                        enz2 = enzyme_interference_hint(missing_disc, active_for_enz)
-                        if enz2:
-                            st.info("🧫 " + enz2)
                 else:
                     st.success("No Selected Cells needed: all resolved antibodies are confirmed AND no clinically significant background remains unexcluded.")
 
