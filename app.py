@@ -1147,16 +1147,23 @@ def build_abo_guidance(
     ctl    = _safe_str(raw.get("ctl","Not Done"))
 
     # 0) Control / spontaneous agglutination / combined discrepancies
+    # If the group/control is positive, the entire ABO interpretation is INVALID until resolved.
+    # In this situation, do not show other discrepancy branches (weak antigens/weak antibodies/etc.),
+    # because they assume a valid test environment.
     if _is_pos_any(ctl):
         add(
-            "Control is POSITIVE / spontaneous agglutination suspected",
+            "Control is POSITIVE / panagglutination suspected (ABO test is INVALID)",
             [
-                "Do NOT interpret ABO until the cause is resolved.",
-                "Consider cold autoantibody (Auto-anti-I) or specimen interference.",
-                "Forward (resolution): wash patient RBCs multiple times with 37°C warm saline; if IgM-related agglutination persists and DTT is available, consider DTT treatment per SOP.",
-                "Reverse (resolution): perform pre-warming technique (warm serum and reagent cells separately to 37°C before mixing). If strong/persistent, consider cold auto-adsorption using the patient's washed RBCs per SOP."
+                "Do NOT interpret ABO until the cause is resolved (repeat testing is required).",
+                "Common causes: cold autoantibody (often anti-I/anti-IH), rouleaux/high-protein interference, or spontaneous agglutination from specimen issues.",
+                "Immediate actions: repeat ABO on a freshly prepared sample (or recollect if indicated) and review QC/reagent integrity.",
+                "Forward (cell-side) resolution: wash patient RBCs multiple times with 37°C warm saline and repeat forward typing at 37°C (prewarmed reagents if available).",
+                "Reverse (serum-side) resolution for cold antibody: prewarm technique (warm plasma/serum and reagent cells separately to 37°C before mixing; keep at 37°C during reading).",
+                "Reverse (serum-side) resolution for rouleaux/high protein: use saline replacement technique (remove patient plasma after spin and replace with saline, then read again).",
+                "If still unresolved: perform/confirm auto-control and DAT; consider cold screen, adsorption (auto- or alloadsorption) or reference lab workup per SOP."
             ]
         )
+        return {"general": general, "specific": specific}
 
     # 1) Forward weak/missing antigens
     if antiA in ("+1","+2") or antiB in ("+1","+2"):
